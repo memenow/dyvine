@@ -169,3 +169,27 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Conda
+/conda-env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+
+# Database
+*.db
+*.sqlite3
+
+# Downloaded content
+downloads/
