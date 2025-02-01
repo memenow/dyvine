@@ -1,0 +1,15 @@
+name: dyvine
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13.1
+  - pip>=23.0
+  - uvicorn>=0.27.0
+  - fastapi>=0.109.0
+  - pydantic>=2.6.0
+  - python-dotenv>=1.0.0
+  - aiohttp>=3.9.0
+  - httpx>=0.26.0
+  - pip:
+    - f2=0.0.1.7
