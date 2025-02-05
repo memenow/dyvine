@@ -1,134 +1,228 @@
 # Dyvine
 
-A FastAPI-based service for interacting with Douyin content, enabling post downloads and user data retrieval.
+A high-performance Python API for interacting with Douyin content.
 
-## Features
+## Overview
 
-- User Profile Retrieval
-- Post Details & Download
-- Bulk Post Downloads (Videos & Images)
-- Live Stream Information
-- API Key Authentication
-- Rate Limiting
-- CORS Support
-- Structured Logging
+Dyvine provides a high-performance API for downloading and managing Douyin content. It supports various content types including videos, images, live streams and user information.
+
+### Key Features
+
+- **Content Management**: Download videos, images, and live streams
+- **Batch Operations**: Efficient bulk content download
+- **Performance Optimized**: Asynchronous operations with connection pooling
+- **Developer Friendly**: 
+  - Type hints throughout
+  - Comprehensive documentation
+  - Detailed error messages
+  - OpenAPI/Swagger documentation
 
 ## Prerequisites
 
+- Python 3.13+
 - Conda package manager
-- Python 3.13.1
 - Git
+- 2GB+ free disk space
+- Active internet connection
+- Valid Douyin cookie (for authentication)
 
-## Installation
+## Quick Start
 
-1. Clone the repository:
+1. Set up environment:
 ```bash
+# Clone repository
 git clone https://github.com/memenow/dyvine.git
 cd dyvine
-```
 
-2. Create and activate conda environment:
-```bash
+# Create and activate conda environment
 conda env create -f environment.yml
 conda activate dyvine
-```
 
-3. Create `.env` file:
-```env
-API_KEY=your-api-key
-DOUYIN_COOKIE=your-douyin-cookie
-DOUYIN_USER_AGENT=your-user-agent
-DEBUG=False
-```
-
-## API Endpoints
-
-### Users
-- `GET /api/v1/users/{sec_user_id}/profile` - Get user profile
-- `GET /api/v1/users/{sec_user_id}/following` - Get user following list
-
-### Posts
-- `GET /api/v1/posts/{aweme_id}` - Get post details
-- `GET /api/v1/users/{sec_user_id}/posts` - Get user posts
-- `POST /api/v1/users/{sec_user_id}/download-all` - Download all user posts
-
-### Lives
-- `GET /api/v1/lives/{webcast_id}` - Get live stream information
-
-## Authentication
-
-All endpoints require an API key passed via the `X-API-Key` header:
-
-```bash
-curl -H "X-API-Key: your-api-key" http://localhost:8000/api/v1/users/123/profile
+# Install pre-commit hooks
+pre-commit install
 ```
 
 ## Configuration
 
-Key settings in `config.py`:
-- API authentication
-- CORS settings
-- Rate limiting
-- Douyin-specific configurations
-- Proxy settings
-- Download parameters
-
-## Running the Server
-
-Development:
+1. Copy the example environment file:
 ```bash
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
+cp .env.example .env
 ```
 
-Production:
-```bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000
+2. Update the `.env` file with your settings:
+```env
+# API Settings
+API_DEBUG=true
+API_HOST=0.0.0.0
+API_PORT=8000
+
+# Security Settings
+SECURITY_SECRET_KEY=your-secret-key
+SECURITY_API_KEY=your-api-key
+
+# Douyin Settings
+DOUYIN_COOKIE=your-douyin-cookie
+DOUYIN_USER_AGENT=your-user-agent
 ```
 
-## API Documentation
+## Development
+
+### Running the Server
+
+Start the development server:
+```bash
+uvicorn src.dyvine.main:app --reload
+```
+
+The API will be available at http://localhost:8000
+
+### API Documentation
 
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
+### Code Quality
+
+This project uses several tools to maintain code quality:
+
+- `black` for code formatting
+- `isort` for import sorting
+- `mypy` for type checking
+- `ruff` for linting
+- `pytest` for testing
+- `bandit` for security checks
+
+Run all checks:
+```bash
+# Format code
+black .
+isort .
+
+# Type checking
+mypy .
+
+# Linting
+ruff check .
+
+# Tests
+pytest
+```
+
+### Project Structure
+
+```
+dyvine/
+├── src/dyvine/          # Main package directory
+│   ├── core/            # Core functionality (settings, logging)
+│   ├── routers/         # API endpoints and request handling
+│   ├── schemas/         # Data models and validation
+│   └── services/        # Business logic and external integrations
+├── .env.example         # Environment variables template
+├── environment.yml      # Conda environment specification
+├── LICENSE             # Apache 2.0 license
+└── README.md           # Project documentation
+```
+
+## API Endpoints
+
+Base path: `/api/v1`
+
+### Users
+
+#### Get User Information
+```http
+GET /api/v1/users/{user_id}
+```
+
+#### Download User Content
+```http
+POST /api/v1/users/{user_id}/content:download
+```
+Query parameters:
+- `include_posts`: Whether to download user's posts (default: true)
+- `include_likes`: Whether to download user's liked posts (default: false)
+- `max_items`: Maximum number of items to download (optional)
+
+#### Check Operation Status
+```http
+GET /api/v1/users/operations/{operation_id}
+```
+
+### Posts
+
+#### Get Post Details
+```http
+GET /api/v1/posts/{post_id}
+```
+
+#### List User Posts
+```http
+GET /api/v1/posts/users/{user_id}/posts
+```
+Query parameters:
+- `max_cursor`: Pagination cursor (default: 0)
+- `count`: Number of posts per page (default: 20, max: 100)
+
+#### Download User Posts
+```http
+POST /api/v1/posts/users/{user_id}/posts:download
+```
+Query parameters:
+- `max_cursor`: Starting pagination cursor (default: 0)
+
+### Livestreams
+
+#### Download Active Livestream
+```http
+POST /api/v1/livestreams/users/{user_id}/stream:download
+```
+Body parameters:
+- `output_path`: Custom save path (optional)
+
+#### Check Download Status
+```http
+GET /api/v1/livestreams/operations/{operation_id}
+```
+
 ## Error Handling
 
-The API uses standard HTTP status codes:
-- 200: Success
-- 400: Bad Request
-- 401: Unauthorized
-- 404: Not Found
-- 500: Internal Server Error
+The API implements a comprehensive error handling system:
 
-## Development Setup
+### Exception Types
+- `PostNotFoundError`: Post retrieval failures
+- `UserNotFoundError`: User lookup failures
+- `DownloadError`: Content download issues
+- `PostServiceError`: General service errors
 
-### Using Conda
+### Error Responses
+All errors return a structured JSON response containing:
+- HTTP status code
+- Detailed error message
+- Error type classification
+- Correlation ID for tracking
+- Stack trace (in development mode)
 
-You can update the environment when dependencies change:
-```bash
-conda env update -f environment.yml
-```
+## Monitoring
 
-To remove the environment:
-```bash
-conda deactivate
-conda env remove -n dyvine
-```
+### Logging
+- Structured JSON logging for machine readability
+- Request correlation tracking
+- Automatic log rotation and archival
+- Development/production formatting
+- Request/response details
+- Performance metrics
 
-To export your current environment:
-```bash
-conda env export > environment.yml
-```
+### Health Monitoring
+The `/health` endpoint provides real-time system metrics:
+- Application status and version
+- System uptime
+- Memory usage and allocation
+- CPU utilization
+- Disk usage
+- Request statistics
 
-### Environment Variables
-
-Required environment variables in `.env`:
-```env
-API_KEY=your-api-key
-DOUYIN_COOKIE=your-douyin-cookie
-DOUYIN_USER_AGENT=your-user-agent
-DEBUG=False
-```
+Logs and metrics are stored in the `logs/` directory with daily rotation.
 
 ## License
 
-This project is licensed under the Apache 2.0 License. For more details, please refer to the [ LICENSE ](LICENSE) file.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
