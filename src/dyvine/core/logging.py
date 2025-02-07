@@ -15,35 +15,17 @@ import sys
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, AsyncGenerator
+from contextlib import asynccontextmanager
+from time import perf_counter
 
 from .settings import settings
 
 class JSONFormatter(logging.Formatter):
-    """JSON formatter for structured logging.
-
-    This formatter converts log records into JSON objects containing the
-    following information:
-    - Timestamp (in ISO format)
-    - Log level
-    - Logger name
-    - Message
-    - Module and function
-    - Line number
-    - Exception details (if present)
-    - Correlation ID (if present)
-    - Additional context (if present)
-    """
+    """JSON formatter for structured logging."""
     
     def format(self, record: logging.LogRecord) -> str:
-        """Format a log record as a JSON string.
-
-        Args:
-            record (logging.LogRecord): Log record to format.
-
-        Returns:
-            str: JSON-formatted log string.
-        """
+        """Format a log record as a JSON string."""
         log_object: Dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created).isoformat(),
             "level": record.levelname,
@@ -56,10 +38,12 @@ class JSONFormatter(logging.Formatter):
         
         # Add exception info if present
         if record.exc_info:
+            exc_type = record.exc_info[0]
+            exc_value = record.exc_info[1]
             log_object["exception"] = {
-                "type": record.exc_info[0].__name__,
-                "message": str(record.exc_info[1]),
-                "traceback": self.formatException(record.exc_info)
+                "type": exc_type.__name__ if exc_type else None,
+                "message": str(exc_value) if exc_value else None,
+                "traceback": self.formatException(record.exc_info) if record.exc_info else None
             }
             
         # Add extra fields from record
@@ -77,19 +61,7 @@ def setup_logging(
     max_bytes: int = 10 * 1024 * 1024,  # 10MB
     backup_count: int = 5
 ) -> None:
-    """Configure application logging.
-
-    This function sets up logging with both file and console handlers using
-    JSON formatting.
-
-    Args:
-        log_level (Optional[str]): Optional override for log level (defaults
-            to DEBUG if debug mode is on).
-        log_file (Optional[str]): Optional specific log file path.
-        max_bytes (int): Maximum size of the log file in bytes before
-            rotation (default: 10MB).
-        backup_count (int): Number of backup log files to keep (default: 5).
-    """
+    """Configure application logging."""
     # Determine log level
     level = (
         getattr(logging, log_level.upper())
@@ -153,70 +125,27 @@ def setup_logging(
     )
 
 class ContextLogger:
-    """Logger with persistent context and performance tracking.
-
-    This logger class provides the following features:
-    - Maintains context between log calls
-    - Tracks request correlation IDs
-    - Supports structured logging
-    - Performance metric tracking
-    - Error aggregation
-
-    Example:
-        logger = ContextLogger("api.posts")
-        logger.set_correlation_id("req-123")
-
-        # Track operation timing
-        with logger.track_time("fetch_posts"):
-            posts = await service.get_posts()
-
-        # Track memory usage
-        with logger.track_memory("process_posts"):
-            process_posts(posts)
-    """
+    """Logger with persistent context and performance tracking."""
     
     def __init__(self, name: str) -> None:
-        """Initialize the ContextLogger.
-
-        Args:
-            name (str): Logger name (typically the module name).
-        """
+        """Initialize the ContextLogger."""
         self.logger = logging.getLogger(name)
         self.correlation_id: Optional[str] = None
         self.context: Dict[str, Any] = {}
         self._timers: Dict[str, float] = {}
         
     def set_correlation_id(self, correlation_id: str) -> None:
-        """Set the correlation ID for request tracking.
-
-        Args:
-            correlation_id (str): Unique identifier for request tracking.
-        """
+        """Set the correlation ID for request tracking."""
         self.correlation_id = correlation_id
         
     def add_context(self, **kwargs: Any) -> "ContextLogger":
-        """Add persistent context to the logger.
-
-        Args:
-            **kwargs: Key-value pairs to add to the context.
-
-        Returns:
-            ContextLogger: The current instance for method chaining.
-        """
+        """Add persistent context to the logger."""
         self.context.update(kwargs)
         return self
         
-    @contextmanager
-    def track_time(self, operation: str) -> Generator[None, None, None]:
-        """Track the execution time of an operation.
-
-        Args:
-            operation (str): Name of the operation being tracked.
-
-        Example:
-            with logger.track_time("fetch_data"):
-                data = fetch_data()
-        """
+    @asynccontextmanager
+    async def track_time(self, operation: str) -> AsyncGenerator[None, None]:
+        """Track the execution time of an operation."""
         start_time = perf_counter()
         try:
             yield
@@ -230,17 +159,9 @@ class ContextLogger:
                 }
             )
             
-    @contextmanager
-    def track_memory(self, operation: str) -> Generator[None, None, None]:
-        """Track the memory usage of an operation.
-
-        Args:
-            operation (str): Name of the operation being tracked.
-
-        Example:
-            with logger.track_memory("process_data"):
-                process_data()
-        """
+    @asynccontextmanager
+    async def track_memory(self, operation: str) -> AsyncGenerator[None, None]:
+        """Track the memory usage of an operation."""
         import psutil
         process = psutil.Process()
         start_memory = process.memory_info().rss
@@ -266,15 +187,7 @@ class ContextLogger:
         exc_info: bool = False,
         **kwargs: Any
     ) -> None:
-        """Internal logging method that adds context.
-
-        Args:
-            level (int): Logging level.
-            msg (str): Log message.
-            *args: Message format arguments.
-            exc_info (bool): Whether to include exception information.
-            **kwargs: Additional logging context.
-        """
+        """Internal logging method that adds context."""
         extra = kwargs.pop("extra", {})
         
         # Add correlation ID if present

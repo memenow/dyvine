@@ -81,6 +81,95 @@ The API will be available at http://localhost:8000
 - Swagger UI: http://localhost:8000/docs
 - ReDoc: http://localhost:8000/redoc
 
+### Testing
+
+The project uses pytest for testing with a comprehensive test suite covering all major functionality.
+
+#### Test Structure
+
+```
+tests/
+├── unit/                    # Unit tests
+│   ├── core/               # Core functionality tests
+│   │   ├── test_logging.py # Logging system tests
+│   │   └── test_settings.py# Configuration tests
+│   ├── routers/            # API endpoint tests
+│   │   ├── test_livestream_router.py
+│   │   ├── test_posts_router.py
+│   │   └── test_users_router.py
+│   ├── schemas/            # Data model tests
+│   │   ├── test_livestreams.py
+│   │   ├── test_posts.py
+│   │   └── test_users.py
+│   └── services/           # Business logic tests
+│       ├── test_livestream_service.py
+│       ├── test_posts_service.py
+│       └── test_users_service.py
+└── integration/            # Integration tests
+    ├── test_api.py        # Full API flow tests
+    └── test_douyin.py     # Douyin integration tests
+```
+
+#### Running Tests
+
+Run all tests:
+```bash
+pytest
+```
+
+Run specific test categories:
+```bash
+# Run only unit tests
+pytest tests/unit/
+
+# Run specific module tests
+pytest tests/unit/core/
+pytest tests/unit/routers/
+pytest tests/unit/services/
+
+# Run with coverage report
+pytest --cov=src/dyvine
+
+# Run with verbose output
+pytest -v
+
+# Run specific test file
+pytest tests/unit/services/test_livestream_service.py
+```
+
+#### Test Features
+
+- **Async Support**: Full support for testing async functions using pytest-asyncio
+- **Fixtures**: Comprehensive fixture system for test setup and teardown
+- **Mocking**: Extensive use of unittest.mock for external dependencies
+- **Parameterization**: Test multiple scenarios efficiently
+- **Coverage**: Track test coverage with pytest-cov
+- **Error Cases**: Thorough testing of error conditions and edge cases
+
+#### Key Test Areas
+
+1. Core Functionality:
+   - Configuration loading and validation
+   - Logging system with context tracking
+   - Error handling and reporting
+
+2. API Endpoints:
+   - Request validation
+   - Response formatting
+   - Error responses
+   - Authentication/authorization
+
+3. Business Logic:
+   - Content download operations
+   - User data retrieval
+   - Stream management
+   - Error handling
+
+4. Integration:
+   - Full API workflows
+   - External service interaction
+   - Error recovery and retry logic
+
 ### Code Quality
 
 This project uses several tools to maintain code quality:
@@ -117,11 +206,112 @@ dyvine/
 │   ├── routers/         # API endpoints and request handling
 │   ├── schemas/         # Data models and validation
 │   └── services/        # Business logic and external integrations
+├── deploy/             # Deployment configurations
+│   ├── Dockerfile      # Docker image build configuration
+│   └── k8s.yaml        # Kubernetes deployment manifests
 ├── .env.example         # Environment variables template
 ├── environment.yml      # Conda environment specification
 ├── LICENSE             # Apache 2.0 license
 └── README.md           # Project documentation
 ```
+
+## Deployment
+
+### Docker
+
+1. Build the Docker image:
+```bash
+docker build -t dyvine:latest -f deploy/Dockerfile .
+```
+
+2. Run the container:
+```bash
+docker run -d \
+  --name dyvine \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  --env-file .env \
+  dyvine:latest
+```
+
+### Kubernetes
+
+The application can be deployed to a Kubernetes cluster using the provided configuration in `deploy/k8s.yaml`.
+
+1. Prerequisites:
+   - Kubernetes cluster
+   - kubectl configured to access your cluster
+   - Container registry for storing the Docker image
+
+2. Update configuration:
+   - Edit `deploy/k8s.yaml` and update:
+     ```yaml
+     # In Deployment section
+     image: your-registry/dyvine:latest  # Replace with your image repository
+
+     # In Ingress section
+     host: your-domain.com  # Replace with your domain
+     ```
+   - Base64 encode your secrets:
+     ```bash
+     echo -n "your-secret-key" | base64
+     ```
+   - Update the secrets in k8s.yaml:
+     ```yaml
+     # In Secret section
+     data:
+       SECRET_KEY: <base64-encoded-secret>
+       API_KEY: <base64-encoded-api-key>
+       DOUYIN_COOKIE: <base64-encoded-cookie>
+     ```
+
+3. Deploy to Kubernetes:
+```bash
+# Apply all resources
+kubectl apply -f deploy/k8s.yaml
+
+# Verify deployment
+kubectl get pods -l app=dyvine
+kubectl get services dyvine
+kubectl get ingress dyvine
+```
+
+4. Monitor the deployment:
+```bash
+# Check pod status
+kubectl get pods -l app=dyvine
+
+# View logs
+kubectl logs -l app=dyvine
+
+# Check service
+kubectl get svc dyvine
+```
+
+### Production Considerations
+
+1. Security:
+   - Use proper secrets management (e.g., HashiCorp Vault)
+   - Enable TLS/SSL using cert-manager
+   - Set up network policies
+   - Configure resource limits
+
+2. Monitoring:
+   - Set up Prometheus for metrics
+   - Configure logging aggregation
+   - Set up alerts for health checks
+
+3. High Availability:
+   - Use multiple replicas
+   - Configure pod disruption budgets
+   - Set up horizontal pod autoscaling
+   - Use node affinity and pod anti-affinity
+
+4. Backup:
+   - Configure persistent volume backups
+   - Set up log archival
+   - Implement disaster recovery procedures
 
 ## API Endpoints
 
