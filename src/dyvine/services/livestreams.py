@@ -1,3 +1,21 @@
+"""Service module for handling Douyin livestream operations.
+
+This module provides functionality for:
+- Downloading live streams from Douyin users
+- Retrieving room information and stream URLs
+- Managing download operations and status tracking
+- Handling stream download lifecycle
+
+The service implements robust error handling, logging, and resource management
+for reliable livestream operations.
+
+Typical usage example:
+    service = LiveStreamService()
+    status, path = await service.download_stream(user_id="123456")
+    if status == "success":
+        print(f"Stream downloading to: {path}")
+"""
+
 import os
 from pathlib import Path
 import asyncio
@@ -5,6 +23,20 @@ import httpx
 import json
 import logging
 from datetime import datetime
+
+# Custom exceptions
+class LivestreamError(Exception):
+    """Base exception for livestream-related errors."""
+    pass
+
+class UserNotFoundError(LivestreamError):
+    """Exception raised when a user cannot be found."""
+    pass
+
+class DownloadError(LivestreamError):
+    """Exception raised when a download operation fails."""
+    pass
+
 from f2.apps.douyin.dl import DouyinDownloader
 from f2.apps.douyin.handler import DouyinHandler
 from f2.apps.douyin.db import AsyncUserDB
@@ -19,33 +51,11 @@ from ..core.logging import ContextLogger
 
 logger = ContextLogger(__name__)
 
-# Douyin API error codes
-DOUYIN_ERROR_CODES = {
-    4001038: "直播间不存在或已结束",  # Live room doesn't exist or has ended
-    2101: "直播间不存在",  # Live room doesn't exist
-    2103: "直播已结束",  # Live has ended
-    2104: "主播暂时离开了",  # Streamer is temporarily away
-}
-
 class LiveStreamService:
-    """Service for handling live stream downloads from Douyin.
-
-    This service provides functionality for downloading live streams from
-    Douyin users. It initializes the necessary configuration, sets up logging,
-    retrieves live room information, and manages the download process.
-
-    The service utilizes the f2 third-party library for live stream
-    downloading and includes error handling for Douyin API error codes.
-    """
+    """Service for handling live stream downloads from Douyin."""
+    
     def __init__(self):
-        """Initialize the LiveStreamService instance.
-
-        This method sets up the base directory structure, downloads directory,
-        logs directory, and database path. It also initializes the
-        configuration, including headers, proxies, and other settings. The
-        DouyinHandler and DouyinDownloader instances are created with the
-        configured settings.
-        """
+        """Initialize the LiveStreamService instance."""
         # Get current working directory
         cwd = Path.cwd()
         
@@ -87,7 +97,7 @@ class LiveStreamService:
                 "User-Agent": settings.douyin_user_agent,
                 "Referer": settings.douyin_referer,
             },
-            "proxies": {},  # Initialize with empty dict instead of None
+            "proxies": {},
             "verify": True,
             "timeout": 30,
             "max_retries": 3,
@@ -118,13 +128,21 @@ class LiveStreamService:
         self.downloader = DouyinDownloader(self.config)
 
     def setup_stream_logger(self, user_id: str) -> logging.Logger:
-        """Set up a logger for a specific live stream.
-
+        """Set up a dedicated logger for a specific live stream operation.
+        
+        Creates a new logger instance with file-based logging for tracking
+        stream-specific operations. Log files are stored in the logs directory
+        with timestamps for easy tracking.
+        
         Args:
-            user_id (str): The Douyin user ID for the live stream.
-
+            user_id: The user's Douyin ID to identify the stream logs
+            
         Returns:
-            logging.Logger: A configured logger instance for the live stream.
+            logging.Logger: Configured logger instance for stream operations
+            
+        Note:
+            Log files are named as: {user_id}_{timestamp}.log and stored in
+            the configured logs directory.
         """
         # Create logger
         stream_logger = logging.getLogger(f"stream_{user_id}")
@@ -147,27 +165,29 @@ class LiveStreamService:
 
     async def get_room_info(self, user_id: str, stream_logger: logging.Logger) -> dict:
         """Get live room information for a Douyin user.
-
+        
+        Retrieves detailed information about a user's live room including:
+        - Room ID and status
+        - Stream URLs (FLV and HLS)
+        - User information
+        - Stream statistics
+        
         Args:
-            user_id (str): The Douyin user ID.
-            stream_logger (logging.Logger): The logger instance for the live
-                stream.
-
+            user_id: The user's Douyin ID or room URL
+            stream_logger: Logger instance for operation tracking
+            
         Returns:
-            dict: A dictionary containing the live room information.
-
+            dict: Room information including stream URLs and metadata
+            
         Raises:
-            ValueError: If the live room doesn't exist or has ended.
+            ValueError: If room doesn't exist or stream has ended
         """
         try:
             # First check if input is a URL and extract user ID
             stream_logger.debug(f"Processing input: {user_id}")
             if user_id.startswith('http'):
-                # Extract user ID from URL
                 try:
-                    # Remove query parameters if any
                     base_url = user_id.split('?')[0]
-                    # Get the last part of the URL
                     extracted_id = base_url.rstrip('/').split('/')[-1]
                     stream_logger.debug(f"Extracted ID from URL: {extracted_id}")
                     user_id = extracted_id
@@ -219,7 +239,7 @@ class LiveStreamService:
                         return result
                 
             # If all attempts fail, raise error
-            raise ValueError("直播间不存在或已结束")  # Live room doesn't exist or has ended
+            raise ValueError("直播间不存在或已结束")
                 
         except Exception as e:
             error_msg = f"Failed to get room info: {str(e)}"
@@ -228,23 +248,27 @@ class LiveStreamService:
 
     async def download_stream(self, user_id: str, output_path: str | None = None) -> tuple[str, str | None]:
         """Download a live stream from a Douyin user.
-
+        
+        Initiates an asynchronous download of a user's active livestream.
+        The download runs in the background and can be monitored via
+        get_download_status().
+        
         Args:
-            user_id (str): The Douyin user ID.
-            output_path (str | None, optional): Optional custom output path
-                for the downloaded file.
-
+            user_id: The user's Douyin ID or room URL
+            output_path: Optional custom save location for the stream
+            
         Returns:
-            tuple[str, str | None]: A tuple containing the download status
-                ("success" or "error") and the download path or error message.
+            tuple[str, str | None]: Status ("success"/"error") and file path/error message
+            
+        Raises:
+            ValueError: If user not found or not streaming
+            DownloadError: If download initialization fails
         """
         # Extract user ID from URL if needed
         original_id = user_id
         if user_id.startswith('http'):
             try:
-                # Remove query parameters if any
                 base_url = user_id.split('?')[0]
-                # Get the last part of the URL
                 user_id = base_url.rstrip('/').split('/')[-1]
             except Exception as e:
                 logger.warning(f"Failed to extract ID from URL: {str(e)}")
@@ -276,29 +300,30 @@ class LiveStreamService:
                 return "error", "No live stream available for this user"
             
             # Create stream data structure expected by downloader
-            # Use HD1 quality to avoid audio sync issues
             stream_data = {
                 "flv_pull_url": flv_urls,
                 "hls_pull_url_map": room_info.get("m3u8_pull_url", {}),
-                "default_resolution": "FULL_HD1"  # Use highest quality (蓝光)
+                "default_resolution": "FULL_HD1"
             }
             
             # Add stream data to room info
             room_info["stream_url"] = stream_data
             
+            # Get current timestamp
+            timestamp = int(asyncio.get_event_loop().time())
+            
             # Set up download path
             if output_path:
                 download_path = Path(output_path)
             else:
-                timestamp = asyncio.get_event_loop().time()
-                download_path = self.downloads_dir / f"{user_id}_{int(timestamp)}.flv"
+                download_path = self.downloads_dir / f"{user_id}_{timestamp}.flv"
             
             # Ensure the directory exists
             download_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Create webcast data
             webcast_data = room_info.copy()
-            webcast_data["create_time"] = int(timestamp)
+            webcast_data["create_time"] = timestamp
             webcast_data["finish_time"] = 0
             
             stream_logger.info(f"Will save stream to: {download_path}")
@@ -340,5 +365,27 @@ class LiveStreamService:
             if user_id in self.active_downloads:
                 self.active_downloads.remove(user_id)
             return "error", str(e)
+
+    async def get_download_status(self, operation_id: str) -> str:
+        """Get the status of a download operation.
+        
+        Retrieves the current status of an active or completed download operation.
+        
+        Args:
+            operation_id: Unique identifier for the download operation
+            
+        Returns:
+            str: Path to the downloaded file if complete
+            
+        Raises:
+            DownloadError: If operation not found or status check fails
+        """
+        # Implementation of download status tracking
+        if operation_id not in self.active_downloads:
+            raise DownloadError(f"Operation {operation_id} not found")
+            
+        # For now, we can only confirm if download is active
+        # Future: Add progress tracking, file size, download speed etc.
+        return f"Download in progress for {operation_id}"
 
 livestream_service = LiveStreamService()

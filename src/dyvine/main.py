@@ -30,7 +30,7 @@ logger = ContextLogger(__name__)
 
 # Create FastAPI application
 app = FastAPI(
-    title=settings.api_name,
+    title=settings.project_name,
     description="API for interacting with Douyin content",
     version=settings.version,
     docs_url="/docs",
@@ -213,7 +213,7 @@ async def root() -> Dict[str, str]:
         Dict[str, str]: Basic API information.
     """
     return {
-        "name": settings.api_name,
+        "name": settings.project_name,
         "version": settings.version,
         "docs": "/docs",
         "redoc": "/redoc"
