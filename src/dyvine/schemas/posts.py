@@ -11,7 +11,7 @@ All models include proper type hints and validation.
 
 from enum import Enum
 from typing import Dict, Optional, List
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, ConfigDict
 
 class PostType(str, Enum):
     """Enumeration of possible post content types.
@@ -138,25 +138,4 @@ class BulkDownloadResponse(BaseModel):
     message: Optional[str] = Field(None, description="Human-readable status message")
     error_details: Optional[str] = Field(None, description="Details of any errors encountered")
 
-    class Config:
-        """Pydantic model configuration."""
-        json_schema_extra = {
-            "example": {
-                "sec_user_id": "user123",
-                "download_path": "/downloads/user123",
-                "total_posts": 100,
-                "downloaded_count": {
-                    "video": 50,
-                    "images": 30,
-                    "mixed": 10,
-                    "live": 5,
-                    "collection": 3,
-                    "story": 2,
-                    "unknown": 0
-                },
-                "total_downloaded": 100,
-                "status": "success",
-                "message": "All posts downloaded successfully",
-                "error_details": None
-            }
-        }
+    model_config = ConfigDict()

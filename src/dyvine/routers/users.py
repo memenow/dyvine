@@ -24,8 +24,9 @@ Error Responses:
     - 500 Internal Error: For unexpected server errors
 """
 
+import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Path, Query
+from fastapi import APIRouter, HTTPException, Depends, Path, Query, Request
 from ..services.users import (
     UserService,
     UserServiceError,
@@ -38,17 +39,23 @@ from ..schemas.users import (
     UserDownloadRequest
 )
 from ..core.logging import ContextLogger
+from ..schemas.users import UserResponse
 
 router = APIRouter(prefix="/users", tags=["users"])
-logger = ContextLogger(__name__)
+logger = ContextLogger(logging.getLogger(__name__))
 
-def get_user_service() -> UserService:
-    """Creates a configured UserService instance.
+def get_user_service(request: Request) -> UserService:
+    """Retrieves the global UserService instance.
+
+    Uses the global UserService instance from the application state.
+
+    Args:
+        request: The incoming request object, used to access app state.
 
     Returns:
-        A configured UserService instance ready for use.
+        UserService: The global UserService instance.
     """
-    return UserService()
+    return request.app.state.user_service
 
 @router.get(
     "/{user_id}",
@@ -71,21 +78,20 @@ async def get_user(
         service: An instance of UserService for handling the request.
 
     Returns:
-        Detailed information about the requested user.
+        UserResponse: Detailed information about the requested user.
 
     Raises:
-        HTTPException(404): If the user is not found.
-        HTTPException(500): If an unexpected error occurs.
+        HTTPException: If the user is not found or an unexpected error occurs.
     """
     try:
         logger.info("Processing get_user request", extra={"user_id": user_id})
-        with logger.track_time("get_user"):
+        async with logger.track_time("get_user"):
             return await service.get_user_info(user_id)
-            
+
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail=str(e))
-        
+
     except Exception as e:
         logger.exception(
             "Error processing get_user request",
@@ -114,17 +120,16 @@ async def download_user_content(
 
     Args:
         user_id: The unique identifier of the user.
-        include_posts: If True, downloads user's posts.
-        include_likes: If True, downloads user's liked posts.
+        include_posts: Whether to download user's posts.
+        include_likes: Whether to download user's liked posts.
         max_items: Maximum number of items to download, or None for all.
         service: An instance of UserService for handling the request.
 
     Returns:
-        Download task information including task ID and initial status.
+        DownloadResponse: Download task information including task ID and initial status.
 
     Raises:
-        HTTPException(404): If the user is not found.
-        HTTPException(500): If the download fails or an unexpected error occurs.
+        HTTPException: If the user is not found or an unexpected error occurs.
     """
     try:
         logger.info(
@@ -136,7 +141,7 @@ async def download_user_content(
                 "max_items": max_items
             }
         )
-        with logger.track_time("download_user_content"):
+        async with logger.track_time("download_user_content"):
             return await service.start_download(
                 user_id,
                 include_posts=include_posts,
@@ -172,18 +177,17 @@ async def get_operation(
         service: An instance of UserService for handling the request.
 
     Returns:
-        Current status of the download operation including progress.
+        DownloadResponse: Current status of the download operation including progress.
 
     Raises:
-        HTTPException(404): If the operation is not found.
-        HTTPException(500): If an unexpected error occurs.
+        HTTPException: If the operation is not found or an unexpected error occurs.
     """
     try:
         logger.info(
             "Processing get_operation request",
             extra={"operation_id": operation_id}
         )
-        with logger.track_time("get_operation"):
+        async with logger.track_time("get_operation"):
             return await service.get_download_status(operation_id)
             
     except DownloadError as e:

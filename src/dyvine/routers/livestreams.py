@@ -14,23 +14,24 @@ from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from ..core.logging import ContextLogger
 from ..schemas.livestreams import LiveStreamDownloadRequest, LiveStreamDownloadResponse
 from ..services.livestreams import (
-    LiveStreamService,
+    LivestreamService,
     LivestreamError,
     UserNotFoundError,
-    DownloadError
+    DownloadError,
+    livestream_service
 )
 
 router = APIRouter(prefix="/livestreams", tags=["livestreams"])
-logger = ContextLogger(__name__)
+import logging
+logger = ContextLogger(logging.getLogger(__name__))
 
-def get_livestream_service() -> LiveStreamService:
+def get_livestream_service() -> LivestreamService:
     """Creates a configured LivestreamService instance.
-    
+
     Returns:
-        LiveStreamService: A configured service instance for handling
-        livestream operations.
+        LivestreamService: A configured service instance.
     """
-    return LiveStreamService()
+    return LivestreamService()
 
 @router.post(
     "/users/{user_id}/stream:download",
@@ -43,20 +44,20 @@ def get_livestream_service() -> LiveStreamService:
 async def download_livestream(
     user_id: str = Path(..., description="The unique identifier of the user"),
     output_path: Optional[str] = Body(None, embed=True),
-    service: LiveStreamService = Depends(get_livestream_service)
+    service: LivestreamService = Depends(get_livestream_service)
 ) -> LiveStreamDownloadResponse:
     """Downloads an active livestream from a specific user.
-    
+
     Args:
         user_id: The unique identifier of the user whose stream to download.
         output_path: Optional custom path where the stream should be saved.
         service: Injected LiveStreamService instance.
-        
+
     Returns:
         LiveStreamDownloadResponse: Contains download status and path information.
-        
+
     Raises:
-        HTTPException: If user not found (404) or download fails (500).
+        HTTPException: If user not found (404), livestream not found (404) or download fails (500).
     """
     try:
         logger.info(
@@ -69,7 +70,7 @@ async def download_livestream(
         
         async with logger.track_time("download_livestream"):
             status, path = await service.download_stream(
-                user_id=user_id,
+                url=f"https://live.douyin.com/{user_id}",
                 output_path=output_path
             )
             
@@ -115,17 +116,17 @@ async def download_livestream(
 )
 async def get_download_status(
     operation_id: str = Path(..., description="The unique identifier of the download operation"),
-    service: LiveStreamService = Depends(get_livestream_service)
+    service: LivestreamService = Depends(get_livestream_service)
 ) -> LiveStreamDownloadResponse:
     """Retrieves the status of a livestream download operation.
-    
+
     Args:
-        operation_id: The unique identifier of the download operation.
+        operation_id: The unique identifier of the operation to check.
         service: Injected LiveStreamService instance.
-        
+
     Returns:
         LiveStreamDownloadResponse: Contains operation status and download path.
-        
+
     Raises:
         HTTPException: If operation not found (404) or status check fails (500).
     """

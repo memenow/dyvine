@@ -23,7 +23,8 @@ Error Responses:
 """
 
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, Query, Path
+import logging
+from fastapi import APIRouter, Depends, HTTPException, Query, Path, Request
 from fastapi.responses import JSONResponse
 
 from ..core.logging import ContextLogger
@@ -34,52 +35,24 @@ from ..services.posts import (
     DownloadError
 )
 from ..schemas.posts import PostDetail, BulkDownloadResponse
-from ..core.settings import settings
-from f2.apps.douyin.handler import DouyinHandler
 
-logger = ContextLogger(__name__)
+logger = ContextLogger(logging.getLogger(__name__))
 
 router = APIRouter(prefix="/posts", tags=["posts"])
 
-async def get_post_service() -> PostService:
-    """Creates and configures a PostService instance.
+async def get_post_service(request: Request) -> PostService:
+    """Retrieves the global DouyinHandler instance and creates a PostService.
 
-    Configuration parameters:
-        - headers: Custom headers for API requests
-        - proxies: Network proxy settings
-        - cookie: Authentication cookie
-        - path: Download directory
-        - max_retries: Maximum retry attempts
-        - timeout: Request timeout in seconds
-        - chunk_size: Download chunk size
-        - max_tasks: Concurrent download limit
+    Uses the global DouyinHandler instance from the application state to avoid
+    creating a new handler for each request.
 
-    Creates a DouyinHandler with the current settings and initializes a
-    PostService instance. Uses environment configuration for setup.
+    Args:
+        request: The incoming request object, used to access app state.
 
     Returns:
-        A configured PostService instance ready for use.
+        PostService: A PostService instance using the global DouyinHandler.
     """
-    handler_kwargs = {
-        "headers": settings.douyin_headers,
-        "proxies": settings.douyin_proxies,
-        "mode": "all",
-        "cookie": settings.douyin_cookie,
-        "path": "downloads",
-        "max_retries": 5,
-        "timeout": 30,
-        "chunk_size": 1024 * 1024,
-        "max_tasks": 3,
-        "folderize": True,
-        "download_image": True,
-        "download_video": True,
-        "download_live": True,
-        "download_collection": True,
-        "download_story": True,
-        "naming": "{create}_{desc}",
-        "page_counts": 100
-    }
-    handler = DouyinHandler(handler_kwargs)
+    handler = request.app.state.douyin_handler
     return PostService(handler)
 
 @router.get(
@@ -99,11 +72,10 @@ async def get_post(
         service: An instance of PostService for handling the request.
 
     Returns:
-        Detailed information about the requested post.
+        PostDetail: Detailed information about the requested post.
 
     Raises:
-        HTTPException(404): If the post is not found.
-        HTTPException(500): If an unexpected error occurs.
+        HTTPException: If the post is not found or an unexpected error occurs.
     """
     try:
         logger.info("Processing get_post request", extra={"post_id": post_id})
@@ -141,11 +113,10 @@ async def list_user_posts(
         service: An instance of PostService for handling the request.
 
     Returns:
-        A list of posts from the specified user.
+        List[PostDetail]: A list of posts from the specified user.
 
     Raises:
-        HTTPException(404): If the user is not found.
-        HTTPException(500): If an unexpected error occurs.
+        HTTPException: If the user is not found or an unexpected error occurs.
     """
     try:
         logger.info(
@@ -188,11 +159,10 @@ async def download_user_posts(
         service: An instance of PostService for handling the request.
 
     Returns:
-        A response containing download operation results.
+        BulkDownloadResponse: A response containing download operation results.
 
     Raises:
-        HTTPException(404): If the user is not found.
-        HTTPException(500): If the download fails or an unexpected error occurs.
+        HTTPException: If the user is not found, the download fails, or an unexpected error occurs.
     """
     try:
         logger.info(

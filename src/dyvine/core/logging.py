@@ -60,34 +60,40 @@ def setup_logging(
     log_file: Optional[str] = None,
     max_bytes: int = 10 * 1024 * 1024,  # 10MB
     backup_count: int = 5
-) -> None:
-    """Configure application logging."""
+) -> logging.handlers.RotatingFileHandler:
+    """Configure application logging and return the file handler.
+    
+    Returns:
+        file_handler: The configured rotating file handler.
+    """
     # Determine log level
     level = (
         getattr(logging, log_level.upper())
         if log_level
         else logging.DEBUG if settings.debug else logging.INFO
     )
-    
+
     # Set up logging directory and file
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    
+
     if not log_file:
         timestamp = datetime.now().strftime("%Y-%m-%d")
         log_file = str(logs_dir / f"dyvine-{timestamp}.log")
-    
+
     # Create JSON formatter
     json_formatter = JSONFormatter()
-    
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
-    
+
     # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
+        if hasattr(handler, 'close'):
+            handler.close()
+
     # Configure rotating file handler
     file_handler = logging.handlers.RotatingFileHandler(
         log_file,
@@ -97,7 +103,7 @@ def setup_logging(
     )
     file_handler.setFormatter(json_formatter)
     root_logger.addHandler(file_handler)
-    
+
     # Configure console handler with appropriate formatting
     console_handler = logging.StreamHandler(sys.stdout)
     if settings.debug:
@@ -111,7 +117,7 @@ def setup_logging(
         # Use JSON format for production
         console_handler.setFormatter(json_formatter)
     root_logger.addHandler(console_handler)
-    
+
     # Log startup configuration
     logging.info(
         "Logging system initialized",
@@ -123,21 +129,26 @@ def setup_logging(
             "debug_mode": settings.debug
         }
     )
+    return file_handler
 
 class ContextLogger:
     """Logger with persistent context and performance tracking."""
-    
-    def __init__(self, name: str) -> None:
-        """Initialize the ContextLogger."""
-        self.logger = logging.getLogger(name)
+
+    def __init__(self, logger: logging.Logger) -> None:
+        """Initialize the ContextLogger.
+
+        Args:
+            logger: The pre-configured logger instance.
+        """
+        self.logger = logger
         self.correlation_id: Optional[str] = None
         self.context: Dict[str, Any] = {}
         self._timers: Dict[str, float] = {}
-        
+
     def set_correlation_id(self, correlation_id: str) -> None:
         """Set the correlation ID for request tracking."""
         self.correlation_id = correlation_id
-        
+
     def add_context(self, **kwargs: Any) -> "ContextLogger":
         """Add persistent context to the logger."""
         self.context.update(kwargs)
@@ -158,7 +169,7 @@ class ContextLogger:
                     "duration_ms": round(elapsed * 1000, 2)
                 }
             )
-            
+
     @asynccontextmanager
     async def track_memory(self, operation: str) -> AsyncGenerator[None, None]:
         """Track the memory usage of an operation."""

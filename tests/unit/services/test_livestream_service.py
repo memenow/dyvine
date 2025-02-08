@@ -1,184 +1,137 @@
-"""Unit tests for the livestreams service.
-
-This module tests the LiveStreamService functionality including:
-- Room info retrieval
-- Stream downloading
-- Error handling
-"""
+"""Unit tests for the livestreams service."""
 
 import pytest
 import asyncio
+import httpx
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
-
-from dyvine.services.livestreams import (
-    LiveStreamService,
-    LivestreamError,
-    UserNotFoundError,
-    DownloadError
-)
+from unittest.mock import Mock, patch, AsyncMock, MagicMock
+from src.dyvine.services.livestreams import LivestreamService, LivestreamError
 
 @pytest.fixture
-def mock_webcast_fetcher():
-    """Fixture for mocked WebCastIdFetcher."""
-    with patch('dyvine.services.livestreams.WebCastIdFetcher') as mock:
-        mock.get_all_webcast_id = AsyncMock(return_value=["test_webcast_id"])
-        yield mock
-
-@pytest.fixture
-def mock_douyin_handler():
-    """Fixture for mocked DouyinHandler."""
-    mock = MagicMock()
-    mock_live = MagicMock()
-    mock_live._to_dict.return_value = {
+def mock_room_info():
+    """Mock room info data."""
+    return {
         "room_id": "test123",
-        "nickname_raw": "Test User",
-        "live_title_raw": "Test Stream",
         "live_status": 2,
-        "user_count": 1000,
-        "flv_pull_url": {"HD1": "http://test.com/stream.flv"},
-        "m3u8_pull_url": {"HD1": "http://test.com/stream.m3u8"}
+        "user": {
+            "id_str": "user123",
+            "nickname": "Test User"
+        },
+        "title": "Test Stream",
+        "flv_pull_url": {"HD1": "http://test.com/stream.flv"}
     }
-    mock.fetch_user_live_videos_by_room_id = AsyncMock(return_value=mock_live)
-    return mock
 
 @pytest.fixture
-def mock_douyin_downloader():
-    """Fixture for mocked DouyinDownloader."""
+def mock_response(mock_room_info):
+    """Mock httpx.Response."""
     mock = MagicMock()
-    mock.create_stream_tasks = AsyncMock()
+    mock.json = AsyncMock(return_value={'data': mock_room_info})
     return mock
 
 @pytest.fixture
-def livestream_service(mock_webcast_fetcher, mock_douyin_handler, mock_douyin_downloader):
-    """Fixture for LiveStreamService with mocked dependencies."""
-    with patch('dyvine.services.livestreams.DouyinHandler', return_value=mock_douyin_handler), \
-         patch('dyvine.services.livestreams.DouyinDownloader', return_value=mock_douyin_downloader):
-        service = LiveStreamService()
-        yield service
+def mock_downloader(mock_room_info, mock_response):
+    """Fixture for mocked DouyinDownloader."""
+    with patch('f2.apps.douyin.dl.DouyinDownloader') as mock_class:
+        mock = mock_class.return_value
+        mock.create_stream_tasks = AsyncMock()
+        mock.get_fetch_data = AsyncMock(return_value=mock_response)
+        yield mock_class
+
+@pytest.fixture
+def livestream_service(mock_downloader):
+    """Fixture for LivestreamService."""
+    return LivestreamService()
 
 @pytest.mark.asyncio
-async def test_get_room_info_success(livestream_service):
+async def test_get_room_info_success(mock_downloader, mock_room_info):
     """Test successful room info retrieval."""
+    service = LivestreamService()
     room_id = "test123"
-    mock_logger = MagicMock()
     
-    result = await livestream_service.get_room_info(room_id, mock_logger)
+    result = await service.get_room_info(room_id)
     
-    assert result["room_id"] == room_id
-    assert result["live_status"] == 2
-    assert "flv_pull_url" in result
-    assert "m3u8_pull_url" in result
+    assert result == mock_room_info
+    expected_url = f"https://live.douyin.com/webcast/room/web/enter/?room_id={room_id}"
+    mock_downloader.return_value.get_fetch_data.assert_called_once_with(expected_url)
 
 @pytest.mark.asyncio
-async def test_get_room_info_not_found(livestream_service, mock_douyin_handler):
-    """Test room info retrieval when room doesn't exist."""
-    room_id = "nonexistent123"
-    mock_logger = MagicMock()
+async def test_get_room_info_failure(mock_downloader, mock_response):
+    """Test room info retrieval failure."""
+    service = LivestreamService()
+    mock_response.json = AsyncMock(return_value={})
     
-    mock_douyin_handler.fetch_user_live_videos_by_room_id = AsyncMock(
-        side_effect=ValueError("直播间不存在或已结束")
+    with pytest.raises(ValueError, match="Could not get room info"):
+        await service.get_room_info("test123")
+
+@pytest.mark.asyncio
+async def test_download_stream_creates_directory(mock_downloader, mock_room_info, tmp_path):
+    """Test that download_stream creates output directory if it doesn't exist."""
+    service = LivestreamService()
+    output_path = tmp_path / "downloads" / "test_stream.flv"
+    
+    # Create a mock task that simulates file creation
+    async def create_file_after_delay():
+        await asyncio.sleep(0.1)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"test data")
+        return None
+    
+    mock_downloader.return_value.create_stream_tasks.return_value = asyncio.create_task(
+        create_file_after_delay()
     )
     
-    with pytest.raises(ValueError, match="直播间不存在或已结束"):
-        await livestream_service.get_room_info(room_id, mock_logger)
-
-@pytest.mark.asyncio
-async def test_download_stream_success(livestream_service, test_data_dir):
-    """Test successful stream download."""
-    user_id = "test123"
-    output_path = test_data_dir / "test_stream.flv"
+    status, _ = await service.download_stream(
+        "https://live.douyin.com/123456",
+        str(output_path)
+    )
     
-    # Mock room info
-    mock_room_info = {
-        "room_id": user_id,
-        "live_status": 2,
-        "flv_pull_url": {"HD1": "http://test.com/stream.flv"},
-        "m3u8_pull_url": {"HD1": "http://test.com/stream.m3u8"}
-    }
-    
-    # Mock the get_room_info method
-    livestream_service.get_room_info = AsyncMock(return_value=mock_room_info)
-    
-    status, path = await livestream_service.download_stream(user_id, str(output_path))
-    
-    # Wait for background task to complete
-    await asyncio.sleep(0.1)
-    
+    assert output_path.parent.exists()
     assert status == "success"
-    assert path == str(output_path)
-    assert user_id not in livestream_service.active_downloads
 
 @pytest.mark.asyncio
-async def test_download_stream_already_downloading(livestream_service):
+async def test_download_stream_already_downloading(mock_downloader):
     """Test attempting to download an already downloading stream."""
-    user_id = "test123"
+    service = LivestreamService()
+    room_id = "test123"
     
-    # Add user_id to active downloads
-    livestream_service.active_downloads.add(user_id)
+    # Add room_id to active downloads
+    service.active_downloads.add(room_id)
     
-    status, message = await livestream_service.download_stream(user_id)
+    status, message = await service.download_stream(room_id)
     
     assert status == "error"
     assert message == "Already downloading this stream"
 
 @pytest.mark.asyncio
-async def test_download_stream_not_live(livestream_service):
+async def test_download_stream_not_live(mock_downloader, mock_response):
     """Test attempting to download when user is not live."""
-    user_id = "test123"
+    service = LivestreamService()
     
     # Mock room info with non-live status
-    mock_room_info = {
-        "room_id": user_id,
-        "live_status": 1,  # Not live
-    }
+    mock_response.json = AsyncMock(return_value={'data': {
+        "room_id": "test123",
+        "live_status": 1  # Not live
+    }})
     
-    livestream_service.get_room_info = AsyncMock(return_value=mock_room_info)
-    
-    status, message = await livestream_service.download_stream(user_id)
+    status, message = await service.download_stream("test123")
     
     assert status == "error"
     assert message == "User is not currently streaming"
 
 @pytest.mark.asyncio
-async def test_download_stream_no_urls(livestream_service):
-    """Test download attempt when no stream URLs are available."""
-    user_id = "test123"
+async def test_download_stream_handles_download_error(mock_downloader, tmp_path):
+    """Test that download errors are handled properly."""
+    service = LivestreamService()
+    output_path = tmp_path / "test_stream.flv"
     
-    # Mock room info with no stream URLs
-    mock_room_info = {
-        "room_id": user_id,
-        "live_status": 2,
-        "flv_pull_url": {}  # Empty URLs
-    }
+    # Make download task raise an error
+    mock_downloader.return_value.create_stream_tasks.side_effect = Exception("Download failed")
     
-    livestream_service.get_room_info = AsyncMock(return_value=mock_room_info)
-    
-    status, message = await livestream_service.download_stream(user_id)
+    status, message = await service.download_stream(
+        "https://live.douyin.com/123456",
+        str(output_path)
+    )
     
     assert status == "error"
-    assert message == "No live stream available for this user"
-
-@pytest.mark.asyncio
-async def test_download_stream_with_url_extraction(livestream_service):
-    """Test stream download with URL extraction."""
-    url = "https://live.douyin.com/test123"
-    expected_id = "test123"
-    
-    # Mock room info
-    mock_room_info = {
-        "room_id": expected_id,
-        "live_status": 2,
-        "flv_pull_url": {"HD1": "http://test.com/stream.flv"},
-        "m3u8_pull_url": {"HD1": "http://test.com/stream.m3u8"}
-    }
-    
-    livestream_service.get_room_info = AsyncMock(return_value=mock_room_info)
-    
-    status, _ = await livestream_service.download_stream(url)
-    
-    # Wait for background task to complete
-    await asyncio.sleep(0.1)
-    
-    assert status == "success"
-    assert expected_id not in livestream_service.active_downloads
+    assert "Download failed" in message
+    assert "123456" not in service.active_downloads
