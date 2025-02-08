@@ -1,10 +1,46 @@
 # Dyvine
 
+Dyvine is a high-performance Python API for interacting with Douyin (TikTok) content, providing functionalities to download videos, images, live streams, and retrieve user information.
+
 A high-performance Python API for interacting with Douyin content.
+
+**GitHub Repository:** [https://github.com/memenow/dyvine](https://github.com/memenow/dyvine)
 
 ## Overview
 
 Dyvine provides a high-performance API for downloading and managing Douyin content. It supports various content types including videos, images, live streams and user information.
+
+### Table of Contents
+1. [Overview](#overview)
+    - [Key Features](#key-features)
+2. [Prerequisites](#prerequisites)
+3. [Quick Start](#quick-start)
+4. [Configuration](#configuration)
+5. [Development](#development)
+    - [Running the Server](#running-the-server)
+    - [API Documentation](#api-documentation)
+    - [Testing](#testing)
+        - [Test Structure](#test-structure)
+        - [Running Tests](#running-tests)
+        - [Test Features](#test-features)
+        - [Key Test Areas](#key-test-areas)
+    - [Code Quality](#code-quality)
+    - [Project Structure](#project-structure)
+6. [Deployment](#deployment)
+    - [Docker](#docker)
+    - [Kubernetes](#kubernetes)
+    - [Production Considerations](#production-considerations)
+7. [API Endpoints](#api-endpoints)
+    - [Users](#users)
+    - [Posts](#posts)
+    - [Livestreams](#livestreams)
+8. [Error Handling](#error-handling)
+    - [Exception Types](#exception-types)
+    - [Error Responses](#error-responses)
+9. [Monitoring](#monitoring)
+    - [Logging](#logging)
+    - [Health Monitoring](#health-monitoring)
+10. [License](#license)
 
 ### Key Features
 
@@ -324,9 +360,48 @@ Base path: `/api/v1`
 GET /api/v1/users/{user_id}
 ```
 
+**Example:**
+
+```http
+GET /api/v1/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc
+```
+
+**Response:**
+
+```json
+{
+  "user_id": "MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
+  "nickname": "Example User",
+  "avatar_url": "https://example.com/avatar.jpg",
+  "signature": "Example signature",
+  "following_count": 100,
+  "follower_count": 200,
+  "total_favorited": 300,
+  "is_living": false,
+  "room_id": null
+}
+```
+
 #### Download User Content
 ```http
 POST /api/v1/users/{user_id}/content:download
+```
+
+**Example:**
+
+```http
+POST /api/v1/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc/content:download?include_posts=true&include_likes=false&max_items=10
+```
+
+**Response:**
+
+```json
+{
+  "task_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+  "status": "pending",
+  "message": "Download started",
+  "progress": 0
+}
 ```
 Query parameters:
 - `include_posts`: Whether to download user's posts (default: true)
@@ -338,6 +413,26 @@ Query parameters:
 GET /api/v1/users/operations/{operation_id}
 ```
 
+**Example:**
+
+```http
+GET /api/v1/users/operations/a1b2c3d4-e5f6-7890-1234-567890abcdef
+```
+
+**Response:**
+
+```json
+{
+  "task_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+  "status": "completed",
+  "message": "Download completed",
+  "progress": 100,
+  "total_items": 10,
+  "downloaded_items": 10,
+  "error": null
+}
+```
+
 ### Posts
 
 #### Get Post Details
@@ -345,9 +440,90 @@ GET /api/v1/users/operations/{operation_id}
 GET /api/v1/posts/{post_id}
 ```
 
+**Example:**
+
+```http
+GET /api/v1/posts/7123456789012345678
+```
+
+**Response:**
+
+```json
+{
+  "aweme_id": "7123456789012345678",
+  "desc": "Example post description",
+  "create_time": 1678886400,
+  "post_type": "video",
+  "video_info": {
+    "play_addr": "https://example.com/video.mp4",
+    "duration": 60,
+    "ratio": "16:9",
+    "width": 1920,
+    "height": 1080
+  },
+  "images": null,
+  "statistics": {
+    "digg_count": 1000,
+    "comment_count": 200,
+    "share_count": 50
+  }
+}
+```
+
 #### List User Posts
 ```http
 GET /api/v1/posts/users/{user_id}/posts
+```
+
+**Example:**
+
+```http
+GET /api/v1/posts/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc/posts?max_cursor=0&count=20
+```
+
+**Response:**
+
+```json
+[
+  {
+    "aweme_id": "7123456789012345678",
+    "desc": "Example post description 1",
+    "create_time": 1678886400,
+    "post_type": "video",
+    "video_info": {
+      "play_addr": "https://example.com/video1.mp4",
+      "duration": 60,
+      "ratio": "16:9",
+      "width": 1920,
+      "height": 1080
+    },
+    "images": null,
+    "statistics": {
+      "digg_count": 1000,
+      "comment_count": 200,
+      "share_count": 50
+    }
+  },
+  {
+    "aweme_id": "7123456789012345679",
+    "desc": "Example post description 2",
+    "create_time": 1678886500,
+    "post_type": "images",
+    "video_info": null,
+    "images": [
+      {
+        "url": "https://example.com/image1.jpg",
+        "width": 1080,
+        "height": 1920
+      }
+    ],
+    "statistics": {
+      "digg_count": 500,
+      "comment_count": 100,
+      "share_count": 25
+    }
+  }
+]
 ```
 Query parameters:
 - `max_cursor`: Pagination cursor (default: 0)
@@ -356,6 +532,35 @@ Query parameters:
 #### Download User Posts
 ```http
 POST /api/v1/posts/users/{user_id}/posts:download
+```
+
+**Example:**
+
+```http
+POST /api/v1/posts/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc/posts:download?max_cursor=0
+```
+
+**Response:**
+
+```json
+{
+  "sec_user_id": "MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
+  "download_path": "/path/to/downloads/Example User",
+  "total_posts": 100,
+  "downloaded_count": {
+    "video": 50,
+    "images": 25,
+    "mixed": 10,
+    "live": 5,
+    "collection": 5,
+    "story": 5,
+    "unknown": 0
+  },
+  "total_downloaded": 95,
+  "status": "partial_success",
+  "message": "Downloaded 95 out of 100 posts. (Videos: 50, Images: 25, Mixed: 10, Lives: 5, Collections: 5, Stories: 0) Files saved to /path/to/downloads/Example User",
+  "error_details": null
+}
 ```
 Query parameters:
 - `max_cursor`: Starting pagination cursor (default: 0)
@@ -366,12 +571,44 @@ Query parameters:
 ```http
 POST /api/v1/livestreams/users/{user_id}/stream:download
 ```
+
+**Example:**
+
+```http
+POST /api/v1/livestreams/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc/stream:download
+```
+
+**Response:**
+
+```json
+{
+  "status": "pending",
+  "download_path": "/path/to/downloads/livestreams/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
+  "error": null
+}
+```
 Body parameters:
 - `output_path`: Custom save path (optional)
 
 #### Check Download Status
 ```http
 GET /api/v1/livestreams/operations/{operation_id}
+```
+
+**Example:**
+
+```http
+GET /api/v1/livestreams/operations/a1b2c3d4-e5f6-7890-1234-567890abcdef
+```
+
+**Response:**
+
+```json
+{
+  "status": "success",
+  "download_path": "/path/to/downloads/livestreams/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc_merged.mp4",
+  "error": null
+}
 ```
 
 ## Error Handling
@@ -412,6 +649,23 @@ The `/health` endpoint provides real-time system metrics:
 - Request statistics
 
 Logs and metrics are stored in the `logs/` directory with daily rotation.
+
+## Contributing
+
+Contributions to Dyvine are welcome! Please follow these guidelines:
+
+1.  **Fork the repository:** Create a fork of the Dyvine repository on GitHub.
+2.  **Create a branch:** Create a new branch for your feature or bug fix. Use a descriptive name, such as `feature/add-new-endpoint` or `fix/resolve-issue-123`.
+3.  **Make your changes:** Implement your changes, ensuring that you follow the project's coding style and conventions.
+4.  **Write tests:** Add unit tests and/or integration tests to cover your changes. Ensure that all tests pass before submitting a pull request.
+5.  **Run checks:** Run all code quality checks (formatting, linting, type checking) to ensure consistency.
+6.  **Commit your changes:** Commit your changes with clear and concise commit messages.
+7.  **Push to your fork:** Push your changes to your forked repository.
+8.  **Submit a pull request:** Create a pull request from your branch to the `main` branch of the Dyvine repository. Provide a detailed description of your changes and reference any related issues.
+9. **Code Review**: The project maintainers will review your pull request and may request changes or clarifications. Be responsive to feedback and make necessary updates.
+10. **Merge**: Once your pull request is approved, it will be merged into the `main` branch.
+
+Please report any bugs or issues on the [GitHub Issues](https://github.com/memenow/dyvine/issues) page.
 
 ## License
 

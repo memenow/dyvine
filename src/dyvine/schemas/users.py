@@ -4,7 +4,7 @@ This module defines Pydantic models for user data validation and serialization.
 """
 
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class UserDownloadRequest(BaseModel):
     """Schema for user download request."""
@@ -12,6 +12,7 @@ class UserDownloadRequest(BaseModel):
     include_posts: bool = Field(True, description="Whether to include user posts")
     include_likes: bool = Field(False, description="Whether to include liked posts")
     max_items: Optional[int] = Field(None, description="Maximum items to download")
+    model_config = ConfigDict()
 
 class UserResponse(BaseModel):
     """Schema for user information response."""
@@ -22,7 +23,10 @@ class UserResponse(BaseModel):
     following_count: int = Field(..., description="Number of users following")
     follower_count: int = Field(..., description="Number of followers")
     total_favorited: int = Field(..., description="Total likes received")
-    
+    is_living: bool = Field(False, description="Whether user is currently live streaming")
+    room_id: Optional[int] = Field(None, description="Live room ID if streaming")
+    model_config = ConfigDict()
+
 class DownloadResponse(BaseModel):
     """Schema for download operation response."""
     task_id: str = Field(..., description="Unique task identifier")
@@ -32,3 +36,4 @@ class DownloadResponse(BaseModel):
     total_items: Optional[int] = Field(None, description="Total items to download")
     downloaded_items: Optional[int] = Field(None, description="Number of items downloaded")
     error: Optional[str] = Field(None, description="Error message if failed")
+    model_config = ConfigDict()

@@ -21,6 +21,7 @@ PostNotFoundError, UserNotFoundError, and DownloadError.
 from typing import Dict, Optional, List, Any
 from pathlib import Path
 import asyncio
+import logging
 from datetime import datetime
 
 from f2.apps.douyin.handler import DouyinHandler
@@ -34,22 +35,40 @@ from ..schemas.posts import (
     PostDetail
 )
 
-logger = ContextLogger(__name__)
+logger = ContextLogger(logging.getLogger(__name__))
 
 class PostServiceError(Exception):
-    """Base exception class for errors related to the PostService."""
+    """Base exception class for errors related to the PostService.
+
+    This exception serves as a general parent class for all custom exceptions
+    defined within the PostService, allowing for more specific error handling
+    and categorization.
+    """
     pass
 
 class PostNotFoundError(PostServiceError):
-    """Exception raised when a requested post cannot be found."""
+    """Exception raised when a requested post cannot be found.
+
+    This exception indicates that a specific Douyin post, typically identified
+    by its aweme_id, could not be retrieved or does not exist.
+    """
     pass
 
 class UserNotFoundError(PostServiceError):
-    """Exception raised when a requested user cannot be found."""
+    """Exception raised when a requested user cannot be found.
+
+    This exception indicates that a specific Douyin user, typically identified
+    by their sec_user_id, could not be retrieved or does not exist.
+    """
     pass
 
 class DownloadError(PostServiceError):
-    """Exception raised when a content download operation fails."""
+    """Exception raised when a content download operation fails.
+
+    This exception indicates that an attempt to download content (video, images,
+    etc.) associated with a Douyin post has failed. It may be due to network
+    issues, invalid URLs, or other problems during the download process.
+    """
     pass
 
 class PostService:
@@ -65,18 +84,13 @@ class PostService:
     - Clean separation of concerns by delegating specific tasks to helper
       methods
     - Type safety through type annotations
-
-    Attributes:
-        handler (DouyinHandler): Configured DouyinHandler instance for
-            interacting with the Douyin API.
     """
 
     def __init__(self, handler: DouyinHandler) -> None:
         """Initialize the PostService instance.
 
         Args:
-            handler (DouyinHandler): Configured DouyinHandler instance for
-                Douyin operations.
+            handler: Configured DouyinHandler instance for Douyin operations.
         """
         self.handler = handler
         logger.info("PostService initialized", extra={"handler_config": handler.kwargs})
@@ -85,7 +99,7 @@ class PostService:
         """Fetch detailed information about a specific Douyin post.
 
         Args:
-            aweme_id (str): Unique identifier of the post.
+            aweme_id: Unique identifier of the post.
 
         Returns:
             PostDetail: Object containing detailed information about the post.
@@ -97,21 +111,33 @@ class PostService:
         try:
             logger.info("Fetching post detail", extra={"aweme_id": aweme_id})
             post = await self.handler.fetch_one_video(aweme_id)
-            
+
             if not post:
                 raise PostNotFoundError(f"Post not found: {aweme_id}")
-                
+
             post_data = post._to_dict()
+            
+            # Parse create_time string into a Unix timestamp (integer)
+            create_time_str = post_data.get("create_time")
+            try:
+                create_time_dt = datetime.strptime(
+                    create_time_str,
+                    "%Y-%m-%d %H-%M-%S"
+                )
+                create_time = int(create_time_dt.timestamp())
+            except (ValueError, TypeError):
+                create_time = 0
+
             return PostDetail(
                 aweme_id=post_data["aweme_id"],
                 desc=post_data.get("desc", ""),
-                create_time=post_data.get("create_time", 0),
+                create_time=create_time,
                 post_type=self._determine_post_type(post_data),
                 video_info=self._extract_video_info(post_data),
                 images=self._extract_image_info(post_data),
                 statistics=post_data.get("statistics", {})
             )
-            
+
         except PostNotFoundError:
             raise
         except Exception as e:
@@ -130,14 +156,12 @@ class PostService:
         """Retrieve a paginated list of posts from a Douyin user.
 
         Args:
-            sec_user_id (str): Unique identifier of the user.
-            max_cursor (int): Pagination cursor for fetching the next batch of
-                posts.
-            count (int): Number of posts to fetch.
+            sec_user_id: Unique identifier of the user.
+            max_cursor: Pagination cursor for fetching the next batch of posts.
+            count: Number of posts to fetch per page.
 
         Returns:
-            List[PostDetail]: List of PostDetail objects representing the
-                user's posts.
+            List[PostDetail]: List of PostDetail objects representing the user's posts.
 
         Raises:
             UserNotFoundError: If the requested user cannot be found.
@@ -152,13 +176,13 @@ class PostService:
                     "count": count
                 }
             )
-            
+
             posts_iterator = self.handler.fetch_user_post_videos(
                 sec_user_id=sec_user_id,
                 max_cursor=max_cursor,
                 page_counts=count
             )
-            
+
             try:
                 posts_filter = await posts_iterator.__anext__()
             except StopAsyncIteration:
@@ -199,12 +223,11 @@ class PostService:
         """Download all available posts from a Douyin user.
 
         Args:
-            sec_user_id (str): Unique identifier of the user.
-            max_cursor (int): Starting pagination cursor for fetching posts.
+            sec_user_id: Unique identifier of the user.
+            max_cursor: Starting pagination cursor for fetching posts.
 
         Returns:
-            BulkDownloadResponse: Object containing the results of the bulk
-                download operation.
+            BulkDownloadResponse: Object containing the results of the bulk download operation.
 
         Raises:
             UserNotFoundError: If the requested user cannot be found.
@@ -314,7 +337,8 @@ class PostService:
 
         Returns:
             Dict[str, Any]: Dictionary containing the fetched posts and
-                pagination information.
+                pagination information. Returns an empty dictionary if no
+                posts are found for the given user and cursor.
         """
         logger.info(
             "Fetching posts batch",

@@ -5,15 +5,15 @@ handling API, security, and Douyin-specific settings.
 """
 
 from typing import Dict, Optional, List
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
 class Settings(BaseSettings):
     """Application settings management.
-    
+
     Handles all configuration settings including API, security, and Douyin-specific
     settings through environment variables.
-    
+
     Note:
         All settings can be configured through environment variables or .env file.
         See .env.example for available settings and their default values.
@@ -40,16 +40,17 @@ class Settings(BaseSettings):
     douyin_proxy_http: Optional[str] = None
     douyin_proxy_https: Optional[str] = None
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        env_prefix = ""
-        extra = "allow"  # Allow extra fields from environment variables
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        env_prefix="",
+        extra="allow"
+    )
 
     @property
     def douyin_headers(self) -> Dict[str, str]:
         """Generate headers for Douyin requests.
-        
+
         Returns:
             Dict[str, str]: Headers including User-Agent, Referer, and Cookie.
         """
@@ -58,11 +59,11 @@ class Settings(BaseSettings):
             "Referer": self.douyin_referer,
             "Cookie": self.douyin_cookie
         }
-    
+
     @property
     def douyin_proxies(self) -> Dict[str, Optional[str]]:
         """Generate proxy configuration.
-        
+
         Returns:
             Dict[str, Optional[str]]: Proxy configuration for HTTP and HTTPS.
         """
@@ -74,7 +75,7 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """Get cached settings instance.
-    
+
     Returns:
         Settings: Global settings instance.
     """
@@ -82,27 +83,3 @@ def get_settings() -> Settings:
 
 # Global settings instance
 settings = get_settings()
-
-    # Validate settings
-if not settings.debug:  # Only validate in production mode
-    if settings.api_key == "default-api-key-please-change-in-production":
-        raise ValueError(
-            "Default API key detected! Set API_KEY in your .env file "
-            "for production use."
-        )
-
-    if not settings.douyin_cookie:
-        raise ValueError(
-            "Douyin cookie is required! Set DOUYIN_COOKIE in your .env file."
-        )
-else:
-    import warnings
-    if settings.api_key == "default-api-key-please-change-in-production":
-        warnings.warn(
-            "Using default API key. This is okay for development but "
-            "must be changed in production."
-        )
-    if not settings.douyin_cookie:
-        warnings.warn(
-            "Douyin cookie not set. Some features may not work properly."
-        )

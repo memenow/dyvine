@@ -13,8 +13,7 @@ Typical usage example:
 """
 
 from typing import Optional
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel, Field, ConfigDict
 class LiveStreamDownloadRequest(BaseModel):
     """Request model for initiating a livestream download.
 
@@ -42,30 +41,15 @@ class LiveStreamDownloadResponse(BaseModel):
     """
     status: str = Field(
         ...,
-        description="Status of the download operation",
-        example="success"
+        description="Status of the download operation"
     )
     download_path: Optional[str] = Field(
         None,
-        description="Path where the stream was saved",
-        example="/downloads/user_123/stream_20250205.mp4"
+        description="Path where the stream was saved"
     )
     error: Optional[str] = Field(
         None,
-        description="Error message if the operation failed",
-        example="User not found or stream not active"
+        description="Error message if the operation failed"
     )
 
-    class Config:
-        """Pydantic model configuration.
-
-        This configuration enables JSON Schema customization and provides
-        examples for API documentation.
-        """
-        json_schema_extra = {
-            "example": {
-                "status": "success",
-                "download_path": "/downloads/user_123/stream_20250205.mp4",
-                "error": None
-            }
-        }
+    model_config = ConfigDict()

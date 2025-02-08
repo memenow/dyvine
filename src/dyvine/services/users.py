@@ -60,15 +60,29 @@ def sanitize_filename(filename: str) -> str:
 logger = logging.getLogger(__name__)
 
 class UserServiceError(Exception):
-    """Base exception class for errors related to the UserService."""
+    """Base exception class for errors related to the UserService.
+
+    This exception serves as a general parent class for all custom exceptions
+    defined within the UserService, allowing for more specific error handling
+    and categorization.
+    """
     pass
 
 class UserNotFoundError(UserServiceError):
-    """Exception raised when a requested user cannot be found."""
+    """Exception raised when a requested user cannot be found.
+
+    This exception indicates that a specific Douyin user, typically identified
+    by their user ID, could not be retrieved or does not exist.
+    """
     pass
 
 class DownloadError(UserServiceError):
-    """Exception raised when a download operation fails."""
+    """Exception raised when a download operation fails.
+
+    This exception indicates that an attempt to download content associated with
+    a Douyin user has failed. It may be due to network issues, invalid URLs,
+    or other problems during the download process.
+    """
     pass
 
 class UserService:
@@ -76,40 +90,21 @@ class UserService:
 
     This class encapsulates the business logic for various user-related
     operations in the Douyin application, such as retrieving user information,
-    initiating content downloads, and tracking download progress.
-
-    Features:
-    - User information retrieval from Douyin
-    - Asynchronous content downloading (posts, liked posts)
-    - Progress tracking for download tasks
-    - Rate limiting for download operations
-
-    The UserService follows the Singleton pattern to ensure a single instance
-    throughout the application.
+    initiating content downloads, and tracking download progress. It follows the
+    Singleton pattern to ensure a single instance throughout the application.
     """
-    
+
     _instance = None
     _active_downloads: Dict[str, Dict] = {}
 
     def __new__(cls):
-        """Ensure a single instance of the UserService class.
-
-        This method implements the Singleton pattern by creating a new instance
-        only if one does not already exist.
-
-        Returns:
-            UserService: The single instance of the UserService class.
-        """
+        """Ensure a single instance of the UserService class (Singleton pattern)."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
-    def __init__(self):
-        """Initialize the UserService instance.
 
-        This method initializes the UserService instance. If the instance has
-        already been initialized, it skips the initialization process.
-        """
+    def __init__(self):
+        """Initialize the UserService instance (only once)."""
         # Skip initialization if already initialized
         if hasattr(self, '_initialized'):
             return
@@ -119,7 +114,7 @@ class UserService:
         """Retrieve user information from Douyin.
 
         Args:
-            user_id (str): The Douyin user ID.
+            user_id: The Douyin user ID.
 
         Returns:
             UserResponse: Object containing the user's information.
@@ -140,13 +135,27 @@ class UserService:
                 "proxy": settings.douyin_proxy_http,
                 "mode": "post"
             }
-            
+            # Initialize f2 handler with settings
+            handler_kwargs = {
+                "url": f"https://www.douyin.com/user/{user_id}",
+                "cookie": settings.douyin_cookie,
+                "headers": {
+                    "User-Agent": settings.douyin_user_agent,
+                    "Referer": settings.douyin_referer,
+                },
+                "proxy": settings.douyin_proxy_http,
+                "mode": "post"
+            }
+            print(f"handler_kwargs: {handler_kwargs}")
+
             handler = DouyinHandler(handler_kwargs)
+            print(f"Handler initialized: {handler}") # Added print statement
             user_data = await handler.fetch_user_profile(user_id)
-            
+            print(f"user_data: {user_data}")
+
             if not user_data.nickname:
                 raise UserNotFoundError(f"User {user_id} not found")
-                
+
             return UserResponse(
                 user_id=user_id,
                 nickname=user_data.nickname,
@@ -154,12 +163,15 @@ class UserService:
                 signature=user_data.signature,
                 following_count=user_data.following_count,
                 follower_count=user_data.follower_count,
-                total_favorited=user_data.total_favorited
+                total_favorited=user_data.total_favorited,
+                is_living=bool(user_data.room_id),
+                room_id=user_data.room_id
             )
         except Exception as e:
+            print(f"Error in get_user_info: {type(e).__name__} - {str(e)}")
             logger.exception("Failed to get user info", extra={"user_id": user_id})
-            raise UserServiceError(f"Failed to get user info: {str(e)}")
-            
+            raise UserServiceError(f"Failed to get user info: {str(e)}") from e
+
     async def start_download(
         self,
         user_id: str,
@@ -170,19 +182,16 @@ class UserService:
         """Start an asynchronous download of user content from Douyin.
 
         Args:
-            user_id (str): The Douyin user ID.
-            include_posts (bool): Whether to include the user's posts in the
-                download.
-            include_likes (bool): Whether to include the user's liked posts in
-                the download.
-            max_items (Optional[int]): Maximum number of items to download.
+            user_id: The Douyin user ID.
+            include_posts: Whether to include the user's posts in the download.
+            include_likes: Whether to include the user's liked posts in the download.
+            max_items: Maximum number of items to download.
 
         Returns:
-            DownloadResponse: Object containing details about the initiated
-                download task.
+            DownloadResponse: Object containing details about the initiated download task.
         """
         task_id = str(uuid.uuid4())
-        
+
         # Initialize download task
         self._active_downloads[task_id] = {
             "user_id": user_id,
@@ -193,35 +202,34 @@ class UserService:
             "include_likes": include_likes,
             "max_items": max_items
         }
-        
+
         # Start download task
         asyncio.create_task(
             self._process_download(task_id)
         )
-        
+
         return DownloadResponse(
             task_id=task_id,
             status="pending",
             message="Download started",
             progress=0.0
         )
-        
+
     async def get_download_status(self, task_id: str) -> DownloadResponse:
         """Get the status of a download task.
 
         Args:
-            task_id (str): The unique identifier of the download task.
+            task_id: The unique identifier of the download task.
 
         Returns:
-            DownloadResponse: Object containing the current status of the
-                download task.
+            DownloadResponse: Object containing the current status of the download task.
 
         Raises:
             DownloadError: If the specified download task is not found.
         """
         if task_id not in self._active_downloads:
             raise DownloadError(f"Download task {task_id} not found")
-            
+
         task = self._active_downloads[task_id]
         response = DownloadResponse(
             task_id=task_id,
@@ -233,7 +241,7 @@ class UserService:
             error=task.get("error")
         )
         return response
-        
+
     async def _process_download(self, task_id: str) -> None:
         """Process a download task asynchronously.
 

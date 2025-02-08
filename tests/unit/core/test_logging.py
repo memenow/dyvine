@@ -137,31 +137,33 @@ async def test_context_logger_track_memory():
 def test_setup_logging(test_data_dir, cleanup_test_files):
     """Test logging setup configuration."""
     log_file = test_data_dir / "test.log"
-    
     # Configure logging
-    setup_logging(
+    file_handler = setup_logging(
         log_level="DEBUG",
         log_file=str(log_file),
         max_bytes=1024,
         backup_count=2
     )
-    
+
     # Get root logger
     root_logger = logging.getLogger()
-    
+
     # Verify configuration
     assert root_logger.level == logging.DEBUG
     assert len(root_logger.handlers) == 2  # File and console handlers
-    
+
     # Test logging
     test_message = "Test log message"
     logging.info(test_message)
-    
+
     # Verify log file
     assert log_file.exists()
     with open(log_file) as f:
         log_content = f.read()
         assert test_message in log_content
+    
+    file_handler.close()
+
 
 def test_logging_with_context():
     """Test logging with context information."""

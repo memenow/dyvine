@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 from dyvine.main import app
 from dyvine.core.settings import Settings, get_settings
-from dyvine.services.livestreams import LiveStreamService
+from dyvine.services.livestreams import LivestreamService
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent / "data"
@@ -51,7 +51,7 @@ def test_client(test_settings):
 @pytest.fixture
 def mock_livestream_service():
     """Fixture for mocked LiveStreamService."""
-    service = MagicMock(spec=LiveStreamService)
+    service = MagicMock(spec=LivestreamService)
     
     # Mock successful download
     async def mock_download(*args, **kwargs):

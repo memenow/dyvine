@@ -1,391 +1,368 @@
-"""Service module for handling Douyin livestream operations.
-
-This module provides functionality for:
-- Downloading live streams from Douyin users
-- Retrieving room information and stream URLs
-- Managing download operations and status tracking
-- Handling stream download lifecycle
-
-The service implements robust error handling, logging, and resource management
-for reliable livestream operations.
-
-Typical usage example:
-    service = LiveStreamService()
-    status, path = await service.download_stream(user_id="123456")
-    if status == "success":
-        print(f"Stream downloading to: {path}")
-"""
-
-import os
-from pathlib import Path
 import asyncio
-import httpx
-import json
 import logging
-from datetime import datetime
+import httpx
+import urllib.parse
+import os
+import signal
+from pathlib import Path
+from typing import Dict, Tuple, Optional, Set
+from f2.apps.douyin.dl import DouyinDownloader, Live
+from src.dyvine.core.settings import settings
+from src.dyvine.services.users import UserService, UserNotFoundError as UserServiceNotFoundError
 
-# Custom exceptions
+logger = logging.getLogger(__name__)
+
 class LivestreamError(Exception):
-    """Base exception for livestream-related errors."""
+    """Base exception for livestream-related errors.
+
+    This exception serves as a general parent class for all custom exceptions
+    related to livestream operations, providing a way to catch all livestream
+    errors in a single except block if needed.
+    """
     pass
 
 class UserNotFoundError(LivestreamError):
-    """Exception raised when a user cannot be found."""
+    """Exception raised when a user is not found.
+
+    This exception indicates that a user, typically identified by their user ID
+    or room ID, could not be found or does not exist. It inherits from
+    LivestreamError, allowing it to be caught as a general livestream error or
+    specifically as a user-not-found error.
+    """
     pass
 
 class DownloadError(LivestreamError):
-    """Exception raised when a download operation fails."""
+    """Exception raised when a download fails.
+
+    This exception indicates that an error occurred during the download process
+    of a livestream. It could be due to various reasons, such as network issues,
+    invalid stream URLs, or problems with the download configuration. It
+    inherits from LivestreamError, allowing it to be caught as a general
+    livestream error or specifically as a download error.
+    """
     pass
 
-from f2.apps.douyin.dl import DouyinDownloader
-from f2.apps.douyin.handler import DouyinHandler
-from f2.apps.douyin.db import AsyncUserDB
-from f2.apps.douyin.model import UserLive
-from f2.apps.douyin.filter import UserLiveFilter
-from f2.apps.douyin.crawler import DouyinCrawler
-from f2.apps.douyin.utils import WebCastIdFetcher
-from f2.utils.utils import extract_valid_urls
-from f2.apps.douyin.algorithm.webcast_signature import DouyinWebcastSignature
-from ..core.settings import settings
-from ..core.logging import ContextLogger
+class LivestreamService:
+    """Service class for managing Douyin livestream operations.
 
-logger = ContextLogger(__name__)
+    This class provides methods for:
+    - Retrieving information about a livestream room.
+    - Downloading livestreams and saving them as video files.
+    - Monitoring the status of a livestream and merging downloaded segments.
+    - Handling active downloads and preventing duplicate downloads.
 
-class LiveStreamService:
-    """Service for handling live stream downloads from Douyin."""
-    
+    It interacts with the DouyinDownloader and UserService classes to perform
+    the necessary operations.
+    """
     def __init__(self):
-        """Initialize the LiveStreamService instance."""
-        # Get current working directory
-        cwd = Path.cwd()
-        
-        # Base directory for all data
-        self.base_dir = cwd / "data" / "douyin"
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Downloads directory within base dir
-        self.downloads_dir = self.base_dir / "downloads" / "livestreams"
-        self.downloads_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Logs directory
-        self.logs_dir = self.base_dir / "logs" / "livestreams"
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Database path
-        self.db_path = self.base_dir / "douyin_users.db"
-        
-        # Create database directory if it doesn't exist
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Ensure all paths are absolute and exist
-        self.base_dir = self.base_dir.absolute()
-        self.downloads_dir = self.downloads_dir.absolute()
-        self.logs_dir = self.logs_dir.absolute()
-        self.db_path = self.db_path.absolute()
-        
-        # Double check directories exist
-        os.makedirs(self.downloads_dir, exist_ok=True)
-        os.makedirs(self.logs_dir, exist_ok=True)
-        
-        # Track active downloads
-        self.active_downloads = set()
-        
-        # Initialize configuration
-        self.config = {
-            "cookie": settings.douyin_cookie,
-            "headers": {
-                "User-Agent": settings.douyin_user_agent,
-                "Referer": settings.douyin_referer,
-            },
-            "proxies": {},
-            "verify": True,
-            "timeout": 30,
-            "max_retries": 3,
-            "mode": "live",
-            "auto_cookie": True,
-            "folderize": False,
-            "naming": "{create}_{desc}",
-            "base_dir": str(self.base_dir),
-            "db_path": str(self.db_path),
-            "downloads_dir": str(self.downloads_dir),
-            "max_tasks": 5,
-            "chunk_size": 1024 * 1024,  # 1MB chunks
-            "retry_wait": 5,
-            "download_timeout": 3600,  # 1 hour
-        }
-        
-        # Add proxy configuration if provided
-        if settings.douyin_proxy_http:
-            self.config["proxies"]["http://"] = settings.douyin_proxy_http
-        if settings.douyin_proxy_https:
-            self.config["proxies"]["https://"] = settings.douyin_proxy_https
-        
-        # Add required crawler headers
-        self.config["crawler_headers"] = self.config["headers"]
-        
-        # Initialize handler and downloader
-        self.handler = DouyinHandler(self.config)
+        """Initialize the livestream service using global settings."""
+        self.settings = settings
+        self.config = self._build_douyin_config()
         self.downloader = DouyinDownloader(self.config)
-
-    def setup_stream_logger(self, user_id: str) -> logging.Logger:
-        """Set up a dedicated logger for a specific live stream operation.
-        
-        Creates a new logger instance with file-based logging for tracking
-        stream-specific operations. Log files are stored in the logs directory
-        with timestamps for easy tracking.
-        
-        Args:
-            user_id: The user's Douyin ID to identify the stream logs
-            
-        Returns:
-            logging.Logger: Configured logger instance for stream operations
-            
-        Note:
-            Log files are named as: {user_id}_{timestamp}.log and stored in
-            the configured logs directory.
+        self.active_downloads: Set[str] = set()
+        self.download_processes: Dict[str, asyncio.subprocess.Process] = {}
+        self.user_service = UserService()
+    
+    def _build_douyin_config(self) -> Dict:
         """
-        # Create logger
-        stream_logger = logging.getLogger(f"stream_{user_id}")
-        stream_logger.setLevel(logging.DEBUG)
+        Build Douyin downloader configuration from settings.
         
-        # Create file handler
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = self.logs_dir / f"{user_id}_{timestamp}.log"
-        handler = logging.FileHandler(log_file)
-        handler.setLevel(logging.DEBUG)
-        
-        # Create formatter
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-        handler.setFormatter(formatter)
-        
-        # Add handler to logger
-        stream_logger.addHandler(handler)
-        
-        return stream_logger
-
-    async def get_room_info(self, user_id: str, stream_logger: logging.Logger) -> dict:
-        """Get live room information for a Douyin user.
-        
-        Retrieves detailed information about a user's live room including:
-        - Room ID and status
-        - Stream URLs (FLV and HLS)
-        - User information
-        - Stream statistics
+        Returns:
+            Dict containing Douyin downloader configuration
+        """
+        config = {
+            'cookie': self.settings.douyin_cookie,
+            'headers': {
+                'authority': 'live.douyin.com',
+                'accept': 'application/json, text/plain, */*',
+                'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'cache-control': 'no-cache',
+                'cookie': self.settings.douyin_cookie,
+                'origin': 'https://live.douyin.com',
+                'pragma': 'no-cache',
+                'referer': 'https://live.douyin.com/',
+                'sec-ch-ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"macOS"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+                'user-agent': self.settings.douyin_user_agent,
+                'x-secsdk-csrf-token': '000100000001d40084dca1e2d5f6e2f8c2e4d7e2d3c2e6e09fab5dcae72468976d4d15139b417e8c4527b6eb2ff0',
+                'x-use-ppe': '1'
+            },
+            'proxies': self.settings.douyin_proxies,
+            'verify': True,
+            'timeout': 30,  # Default timeout
+            'naming': '{room_id}_{nickname}',  # Include room_id and nickname in filename
+            'mode': 'live',
+            'auto_cookie': True,
+            'folderize': False,
+        }
+        return config
+    
+    async def get_room_info(self, room_id: str, logger: logging.Logger = logger) -> Dict:
+        """
+        Get room information for a given room ID.
         
         Args:
-            user_id: The user's Douyin ID or room URL
-            stream_logger: Logger instance for operation tracking
+            room_id: The room ID to get info for
+            logger: Logger instance to use
             
         Returns:
-            dict: Room information including stream URLs and metadata
+            Dict containing room information
             
         Raises:
-            ValueError: If room doesn't exist or stream has ended
+            ValueError: If room doesn't exist or stream ended
         """
         try:
-            # First check if input is a URL and extract user ID
-            stream_logger.debug(f"Processing input: {user_id}")
-            if user_id.startswith('http'):
-                try:
-                    base_url = user_id.split('?')[0]
-                    extracted_id = base_url.rstrip('/').split('/')[-1]
-                    stream_logger.debug(f"Extracted ID from URL: {extracted_id}")
-                    user_id = extracted_id
-                except Exception as e:
-                    stream_logger.warning(f"Failed to extract ID from URL: {str(e)}")
-            
-            # Create URL for webcast ID extraction
-            url = f"https://live.douyin.com/{user_id}"
-            urls = [url]
-            stream_logger.debug(f"Using URL: {url}")
-            
-            # Extract webcast ID
-            webcast_ids = await WebCastIdFetcher.get_all_webcast_id(urls)
-            
-            if not webcast_ids:
-                stream_logger.warning(f"Could not extract webcast ID from URL, using ID directly: {user_id}")
-                webcast_id = user_id
-            else:
-                webcast_id = webcast_ids[0]
-                stream_logger.debug(f"Successfully extracted webcast ID: {webcast_id}")
-            
-            # Try with extracted/direct ID
-            try:
-                live = await self.handler.fetch_user_live_videos_by_room_id(room_id=webcast_id)
-                if live and live.room_id:
-                    stream_logger.info(
-                        f"Room ID: {live.room_id}, User: {live.nickname_raw}, Title: {live.live_title_raw}, Status: {live.live_status}, Viewers: {live.user_count}"
-                    )
-                    result = live._to_dict()
-                    stream_logger.debug(f"Final room info from fetch_user_live_videos_by_room_id: {result}")
-                    return result
-            except Exception as e:
-                stream_logger.warning(f"fetch_user_live_videos_by_room_id failed: {str(e)}, trying fetch_live")
-            
-            # Try with fetch_live as fallback
-            params = UserLive(web_rid=webcast_id, room_id_str=webcast_id)
-            async with DouyinCrawler(self.config) as crawler:
-                response = await crawler.fetch_live(params)
-                stream_logger.debug(f"Raw API response from fetch_live: {response}")
-                
-                if response.get("status_code") == 0:
-                    live = UserLiveFilter(response)
-                    if live and live.room_id:
-                        stream_logger.info(
-                            f"Room ID: {live.room_id}, User: {live.nickname_raw}, Title: {live.live_title_raw}, Status: {live.live_status}, Viewers: {live.user_count}"
-                        )
-                        result = live._to_dict()
-                        stream_logger.debug(f"Final room info from fetch_live: {result}")
-                        return result
-                
-            # If all attempts fail, raise error
-            raise ValueError("直播间不存在或已结束")
-                
+            # Get room info using downloader's get_fetch_data method
+            # Use Douyin's room info API
+            url = f"https://live.douyin.com/webcast/room/web/enter/"
+            params = {
+                "aid": "6383",
+                "app_name": "douyin_web",
+                "live_id": "1",
+                "device_platform": "web",
+                "enter_from": "web_live",
+                "web_rid": room_id,
+                "room_id_str": room_id,
+                "enter_source": "room",
+                "browser_language": "zh-CN",
+                "browser_platform": "Win32",
+                "browser_name": "Chrome",
+                "browser_version": "121.0.0.0",
+                "cookie_enabled": "true",
+                "screen_width": "1920",
+                "screen_height": "1080",
+                "update_version_code": "1.3.0",
+                "identity": "audience"
+            }
+            # Only include proxies if they are configured
+            proxies = None
+            if any(self.config['proxies'].values()):
+                proxies = self.config['proxies']
+
+            async with httpx.AsyncClient(
+                headers=self.config["headers"],
+                params=params,
+                proxies=proxies,
+                timeout=30,
+            ) as client:
+                response = await client.get(url)
+                logger.info(f"API Response type: {type(response)}")
+                logger.info(f"API Response status code: {response.status_code}")
+                logger.info(f"API Response headers: {response.headers}")
+                logger.info(f"API Response content: {response.text}")
+
+                response_data = response.json()
+                logger.info(f"Parsed response data: {response_data}")
+                if (
+                    not response_data
+                    or "data" not in response_data
+                    or "data" not in response_data["data"]
+                    or not response_data["data"]["data"]
+                ):
+                    raise ValueError("Could not get room info")
+                room_data = response_data["data"]["data"][0]
+                return room_data
         except Exception as e:
-            error_msg = f"Failed to get room info: {str(e)}"
-            stream_logger.error(error_msg)
-            raise ValueError(error_msg)
+            logger.error(f"Error getting room info: {str(e)}")
+            raise
 
-    async def download_stream(self, user_id: str, output_path: str | None = None) -> tuple[str, str | None]:
-        """Download a live stream from a Douyin user.
-        
-        Initiates an asynchronous download of a user's active livestream.
-        The download runs in the background and can be monitored via
-        get_download_status().
+    async def merge_ts_files(self, output_dir: Path, room_id: str) -> None:
+        """
+        Merge downloaded ts files into a single mp4 file.
         
         Args:
-            user_id: The user's Douyin ID or room URL
-            output_path: Optional custom save location for the stream
+            output_dir: Directory containing ts files
+            room_id: Room ID for filename prefix
+        """
+        try:
+            # Get list of ts files for this room
+            ts_files = sorted([f for f in output_dir.glob(f"{room_id}__*.ts")])
+            if not ts_files:
+                logger.warning(f"No ts files found for room {room_id}")
+                return
+            
+            # Create concat file
+            concat_file = output_dir / f"{room_id}_concat.txt"
+            with open(concat_file, 'w') as f:
+                for ts_file in ts_files:
+                    f.write(f"file '{ts_file.name}'\n")
+            
+            # Merge files using ffmpeg
+            output_file = output_dir / f"{room_id}_merged.mp4"
+            merge_command = (
+                f'ffmpeg -f concat -safe 0 -i "{concat_file}" -c copy "{output_file}"'
+            )
+            
+            process = await asyncio.create_subprocess_shell(
+                merge_command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await process.wait()
+            
+            # Clean up
+            concat_file.unlink()
+            
+            # Delete individual ts files
+            for ts_file in ts_files:
+                ts_file.unlink()
+                
+            logger.info(f"Successfully merged ts files for room {room_id}")
+            
+        except Exception as e:
+            logger.error(f"Error merging ts files: {str(e)}")
+
+    async def monitor_room_status(self, room_id: str, output_dir: Path) -> None:
+        """
+        Monitor room status and merge ts files when stream ends.
+        
+        Args:
+            room_id: Room ID to monitor
+            output_dir: Directory containing ts files
+        """
+        try:
+            while True:
+                try:
+                    room_info = await self.get_room_info(room_id)
+                    if room_info.get('status') != 2:  # Not live anymore
+                        logger.info(f"Stream ended for room {room_id}")
+                        # Kill ffmpeg process
+                        if room_id in self.download_processes:
+                            process = self.download_processes[room_id]
+                            try:
+                                process.terminate()
+                                await process.wait()
+                            except ProcessLookupError:
+                                pass
+                            del self.download_processes[room_id]
+                        
+                        # Merge ts files
+                        await self.merge_ts_files(output_dir, room_id)
+                        break
+                    
+                    await asyncio.sleep(30)  # Check every 30 seconds
+                    
+                except Exception as e:
+                    logger.error(f"Error checking room status: {str(e)}")
+                    await asyncio.sleep(30)  # Wait before retrying
+                    
+        except Exception as e:
+            logger.error(f"Error in monitor_room_status: {str(e)}")
+        finally:
+            if room_id in self.active_downloads:
+                self.active_downloads.remove(room_id)
+
+    async def download_stream(self, url: str, output_path: Optional[str] = None) -> Tuple[str, str]:
+        """
+        Download a Douyin livestream.
+        
+        Args:
+            url: The URL or room ID of the livestream
+            output_path: Optional path where to save the stream
             
         Returns:
-            tuple[str, str | None]: Status ("success"/"error") and file path/error message
+            Tuple of (status: str, message: str)
             
         Raises:
-            ValueError: If user not found or not streaming
-            DownloadError: If download initialization fails
+            LivestreamError: If download fails
         """
-        # Extract user ID from URL if needed
-        original_id = user_id
-        if user_id.startswith('http'):
-            try:
-                base_url = user_id.split('?')[0]
-                user_id = base_url.rstrip('/').split('/')[-1]
-            except Exception as e:
-                logger.warning(f"Failed to extract ID from URL: {str(e)}")
-        
-        # Check if already downloading
-        if user_id in self.active_downloads:
-            return "error", "Already downloading this stream"
-        
-        # Set up stream-specific logger
-        stream_logger = self.setup_stream_logger(user_id)
-        stream_logger.debug(f"Original input: {original_id}")
-        stream_logger.debug(f"Using user ID: {user_id}")
-        
         try:
-            stream_logger.info(f"Starting stream download for user {user_id}")
+            # Extract ID from URL if needed
+            id_str = url.split('/')[-1] if '/' in url else url
+            
+            # Try to parse as room ID first (numeric)
+            try:
+                room_id = str(int(id_str))  # Will fail if not numeric
+            except ValueError:
+                # If not numeric, treat as user ID and get room ID from profile
+                try:
+                    user_info = await self.user_service.get_user_info(id_str)
+                    if not user_info.is_living or not user_info.room_id:
+                        return "error", "User is not currently streaming"
+                    room_id = str(user_info.room_id)
+                except UserServiceNotFoundError:
+                    return "error", f"User {id_str} not found"
+                except Exception as e:
+                    return "error", f"Failed to get user info: {str(e)}"
+            
+            # Check if already downloading
+            if room_id in self.active_downloads:
+                return "error", "Already downloading this stream"
             
             # Get room info
-            room_info = await self.get_room_info(user_id, stream_logger)
+            try:
+                room_info = await self.get_room_info(room_id)
+            except ValueError as e:
+                return "error", str(e)
             
-            # Check if user is streaming
-            if room_info["live_status"] != 2:
-                stream_logger.info(f"User {user_id} is not currently streaming")
-                return "error", "User is not currently streaming"
-            
-            # Get stream URLs from room info
-            flv_urls = room_info.get("flv_pull_url", {})
-            if not flv_urls:
-                stream_logger.error(f"No FLV stream URLs found for user {user_id}")
+            # Check if user is live (status 2 = live)
+            status_code = room_info.get('status')
+            if status_code != 2:
+                return "error", f"User is not currently streaming (status code: {status_code})"
+
+            # Get stream URL
+            stream_url = room_info.get('stream_url', {})
+            hls_pull_url_map = stream_url.get('hls_pull_url_map', {})
+            if not hls_pull_url_map:
+                logger.warning(f"No stream URLs found for room ID: {room_id}")
                 return "error", "No live stream available for this user"
             
-            # Create stream data structure expected by downloader
-            stream_data = {
-                "flv_pull_url": flv_urls,
-                "hls_pull_url_map": room_info.get("m3u8_pull_url", {}),
-                "default_resolution": "FULL_HD1"
-            }
+            # Get highest quality stream URL (FULL_HD1)
+            stream_urls = hls_pull_url_map.get('FULL_HD1')
+            if not stream_urls:
+                # Fallback to HD1 if FULL_HD1 not available
+                stream_urls = hls_pull_url_map.get('HD1')
+                if not stream_urls:
+                    return "error", "No suitable quality stream found"
             
-            # Add stream data to room info
-            room_info["stream_url"] = stream_data
-            
-            # Get current timestamp
-            timestamp = int(asyncio.get_event_loop().time())
-            
-            # Set up download path
-            if output_path:
-                download_path = Path(output_path)
-            else:
-                download_path = self.downloads_dir / f"{user_id}_{timestamp}.flv"
-            
-            # Ensure the directory exists
-            download_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Create webcast data
-            webcast_data = room_info.copy()
-            webcast_data["create_time"] = timestamp
-            webcast_data["finish_time"] = 0
-            
-            stream_logger.info(f"Will save stream to: {download_path}")
-            
-            # Start the download with updated config
-            download_config = self.config.copy()
-            download_config.update({
-                "output_dir": str(download_path.parent),
-                "output_name": download_path.name
-            })
+            # Set up output directory
+            output_dir = Path("data/douyin/downloads/livestreams")
+            output_dir.mkdir(parents=True, exist_ok=True)
             
             # Add to active downloads
-            self.active_downloads.add(user_id)
+            self.active_downloads.add(room_id)
             
-            # Start download in background without waiting
-            async def download_and_cleanup():
-                try:
-                    await self.downloader.create_stream_tasks(
-                        kwargs=download_config,
-                        webcast_datas=webcast_data,
-                        user_path=str(download_path.parent)
-                    )
-                except Exception as e:
-                    stream_logger.error(f"Download error: {str(e)}")
-                finally:
-                    # Remove from active downloads when done
-                    self.active_downloads.remove(user_id)
-                    stream_logger.info("Download task completed")
-            
-            asyncio.create_task(download_and_cleanup())
-            
-            # Return immediately with success
-            stream_logger.info(f"Successfully started stream download to {download_path}")
-            return "success", str(download_path)
-            
+            try:
+                # Create output filename
+                output_filename = f"{room_id}"
+                output_path = output_dir / output_filename
+                
+                # Use ffmpeg to download and save as ts files
+                command = (
+                    f'ffmpeg -i "{stream_urls}" -c copy -f segment -segment_time 10 '
+                    f'-segment_format mpegts "{output_path}__%03d.ts"'
+                )
+                
+                # Start download process
+                process = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                # Store process for later cleanup
+                self.download_processes[room_id] = process
+                
+                # Start monitoring room status
+                asyncio.create_task(self.monitor_room_status(room_id, output_dir))
+                
+                # Return pending status with expected output directory
+                return "pending", str(output_dir)
+                
+            except Exception as e:
+                logger.error(f"Download task error: {str(e)}")
+                raise DownloadError(f"Failed to start download: {str(e)}")
+            finally:
+                if room_id in self.active_downloads:
+                    self.active_downloads.remove(room_id)
+                
         except Exception as e:
-            stream_logger.error(f"Failed to download stream: {str(e)}", exc_info=True)
-            # Remove from active downloads if error occurs
-            if user_id in self.active_downloads:
-                self.active_downloads.remove(user_id)
+            logger.error(f"Error downloading stream: {str(e)}")
             return "error", str(e)
 
-    async def get_download_status(self, operation_id: str) -> str:
-        """Get the status of a download operation.
-        
-        Retrieves the current status of an active or completed download operation.
-        
-        Args:
-            operation_id: Unique identifier for the download operation
-            
-        Returns:
-            str: Path to the downloaded file if complete
-            
-        Raises:
-            DownloadError: If operation not found or status check fails
-        """
-        # Implementation of download status tracking
-        if operation_id not in self.active_downloads:
-            raise DownloadError(f"Operation {operation_id} not found")
-            
-        # For now, we can only confirm if download is active
-        # Future: Add progress tracking, file size, download speed etc.
-        return f"Download in progress for {operation_id}"
-
-livestream_service = LiveStreamService()
+# Create service instance after class definition
+livestream_service = LivestreamService()
