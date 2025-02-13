@@ -1,0 +1,32 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "content_type": "posts",
+      "storage_class": "STANDARD",
+      "retention": "permanent",
+      "description": "Regular posts are kept permanently in standard storage"
+    },
+    {
+      "content_type": "livestream",
+      "storage_class": "STANDARD",
+      "retention_days": 180,
+      "transition": {
+        "days": 30,
+        "storage_class": "ARCHIVE"
+      },
+      "description": "Livestream recordings are archived after 30 days and deleted after 180 days"
+    },
+    {
+      "content_type": "story",
+      "storage_class": "STANDARD", 
+      "retention_days": 7,
+      "description": "Story content is automatically deleted after 7 days"
+    }
+  ],
+  "audit": {
+    "enabled": true,
+    "log_format": "2024-08-02T08:15:42Z [R2-AUDIT] user={user} action={action} object_key={key} metadata_size={size} status={status}",
+    "log_retention_days": 90
+  }
+}

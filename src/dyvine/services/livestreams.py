@@ -6,11 +6,14 @@ import os
 import signal
 from pathlib import Path
 from typing import Dict, Tuple, Optional, Set
+
 from f2.apps.douyin.dl import DouyinDownloader, Live
+
+from src.dyvine.core.logging import ContextLogger
 from src.dyvine.core.settings import settings
 from src.dyvine.services.users import UserService, UserNotFoundError as UserServiceNotFoundError
 
-logger = logging.getLogger(__name__)
+logger = ContextLogger(logging.getLogger(__name__))
 
 class LivestreamError(Exception):
     """Base exception for livestream-related errors.
@@ -54,21 +57,26 @@ class LivestreamService:
     It interacts with the DouyinDownloader and UserService classes to perform
     the necessary operations.
     """
-    def __init__(self):
-        """Initialize the livestream service using global settings."""
+
+    def __init__(self) -> None:
+        """Initialize the livestream service using global settings.
+
+        Initializes the service with settings from the environment,
+        configures the Douyin downloader, and sets up data structures
+        for managing active downloads and download processes.
+        """
         self.settings = settings
         self.config = self._build_douyin_config()
         self.downloader = DouyinDownloader(self.config)
         self.active_downloads: Set[str] = set()
         self.download_processes: Dict[str, asyncio.subprocess.Process] = {}
         self.user_service = UserService()
-    
+
     def _build_douyin_config(self) -> Dict:
-        """
-        Build Douyin downloader configuration from settings.
-        
+        """Build Douyin downloader configuration from settings.
+
         Returns:
-            Dict containing Douyin downloader configuration
+            Dict: Containing Douyin downloader configuration.
         """
         config = {
             'cookie': self.settings.douyin_cookie,
@@ -100,20 +108,19 @@ class LivestreamService:
             'folderize': False,
         }
         return config
-    
+
     async def get_room_info(self, room_id: str, logger: logging.Logger = logger) -> Dict:
-        """
-        Get room information for a given room ID.
-        
+        """Get room information for a given room ID.
+
         Args:
-            room_id: The room ID to get info for
-            logger: Logger instance to use
-            
+            room_id (str): The room ID to get info for.
+            logger (logging.Logger): Logger instance to use.
+
         Returns:
-            Dict containing room information
-            
+            Dict: Containing room information.
+
         Raises:
-            ValueError: If room doesn't exist or stream ended
+            ValueError: If room doesn't exist or stream ended.
         """
         try:
             # Get room info using downloader's get_fetch_data method
@@ -171,12 +178,11 @@ class LivestreamService:
             raise
 
     async def merge_ts_files(self, output_dir: Path, room_id: str) -> None:
-        """
-        Merge downloaded ts files into a single mp4 file.
-        
+        """Merge downloaded ts files into a single mp4 file.
+
         Args:
-            output_dir: Directory containing ts files
-            room_id: Room ID for filename prefix
+            output_dir (Path): Directory containing ts files.
+            room_id (str): Room ID for filename prefix.
         """
         try:
             # Get list of ts files for this room
@@ -184,45 +190,44 @@ class LivestreamService:
             if not ts_files:
                 logger.warning(f"No ts files found for room {room_id}")
                 return
-            
+
             # Create concat file
             concat_file = output_dir / f"{room_id}_concat.txt"
             with open(concat_file, 'w') as f:
                 for ts_file in ts_files:
                     f.write(f"file '{ts_file.name}'\n")
-            
+
             # Merge files using ffmpeg
             output_file = output_dir / f"{room_id}_merged.mp4"
             merge_command = (
                 f'ffmpeg -f concat -safe 0 -i "{concat_file}" -c copy "{output_file}"'
             )
-            
+
             process = await asyncio.create_subprocess_shell(
                 merge_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             await process.wait()
-            
+
             # Clean up
             concat_file.unlink()
-            
+
             # Delete individual ts files
             for ts_file in ts_files:
                 ts_file.unlink()
-                
+
             logger.info(f"Successfully merged ts files for room {room_id}")
-            
+
         except Exception as e:
             logger.error(f"Error merging ts files: {str(e)}")
 
     async def monitor_room_status(self, room_id: str, output_dir: Path) -> None:
-        """
-        Monitor room status and merge ts files when stream ends.
-        
+        """Monitor room status and merge ts files when stream ends.
+
         Args:
-            room_id: Room ID to monitor
-            output_dir: Directory containing ts files
+            room_id (str): Room ID to monitor.
+            output_dir (Path): Directory containing ts files.
         """
         try:
             while True:
@@ -239,17 +244,17 @@ class LivestreamService:
                             except ProcessLookupError:
                                 pass
                             del self.download_processes[room_id]
-                        
+
                         # Merge ts files
                         await self.merge_ts_files(output_dir, room_id)
                         break
-                    
+
                     await asyncio.sleep(30)  # Check every 30 seconds
-                    
+
                 except Exception as e:
                     logger.error(f"Error checking room status: {str(e)}")
                     await asyncio.sleep(30)  # Wait before retrying
-                    
+
         except Exception as e:
             logger.error(f"Error in monitor_room_status: {str(e)}")
         finally:
@@ -257,23 +262,22 @@ class LivestreamService:
                 self.active_downloads.remove(room_id)
 
     async def download_stream(self, url: str, output_path: Optional[str] = None) -> Tuple[str, str]:
-        """
-        Download a Douyin livestream.
-        
+        """Download a Douyin livestream.
+
         Args:
-            url: The URL or room ID of the livestream
-            output_path: Optional path where to save the stream
-            
+            url (str): The URL or room ID of the livestream.
+            output_path (Optional[str]): Optional path where to save the stream.
+
         Returns:
-            Tuple of (status: str, message: str)
-            
+            Tuple[str, str]: (status: str, message: str).
+
         Raises:
-            LivestreamError: If download fails
+            LivestreamError: If download fails.
         """
         try:
             # Extract ID from URL if needed
             id_str = url.split('/')[-1] if '/' in url else url
-            
+
             # Try to parse as room ID first (numeric)
             try:
                 room_id = str(int(id_str))  # Will fail if not numeric
@@ -288,17 +292,17 @@ class LivestreamService:
                     return "error", f"User {id_str} not found"
                 except Exception as e:
                     return "error", f"Failed to get user info: {str(e)}"
-            
+
             # Check if already downloading
             if room_id in self.active_downloads:
                 return "error", "Already downloading this stream"
-            
+
             # Get room info
             try:
                 room_info = await self.get_room_info(room_id)
             except ValueError as e:
                 return "error", str(e)
-            
+
             # Check if user is live (status 2 = live)
             status_code = room_info.get('status')
             if status_code != 2:
@@ -310,7 +314,7 @@ class LivestreamService:
             if not hls_pull_url_map:
                 logger.warning(f"No stream URLs found for room ID: {room_id}")
                 return "error", "No live stream available for this user"
-            
+
             # Get highest quality stream URL (FULL_HD1)
             stream_urls = hls_pull_url_map.get('FULL_HD1')
             if not stream_urls:
@@ -318,48 +322,48 @@ class LivestreamService:
                 stream_urls = hls_pull_url_map.get('HD1')
                 if not stream_urls:
                     return "error", "No suitable quality stream found"
-            
+
             # Set up output directory
             output_dir = Path("data/douyin/downloads/livestreams")
             output_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Add to active downloads
             self.active_downloads.add(room_id)
-            
+
             try:
                 # Create output filename
                 output_filename = f"{room_id}"
                 output_path = output_dir / output_filename
-                
+
                 # Use ffmpeg to download and save as ts files
                 command = (
                     f'ffmpeg -i "{stream_urls}" -c copy -f segment -segment_time 10 '
                     f'-segment_format mpegts "{output_path}__%03d.ts"'
                 )
-                
+
                 # Start download process
                 process = await asyncio.create_subprocess_shell(
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                
+
                 # Store process for later cleanup
                 self.download_processes[room_id] = process
-                
+
                 # Start monitoring room status
                 asyncio.create_task(self.monitor_room_status(room_id, output_dir))
-                
+
                 # Return pending status with expected output directory
                 return "pending", str(output_dir)
-                
+
             except Exception as e:
                 logger.error(f"Download task error: {str(e)}")
                 raise DownloadError(f"Failed to start download: {str(e)}")
             finally:
                 if room_id in self.active_downloads:
                     self.active_downloads.remove(room_id)
-                
+
         except Exception as e:
             logger.error(f"Error downloading stream: {str(e)}")
             return "error", str(e)
