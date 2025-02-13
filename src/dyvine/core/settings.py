@@ -8,16 +8,17 @@ from typing import Dict, Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
+
 class Settings(BaseSettings):
     """Application settings management.
 
-    Handles all configuration settings including API, security, and Douyin-specific
-    settings through environment variables.
+    Handles all configuration settings including API, security, and
+    Douyin-specific settings through environment variables.
 
-    Note:
-        All settings can be configured through environment variables or .env file.
-        See .env.example for available settings and their default values.
+    All settings can be configured through environment variables or .env file.
+    See .env.example for available settings and their default values.
     """
+
     # API Settings
     version: str = "1.0.0"
     prefix: str = "/api/v1"
@@ -33,6 +34,13 @@ class Settings(BaseSettings):
     api_key: str = "default-api-key-please-change-in-production"
     access_token_expire_minutes: int = 60
 
+    # Cloudflare R2 Settings
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = ""
+    r2_endpoint: str = ""  # e.g. https://<account_id>.r2.cloudflarestorage.com
+    
     # Douyin Settings
     douyin_cookie: str = ""
     douyin_user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"

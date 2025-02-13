@@ -22,10 +22,14 @@ from typing import Dict, Optional
 import logging
 from datetime import datetime
 from pathlib import Path
+
 from f2.apps.douyin.handler import DouyinHandler
+
+from ..core.logging import ContextLogger
 
 from ..core.settings import settings
 from ..schemas.users import UserResponse, DownloadResponse
+from .storage import R2StorageService, ContentType
 
 def sanitize_filename(filename: str) -> str:
     """Remove emoji and special characters from a filename.
@@ -57,7 +61,7 @@ def sanitize_filename(filename: str) -> str:
         
     return filename
 
-logger = logging.getLogger(__name__)
+logger = ContextLogger(logging.getLogger(__name__))
 
 class UserServiceError(Exception):
     """Base exception class for errors related to the UserService.
@@ -108,7 +112,9 @@ class UserService:
         # Skip initialization if already initialized
         if hasattr(self, '_initialized'):
             return
+            
         self._initialized = True
+        self.storage = R2StorageService()
 
     async def get_user_info(self, user_id: str) -> UserResponse:
         """Retrieve user information from Douyin.
@@ -124,7 +130,6 @@ class UserService:
             UserServiceError: If an error occurs during the operation.
         """
         try:
-            # Initialize f2 handler with settings
             handler_kwargs = {
                 "url": f"https://www.douyin.com/user/{user_id}",
                 "cookie": settings.douyin_cookie,
@@ -135,23 +140,9 @@ class UserService:
                 "proxy": settings.douyin_proxy_http,
                 "mode": "post"
             }
-            # Initialize f2 handler with settings
-            handler_kwargs = {
-                "url": f"https://www.douyin.com/user/{user_id}",
-                "cookie": settings.douyin_cookie,
-                "headers": {
-                    "User-Agent": settings.douyin_user_agent,
-                    "Referer": settings.douyin_referer,
-                },
-                "proxy": settings.douyin_proxy_http,
-                "mode": "post"
-            }
-            print(f"handler_kwargs: {handler_kwargs}")
 
             handler = DouyinHandler(handler_kwargs)
-            print(f"Handler initialized: {handler}") # Added print statement
             user_data = await handler.fetch_user_profile(user_id)
-            print(f"user_data: {user_data}")
 
             if not user_data.nickname:
                 raise UserNotFoundError(f"User {user_id} not found")
@@ -168,7 +159,6 @@ class UserService:
                 room_id=user_data.room_id
             )
         except Exception as e:
-            print(f"Error in get_user_info: {type(e).__name__} - {str(e)}")
             logger.exception("Failed to get user info", extra={"user_id": user_id})
             raise UserServiceError(f"Failed to get user info: {str(e)}") from e
 
@@ -254,11 +244,11 @@ class UserService:
             # Update status to running
             task["status"] = "running"
             
-            # Create downloads directory if it doesn't exist
-            downloads_dir = Path("downloads")
-            downloads_dir.mkdir(exist_ok=True)
+            # Create temporary downloads directory
+            temp_dir = Path("temp_downloads")
+            temp_dir.mkdir(exist_ok=True)
             
-            # Initialize f2 handler with settings
+            # Initialize f2 handler with temporary directory
             handler_kwargs = {
                 "url": f"https://www.douyin.com/user/{task['user_id']}",
                 "cookie": settings.douyin_cookie,
@@ -267,7 +257,7 @@ class UserService:
                     "Referer": settings.douyin_referer,
                 },
                 "proxy": settings.douyin_proxy_http,
-                "download_path": str(downloads_dir),
+                "download_path": str(temp_dir),
                 "max_counts": task["max_items"] if task["max_items"] else None,
                 "download_favorite": task["include_likes"],
                 "timeout": 5,
@@ -298,8 +288,8 @@ class UserService:
             logger.info(f"User {user_data.nickname} has {total_posts} posts")
             task["total_items"] = total_posts
                 
-            # Create user directory
-            user_dir = downloads_dir / user_data.nickname
+            # Create user directory in temp
+            user_dir = temp_dir / user_data.nickname
             user_dir.mkdir(exist_ok=True)
             
             # Use the handler to download user posts
@@ -326,12 +316,56 @@ class UserService:
                     
                     logger.info(f"Downloaded {downloaded_count}/{total_posts} posts ({task['progress']:.1f}%)")
                     
-                    # Create download tasks for the videos
+                    # Download files to temp directory
                     await handler.downloader.create_download_tasks(
                         handler_kwargs,
                         aweme_data._to_list(),
                         user_dir
                     )
+                    
+                    # Upload downloaded files to R2 (search recursively)
+                    for file_path in user_dir.glob("**/*"):
+                        if file_path.is_file():
+                            try:
+                                # Generate R2 storage path
+                                if file_path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp']:
+                                    content_type = "image/" + file_path.suffix.lower().lstrip('.')
+                                    r2_path = self.storage.generate_ugc_path(
+                                        task["user_id"],
+                                        file_path.name,
+                                        content_type
+                                    )
+                                else:
+                                    content_type = "video/mp4"
+                                    r2_path = self.storage.generate_ugc_path(
+                                        task["user_id"],
+                                        file_path.name,
+                                        content_type
+                                    )
+                                
+                                # Generate metadata
+                                metadata = self.storage.generate_metadata(
+                                    author=user_data.nickname,
+                                    category=ContentType.POSTS,
+                                    content_type=content_type,
+                                    source="douyin"
+                                )
+                                
+                                # Upload to R2
+                                await self.storage.upload_file(
+                                    file_path,
+                                    r2_path,
+                                    metadata,
+                                    content_type
+                                )
+                                
+                                # Delete local file after upload
+                                file_path.unlink()
+                                
+                            except Exception as e:
+                                logger.error(
+                                    f"Failed to upload {file_path} to R2: {str(e)}"
+                                )
                     
                     # Update cursor for next page
                     if aweme_data.max_cursor != max_cursor:
@@ -386,6 +420,18 @@ class UserService:
             task["error"] = str(e)
             
         finally:
-            # Clean up after some time
-            await asyncio.sleep(3600)  # Keep for 1 hour
+            # Clean up temp directory and task
+            try:
+                if temp_dir.exists():
+                    for file in temp_dir.glob("**/*"):
+                        if file.is_file():
+                            file.unlink()
+                    for dir in temp_dir.glob("**/*"):
+                        if dir.is_dir():
+                            dir.rmdir()
+                    temp_dir.rmdir()
+            except Exception as e:
+                logger.error(f"Failed to clean up temp directory: {str(e)}")
+                
+            await asyncio.sleep(3600)  # Keep task info for 1 hour
             self._active_downloads.pop(task_id, None)
