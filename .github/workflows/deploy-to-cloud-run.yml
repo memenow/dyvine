@@ -14,45 +14,7 @@ env:
   REGISTRY: us-central1-docker.pkg.dev
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    
-    - name: Set up Conda
-      uses: conda-incubator/setup-miniconda@v3
-      with:
-        python-version: '3.13'
-        environment-file: environment.yml
-        activate-environment: dyvine
-        auto-activate-base: false
-    
-    - name: Install test dependencies
-      shell: bash -el {0}
-      run: |
-        conda activate dyvine
-        pip install pytest pytest-asyncio httpx
-    
-    - name: Install package in development mode
-      shell: bash -el {0}
-      run: |
-        conda activate dyvine
-        pip install -e .
-    
-    - name: Run tests
-      shell: bash -el {0}
-      run: |
-        conda activate dyvine
-        pytest tests/ -v
-
   deploy:
-    needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     

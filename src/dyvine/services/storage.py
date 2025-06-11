@@ -83,6 +83,19 @@ class R2StorageService:
         
         Configures the boto3 client with R2-specific settings and retry config.
         """
+        # Check if R2 configuration is available
+        if not all([
+            settings.r2_endpoint,
+            settings.r2_account_id,
+            settings.r2_access_key_id,
+            settings.r2_secret_access_key,
+            settings.r2_bucket_name
+        ]):
+            logger.warning("R2 configuration incomplete, storage service will be disabled")
+            self.client = None
+            self.bucket = None
+            return
+        
         # Configure retry settings
         config = Config(
             retries=dict(
@@ -241,9 +254,8 @@ class R2StorageService:
             "category": category.value,
             "content-type": content_type,
             "created-date": now.isoformat(),
-            "file-format": mimetypes.guess_extension(
-                content_type,
-                strict=False
+            "file-format": (
+                mimetypes.guess_extension(content_type, strict=False) or ""
             ).lstrip(".") if content_type else "bin",
             "language": language,
             "source": source,
@@ -264,7 +276,7 @@ class R2StorageService:
         storage_path: str,
         metadata: Dict[str, str],
         content_type: Optional[str] = None
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Upload a file to R2 storage with retries.
 
         Args:
@@ -274,11 +286,14 @@ class R2StorageService:
             content_type: Optional MIME type (if not provided, will be guessed)
 
         Returns:
-            str: Public URL of the uploaded file
+            Dict[str, Any]: Upload result information
 
         Raises:
-            StorageError: If upload fails after retries
+            StorageError: If upload fails after retries or storage is disabled
         """
+        if self.client is None:
+            raise StorageError("R2 storage service is disabled due to missing configuration")
+            
         file_path = Path(file_path)
         if not file_path.exists():
             raise StorageError(f"File not found: {file_path}")
@@ -313,6 +328,8 @@ class R2StorageService:
                     Metadata=metadata
                 )
                 
+            duration = time.time() - start_time
+            
             logger.info(
                 "Successfully uploaded file to R2",
                 extra={
@@ -322,8 +339,6 @@ class R2StorageService:
                     "duration_seconds": duration
                 }
             )
-                
-            duration = time.time() - start_time
             
             # Update metrics
             r2_upload_requests.labels(
@@ -393,6 +408,9 @@ class R2StorageService:
         Raises:
             StorageError: If object not found or other error occurs
         """
+        if self.client is None:
+            raise StorageError("R2 storage service is disabled due to missing configuration")
+            
         try:
             response = self.client.head_object(
                 Bucket=self.bucket,
@@ -415,6 +433,9 @@ class R2StorageService:
         Raises:
             StorageError: If deletion fails
         """
+        if self.client is None:
+            raise StorageError("R2 storage service is disabled due to missing configuration")
+            
         try:
             self.client.delete_object(
                 Bucket=self.bucket,
@@ -456,6 +477,9 @@ class R2StorageService:
         Raises:
             StorageError: If listing fails
         """
+        if self.client is None:
+            raise StorageError("R2 storage service is disabled due to missing configuration")
+            
         try:
             response = self.client.list_objects_v2(
                 Bucket=self.bucket,
