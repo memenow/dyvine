@@ -9,27 +9,24 @@ Initializes and configures the FastAPI application, handling:
 - Startup and shutdown events
 """
 
-from typing import Dict, Any
 import time
 import uuid
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict
 
+from f2.apps.douyin.handler import DouyinHandler
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .core.logging import ContextLogger, setup_logging
 from .core.settings import settings
-from .core.logging import setup_logging, ContextLogger  # Import setup_logging
-from .routers import posts, users, livestreams
-from .services.posts import PostServiceError
-from .services.users import UserServiceError
+from .routers import livestreams, posts, users
 from .services.livestreams import DownloadError as LivestreamDownloadError
-from .services.users import UserService
-from f2.apps.douyin.handler import DouyinHandler
 from .services.posts import DownloadError as PostDownloadError
+from .services.posts import PostServiceError
 from .services.users import DownloadError as UserDownloadError
-
-from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from .services.users import UserService, UserServiceError
 
 # Don't initialize logger here
 # logger = ContextLogger(__name__)
@@ -236,13 +233,61 @@ async def user_service_exception_handler(
             "path": request.url.path,
         }
     )
-    status_code = 400  # Default to 400 Bad Request
-    if isinstance(exc, UserNotFoundError):
-        status_code = 404  # 404 for UserNotFoundError
+    return JSONResponse(
+        status_code=400,
+        content={"detail": str(exc)},
+    )
+
+@app.exception_handler(PostServiceError)
+async def post_service_exception_handler(
+    request: Request, exc: PostServiceError
+) -> JSONResponse:
+    """Exception handler for PostService-specific exceptions.
+
+    Args:
+        request: Request that caused the exception.
+        exc: Raised exception.
+
+    Returns:
+        JSONResponse: JSON response with error details.
+    """
+    logger = app.state.logger
+    logger.error(
+        "PostService error",
+        extra={
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+            "path": request.url.path
+        }
+    )
+    return JSONResponse(
+        status_code=400,
+        content={"detail": str(exc)},
+    )
+
+@app.exception_handler(LivestreamDownloadError)
+@app.exception_handler(PostDownloadError)
+@app.exception_handler(UserDownloadError)
+async def download_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """
+    Exception handler for DownloadError exceptions.
+
+    Note: Since DownloadError is defined in multiple services,
+    we cannot determine the specific service from the exception type alone.
+    """
+    logger = app.state.logger
+    logger.error(
+        "Download error",
+        extra={
+            "error": str(exc),
+            "error_type": exc.__class__.__name__,
+            "path": request.url.path,
+        },
+    )
 
     return JSONResponse(
-        status_code=status_code,
-        content={"detail": str(exc)},
+        status_code=500,
+        content={"detail": "Download failed", "error_details": str(exc)},
     )
 
 @app.exception_handler(Exception)  # Catch-all exception handler
@@ -266,212 +311,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
             "error_type": type(exc).__name__,
             "error_details": str(exc)
         }
-    )
-
-@app.exception_handler(PostServiceError)
-async def post_service_exception_handler(
-    request: Request, exc: PostServiceError
-) -> JSONResponse:
-    """Exception handler for PostService-specific exceptions.
-
-    Args:
-        request: Request that caused the exception.
-        exc: Raised exception.
-
-    Returns:
-        JSONResponse: JSON response with error details.
-    """
-    logger = app.state.logger
-    logger.error(
-        "PostService error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path
-        }
-    )
-    return JSONResponse(
-        status_code=400,
-        content={"detail": str(exc)},
-    )
-
-@app.exception_handler(LivestreamDownloadError)
-@app.exception_handler(PostDownloadError)
-@app.exception_handler(UserDownloadError)
-async def download_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Exception handler for DownloadError exceptions.
-
-    Note: Since DownloadError is defined in multiple services,
-    we cannot determine the specific service from the exception type alone.
-    """
-    logger = app.state.logger
-    logger.error(
-        "Download error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path,
-        },
-    )
-
-    # You might want to customize the status code based on the context
-    status_code = 500  # Default to 500 Internal Server Error
-
-    return JSONResponse(
-        status_code=status_code,
-        content={"detail": "Download failed", "error_details": str(exc)},
-    )
-    return JSONResponse(
-        status_code=400,
-        content={"detail": str(exc)},
-    )
-
-@app.exception_handler(LivestreamDownloadError)
-@app.exception_handler(PostDownloadError)
-@app.exception_handler(UserDownloadError)
-async def download_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Exception handler for DownloadError exceptions.
-
-    Note: Since DownloadError is defined in multiple services,
-    we cannot determine the specific service from the exception type alone.
-    """
-    logger = app.state.logger
-    logger.error(
-        "Download error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path,
-        },
-    )
-
-    # You might want to customize the status code based on the context
-    status_code = 500  # Default to 500 Internal Server Error
-
-    return JSONResponse(
-        status_code=status_code,
-        content={"detail": "Download failed", "error_details": str(exc)},
-    )
-    return JSONResponse(
-        status_code=400,
-        content={"detail": str(exc)},
-    )
-
-@app.exception_handler(LivestreamDownloadError)
-@app.exception_handler(PostDownloadError)
-@app.exception_handler(UserDownloadError)
-async def download_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Exception handler for DownloadError exceptions.
-
-    Note: Since DownloadError is defined in multiple services,
-    we cannot determine the specific service from the exception type alone.
-    """
-    logger = app.state.logger
-    logger.error(
-        "Download error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path,
-        },
-    )
-
-    # You might want to customize the status code based on the context
-    status_code = 500  # Default to 500 Internal Server Error
-
-    return JSONResponse(
-        status_code=status_code,
-        content={"detail": "Download failed", "error_details": str(exc)},
-    )
-    return JSONResponse(
-        status_code=400,
-        content={"detail": str(exc)},
-    )
-
-@app.exception_handler(LivestreamDownloadError)
-@app.exception_handler(PostDownloadError)
-@app.exception_handler(UserDownloadError)
-async def download_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Exception handler for DownloadError exceptions.
-
-    Note: Since DownloadError is defined in multiple services,
-    we cannot determine the specific service from the exception type alone.
-    """
-    logger = app.state.logger
-    logger.error(
-        "Download error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path,
-        },
-    )
-
-    # You might want to customize the status code based on the context
-    status_code = 500  # Default to 500 Internal Server Error
-
-    return JSONResponse(
-        status_code=status_code,
-        content={"detail": "Download failed", "error_details": str(exc)},
-    )
-
-@app.exception_handler(PostServiceError)
-async def post_service_exception_handler(
-    request: Request, exc: PostServiceError
-) -> JSONResponse:
-    """Exception handler for PostService-specific exceptions.
-
-    Args:
-        request: Request that caused the exception.
-        exc: Raised exception.
-
-    Returns:
-        JSONResponse: JSON response with error details.
-    """
-    logger = app.state.logger
-    logger.error(
-        "PostService error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path
-        }
-    )
-    return JSONResponse(
-        status_code=400,
-        content={"detail": str(exc)},
-    )
-
-@app.exception_handler(LivestreamDownloadError)
-@app.exception_handler(PostDownloadError)
-@app.exception_handler(UserDownloadError)
-async def download_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Exception handler for DownloadError exceptions.
-
-    Note: Since DownloadError is defined in multiple services,
-    we cannot determine the specific service from the exception type alone.
-    """
-    logger = app.state.logger
-    logger.error(
-        "Download error",
-        extra={
-            "error": str(exc),
-            "error_type": exc.__class__.__name__,
-            "path": request.url.path,
-        },
-    )
-
-    # You might want to customize the status code based on the context
-    status_code = 500  # Default to 500 Internal Server Error
-
-    return JSONResponse(
-        status_code=status_code,
-        content={"detail": "Download failed", "error_details": str(exc)},
     )
 
 # Include routers
