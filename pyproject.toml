@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "dyvine"
 version = "1.0.0"
 description = "A high-performance Python API for interacting with Douyin content"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 authors = [
     { name = "Bill Duke", email = "billduke@memenow.xyz" }
 ]

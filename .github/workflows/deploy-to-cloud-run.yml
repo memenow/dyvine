@@ -23,12 +23,12 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.13'
+        python-version: '3.12'
     
     - name: Set up Conda
       uses: conda-incubator/setup-miniconda@v3
       with:
-        python-version: '3.13'
+        python-version: '3.12'
         environment-file: environment.yml
         activate-environment: dyvine
         auto-activate-base: false
