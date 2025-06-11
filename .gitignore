@@ -194,6 +194,7 @@ logs/
 # Downloaded content
 downloads/
 data/
+Download/
 
 # Test Data
 test/data/
