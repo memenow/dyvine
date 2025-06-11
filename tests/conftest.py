@@ -9,14 +9,15 @@ It includes:
 """
 
 import os
-import pytest
-from fastapi.testclient import TestClient
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from dyvine.main import app
-from dyvine.core.settings import Settings, get_settings
-from dyvine.services.livestreams import LivestreamService
+import pytest
+from fastapi.testclient import TestClient
+
+from src.dyvine.core.settings import Settings, get_settings
+from src.dyvine.main import app
+from src.dyvine.services.livestreams import LivestreamService
 
 # Test data directory
 TEST_DATA_DIR = Path(__file__).parent / "data"

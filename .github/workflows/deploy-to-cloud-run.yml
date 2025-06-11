@@ -47,6 +47,8 @@ jobs:
     
     - name: Run tests
       shell: bash -el {0}
+      env:
+        PYTHONPATH: ${{ github.workspace }}
       run: |
         conda activate dyvine
         pytest tests/ -v

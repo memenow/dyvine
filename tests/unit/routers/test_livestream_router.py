@@ -1,16 +1,15 @@
 """Unit tests for the livestreams router."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from unittest.mock import AsyncMock
 
-from dyvine.routers.livestreams import router, get_livestream_service
-from dyvine.services.livestreams import (
-    LivestreamError,
-    UserNotFoundError,
-    DownloadError
-)
+from src.dyvine.routers.livestreams import get_livestream_service, router
+from src.dyvine.services.livestreams import (DownloadError, LivestreamError,
+                                             UserNotFoundError)
+
 
 @pytest.fixture
 def app(mock_livestream_service):
