@@ -23,23 +23,22 @@ Rate Limiting:
 Example Usage:
     Get post details:
         GET /api/v1/posts/7123456789012345678
-        
+
     List user posts:
         GET /api/v1/posts/users/MS4wLjABAAAA.../posts?count=20&max_cursor=0
-        
+
     Download user posts:
         POST /api/v1/posts/users/MS4wLjABAAAA.../posts:download
 """
 
-from typing import List
-from fastapi import APIRouter, Depends, Query, Path, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
-from ..core.logging import ContextLogger
 from ..core.decorators import handle_errors
-from ..core.exceptions import PostNotFoundError, UserNotFoundError, DownloadError
 from ..core.dependencies import get_douyin_handler
+from ..core.exceptions import DownloadError, UserNotFoundError
+from ..core.logging import ContextLogger
+from ..schemas.posts import BulkDownloadResponse, PostDetail
 from ..services.posts import PostService
-from ..schemas.posts import PostDetail, BulkDownloadResponse
 
 # Initialize logger for this module
 logger = ContextLogger(__name__)
@@ -51,24 +50,24 @@ router = APIRouter(
     responses={
         404: {"description": "Post or user not found"},
         422: {"description": "Validation error"},
-        500: {"description": "Internal server error"}
-    }
+        500: {"description": "Internal server error"},
+    },
 )
 
 
 async def get_post_service(douyin_handler=Depends(get_douyin_handler)) -> PostService:
     """Create PostService instance with injected Douyin handler.
-    
+
     This dependency provider creates a PostService instance configured
     with the application's Douyin handler. It's used for dependency
     injection in FastAPI route handlers.
-    
+
     Args:
         douyin_handler: Configured DouyinHandler instance from dependency injection.
-        
+
     Returns:
         PostService instance ready for post operations.
-        
+
     Example:
         @router.get("/posts/{post_id}")
         async def get_post(
@@ -79,33 +78,34 @@ async def get_post_service(douyin_handler=Depends(get_douyin_handler)) -> PostSe
     """
     return PostService(douyin_handler)
 
+
 @router.get(
     "/{post_id}",
     response_model=PostDetail,
     summary="Get detailed information about a specific post",
     description="Retrieves comprehensive details about a Douyin post including metadata, media URLs, and engagement statistics",
-    response_description="Complete post information with media details and statistics"
+    response_description="Complete post information with media details and statistics",
 )
 @handle_errors(logger=logger)
 async def get_post(
     post_id: str = Path(
-        ..., 
+        ...,
         description="Unique Douyin post identifier (aweme_id)",
-        example="7123456789012345678"
+        example="7123456789012345678",
     ),
-    service: PostService = Depends(get_post_service)
+    service: PostService = Depends(get_post_service),
 ) -> PostDetail:
     """Retrieve detailed information about a specific Douyin post.
-    
+
     This endpoint fetches comprehensive information about a single Douyin post
     including metadata, media content URLs, user information, and engagement
     statistics like likes, comments, and shares.
-    
+
     Args:
         post_id: The unique Douyin post identifier (aweme_id). This is typically
                 a long numeric string that uniquely identifies the post.
         service: PostService instance for handling the request (dependency injected).
-        
+
     Returns:
         PostDetail: Complete post information including:
             - Basic metadata (title, description, creation time)
@@ -113,18 +113,18 @@ async def get_post(
             - User information (author details)
             - Engagement statistics (likes, comments, shares)
             - Content classification and tags
-            
+
     Raises:
-        HTTPException: 
+        HTTPException:
             - 404: Post not found or inaccessible
             - 422: Invalid post ID format
             - 500: Internal server error during processing
-            
+
     Example:
         ```bash
         curl -X GET "https://api.example.com/api/v1/posts/7123456789012345678"
         ```
-        
+
         Response:
         ```json
         {
@@ -144,47 +144,45 @@ async def get_post(
         ```
     """
     logger.info(
-        "Fetching post details", 
-        extra={
-            "post_id": post_id,
-            "operation": "get_post_detail"
-        }
+        "Fetching post details",
+        extra={"post_id": post_id, "operation": "get_post_detail"},
     )
     return await service.get_post_detail(post_id)
 
+
 @router.get(
     "/users/{user_id}/posts",
-    response_model=List[PostDetail],
+    response_model=list[PostDetail],
     summary="List posts from a specific user with pagination",
     description="Retrieves a paginated list of posts from a specific Douyin user, ordered by creation time",
-    response_description="List of post details with pagination support"
+    response_description="List of post details with pagination support",
 )
 async def list_user_posts(
     user_id: str = Path(
-        ..., 
+        ...,
         description="Unique Douyin user identifier (sec_user_id)",
-        example="MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc"
+        example="MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
     ),
     max_cursor: int = Query(
-        0, 
+        0,
         description="Pagination cursor for fetching next page. Use 0 for first page, then use the cursor from previous response",
-        example=0
+        example=0,
     ),
     count: int = Query(
-        20, 
-        ge=1, 
-        le=100, 
+        20,
+        ge=1,
+        le=100,
         description="Number of posts to return per page. Must be between 1 and 100",
-        example=20
+        example=20,
     ),
-    service: PostService = Depends(get_post_service)
-) -> List[PostDetail]:
+    service: PostService = Depends(get_post_service),
+) -> list[PostDetail]:
     """Retrieve a paginated list of posts from a specific Douyin user.
-    
+
     This endpoint fetches posts from a user's profile in reverse chronological
     order (newest first) with support for pagination. Each post includes complete
     metadata, media URLs, and engagement statistics.
-    
+
     Args:
         user_id: The unique Douyin user identifier (sec_user_id). This is typically
                 a long encoded string that uniquely identifies the user.
@@ -194,7 +192,7 @@ async def list_user_posts(
         count: Number of posts to return per page. Must be between 1 and 100.
               Larger values may increase response time and memory usage.
         service: PostService instance for handling the request (dependency injected).
-        
+
     Returns:
         List[PostDetail]: Ordered list of post details including:
             - Post metadata (ID, description, creation time)
@@ -202,22 +200,22 @@ async def list_user_posts(
             - User information (author details)
             - Engagement metrics (likes, comments, shares)
             - Content type and classification
-            
+
     Raises:
         HTTPException:
             - 404: User not found or profile is private/inaccessible
             - 422: Invalid user ID format or parameter validation error
             - 500: Internal server error during data fetching
-            
+
     Example:
         ```bash
         # Get first page of posts
         curl -X GET "https://api.example.com/api/v1/posts/users/MS4wLjABAAAA.../posts?count=10&max_cursor=0"
-        
+
         # Get next page using cursor from previous response
         curl -X GET "https://api.example.com/api/v1/posts/users/MS4wLjABAAAA.../posts?count=10&max_cursor=1678886400"
         ```
-        
+
         Response:
         ```json
         [
@@ -233,7 +231,7 @@ async def list_user_posts(
             }
         ]
         ```
-        
+
     Note:
         - Results are ordered by creation time (newest first)
         - Empty list is returned if no more posts are available
@@ -243,35 +241,31 @@ async def list_user_posts(
     try:
         logger.info(
             "Processing list_user_posts request",
-            extra={
-                "user_id": user_id,
-                "max_cursor": max_cursor,
-                "count": count
-            }
+            extra={"user_id": user_id, "max_cursor": max_cursor, "count": count},
         )
         return await service.get_user_posts(user_id, max_cursor, count)
-        
+
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail=str(e))
-        
+
     except Exception as e:
         logger.exception(
-            "Error processing list_user_posts request",
-            extra={"user_id": user_id}
+            "Error processing list_user_posts request", extra={"user_id": user_id}
         )
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post(
     "/users/{user_id}/posts:download",
     response_model=BulkDownloadResponse,
     summary="Download user posts",
-    description="Downloads all available posts from a specific user"
+    description="Downloads all available posts from a specific user",
 )
 async def download_user_posts(
     user_id: str = Path(..., description="The unique identifier of the user"),
     max_cursor: int = Query(0, description="Starting pagination cursor"),
-    service: PostService = Depends(get_post_service)
+    service: PostService = Depends(get_post_service),
 ) -> BulkDownloadResponse:
     """Downloads all available posts from a user.
 
@@ -289,27 +283,20 @@ async def download_user_posts(
     try:
         logger.info(
             "Processing download_user_posts request",
-            extra={
-                "user_id": user_id,
-                "max_cursor": max_cursor
-            }
+            extra={"user_id": user_id, "max_cursor": max_cursor},
         )
         return await service.download_all_user_posts(user_id, max_cursor)
-        
+
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail=str(e))
-        
+
     except DownloadError as e:
-        logger.error(
-            "Download failed",
-            extra={"user_id": user_id, "error": str(e)}
-        )
+        logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
-        
+
     except Exception as e:
         logger.exception(
-            "Error processing download_user_posts request",
-            extra={"user_id": user_id}
+            "Error processing download_user_posts request", extra={"user_id": user_id}
         )
         raise HTTPException(status_code=500, detail=str(e))

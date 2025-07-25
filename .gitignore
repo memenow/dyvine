@@ -197,6 +197,7 @@ data/douyin/logs/
 data/temp/
 data/cache/
 Download/
+temp_downloads/
 
 # Test data
 test/data/
@@ -210,20 +211,29 @@ server.log
 
 # FastAPI/Gunicorn
 gunicorn.conf.py
+gunicorn.pid
+gunicorn-error.log
+gunicorn-access.log
 
 # Temporary files
 *.tmp
 *.temp
+tmp/
+temp/
 
 # System files
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Security
 *.key
 *.pem
 *.cert
+*.crt
 config/production.py
+secrets/
+credentials/
 
 # Docker
 .dockerignore
@@ -232,3 +242,118 @@ config/production.py
 .claude
 .github/workflows/claude-code.yml
 .serena
+
+# Cloudflare R2 storage config
+.r2-config
+r2-credentials.json
+
+# Monitoring & Metrics
+prometheus/
+grafana/
+metrics/
+
+# Session data
+sessions/
+.session
+
+# Pre-commit
+.pre-commit-config.yaml
+
+# macOS specific
+*.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux specific
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# FastAPI specific
+instance/
+.webassets-cache
+
+# Douyin/TikTok specific
+douyin_cookies.txt
+tiktok_session.json
+user_sessions/
+
+# API Keys and Secrets
+api_keys/
+.secrets/
+*.secret
+
+# Backup files
+*.bak
+*.backup
+backup/
+
+# Lock files (keep for reproducibility)
+# Uncomment if you want to ignore lock files
+# poetry.lock
+# Pipfile.lock
+# package-lock.json
+# yarn.lock
+
+# Development databases
+*.db-shm
+*.db-wal
+
+# Jupyter notebooks (if used for exploration)
+notebooks/
+*.ipynb
+
+# Performance profiling
+*.prof
+*.pstats
+profile_output/
+
+# Code coverage specific
+.coverage.*
+coverage/
+htmlcov/
+.coveragerc
+
+# Documentation build
+docs/_build/
+docs/build/
+site/
+
+# Package files
+*.whl
+*.tar.gz
+
+# Ruff
+.ruff_cache/
+
+# Type checking
+.pytype/
+.pyre/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Virtual environments (comprehensive)
+.Python
+[Bb]in
+[Ii]nclude
+[Ll]ib
+[Ll]ib64
+[Ll]ocal
+[Ss]cripts
+pyvenv.cfg
+.venv
+pip-selfcheck.json
+share/
+
+# Project logs
+src/logs/
+logs/*.log.*
+*.log.[0-9]*

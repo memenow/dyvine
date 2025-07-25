@@ -66,6 +66,8 @@ line_length = 88
 [tool.ruff]
 line-length = 88
 target-version = "py312"
+
+[tool.ruff.lint]
 select = [
     "E",  # pycodestyle errors
     "W",  # pycodestyle warnings
@@ -75,6 +77,7 @@ select = [
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
 ]
+ignore = ["B008", "B904"]  # Allow function calls in defaults and simplified exception handling
 
 [tool.mypy]
 python_version = "3.12"
