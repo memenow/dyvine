@@ -34,45 +34,44 @@ logger = ContextLogger(__name__)
 
 # Prometheus metrics
 r2_upload_requests = Counter(
-    "r2_upload_requests_total",
-    "Total number of R2 upload requests",
-    ["type", "status"]
+    "r2_upload_requests_total", "Total number of R2 upload requests", ["type", "status"]
 )
 
 r2_upload_bytes = Counter(
-    "r2_upload_bytes_sum",
-    "Total bytes uploaded to R2",
-    ["category"]
+    "r2_upload_bytes_sum", "Total bytes uploaded to R2", ["category"]
 )
 
 r2_upload_duration = Histogram(
     "r2_upload_duration_seconds",
     "Upload duration in seconds",
-    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
 )
 
 r2_upload_failures = Counter(
-    "r2_upload_failures_total",
-    "Total number of R2 upload failures",
-    ["error_type"]
+    "r2_upload_failures_total", "Total number of R2 upload failures", ["error_type"]
 )
+
 
 class StorageError(Exception):
     """Base exception for R2 storage operations."""
+
     pass
+
 
 class ContentType(str, Enum):
     """Enum for content type categories."""
+
     POSTS = "posts"
     LIVESTREAM = "livestream"
     STORY = "story"
 
+
 class R2StorageService:
     """Service for managing Cloudflare R2 object storage operations.
-    
+
     This class implements the storage path specifications, metadata management,
     retry logic, and monitoring for R2 storage operations.
-    
+
     Attributes:
         client: Boto3 S3 client configured for R2
         bucket: Name of the R2 bucket
@@ -80,53 +79,49 @@ class R2StorageService:
 
     def __init__(self) -> None:
         """Initialize the R2 storage service.
-        
+
         Configures the boto3 client with R2-specific settings and retry config.
         """
         # Check if R2 configuration is available
-        if not all([
-            settings.r2_endpoint,
-            settings.r2_account_id,
-            settings.r2_access_key_id,
-            settings.r2_secret_access_key,
-            settings.r2_bucket_name
-        ]):
-            logger.warning("R2 configuration incomplete, storage service will be disabled")
+        if not all(
+            [
+                settings.r2_endpoint,
+                settings.r2_account_id,
+                settings.r2_access_key_id,
+                settings.r2_secret_access_key,
+                settings.r2_bucket_name,
+            ]
+        ):
+            logger.warning(
+                "R2 configuration incomplete, storage service will be disabled"
+            )
             self.client = None
             self.bucket = None
             return
-        
+
         # Configure retry settings
-        config = Config(
-            retries=dict(
-                max_attempts=3,
-                mode="adaptive"
-            )
-        )
-        
+        config = Config(retries=dict(max_attempts=3, mode="adaptive"))
+
         # Format R2 endpoint URL
         endpoint_url = settings.r2_endpoint.format(account_id=settings.r2_account_id)
-        
+
         # Initialize S3 client for R2
         self.client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
             aws_access_key_id=settings.r2_access_key_id,
             aws_secret_access_key=settings.r2_secret_access_key,
-            config=config
+            config=config,
         )
         self.bucket = settings.r2_bucket_name
-        
+
         logger.info(
             "R2StorageService initialized",
-            extra={"bucket": self.bucket, "endpoint": settings.r2_endpoint}
+            extra={"bucket": self.bucket, "endpoint": settings.r2_endpoint},
         )
 
     def generate_ugc_path(
-        self,
-        user_id: str,
-        original_filename: str,
-        content_type: str
+        self, user_id: str, original_filename: str, content_type: str
     ) -> str:
         """Generate a storage path for user-generated content.
 
@@ -144,15 +139,15 @@ class R2StorageService:
         """
         # Get current UTC date for prefix
         date_prefix = datetime.now(timezone.utc).strftime("%Y%m%d")
-        
+
         # Base64 encode filename (URL safe)
-        safe_filename = base64.urlsafe_b64encode(
-            original_filename.encode()
-        ).decode().rstrip("=")
-        
+        safe_filename = (
+            base64.urlsafe_b64encode(original_filename.encode()).decode().rstrip("=")
+        )
+
         # Generate 8-char UUID
         uuid_str = str(uuid.uuid4())[:8]
-        
+
         # Get file extension
         ext = Path(original_filename).suffix.lower().lstrip(".")
         if not ext:
@@ -161,7 +156,7 @@ class R2StorageService:
                 ext = ext.lstrip(".")
             else:
                 ext = "bin"
-        
+
         # Determine content directory
         if content_type.startswith("image/"):
             content_dir = "images"
@@ -170,27 +165,24 @@ class R2StorageService:
             ext = "mp4"  # Standardize video extension
         else:
             raise StorageError(f"Unsupported content type: {content_type}")
-            
+
         # Construct path
         path = f"{content_dir}/{user_id}/{date_prefix}_{safe_filename}_{uuid_str}.{ext}"
-        
+
         logger.debug(
             "Generated UGC path",
             extra={
                 "user_id": user_id,
                 "original_filename": original_filename,
                 "content_type": content_type,
-                "path": path
-            }
+                "path": path,
+            },
         )
-        
+
         return path
 
     def generate_livestream_path(
-        self,
-        user_id: str,
-        stream_id: str,
-        timestamp: int
+        self, user_id: str, stream_id: str, timestamp: int
     ) -> str:
         """Generate a storage path for livestream recordings.
 
@@ -206,17 +198,17 @@ class R2StorageService:
             str: Generated storage path
         """
         path = f"livestreams/{user_id}/{stream_id}/recording_{timestamp}.mp4"
-        
+
         logger.debug(
             "Generated livestream path",
             extra={
                 "user_id": user_id,
                 "stream_id": stream_id,
                 "timestamp": timestamp,
-                "path": path
-            }
+                "path": path,
+            },
         )
-        
+
         return path
 
     def generate_metadata(
@@ -226,7 +218,7 @@ class R2StorageService:
         content_type: str,
         source: str,
         language: str = "zh-CN",
-        version: str = "1.0.0"
+        version: str = "1.0.0",
     ) -> Dict[str, str]:
         """Generate standardized metadata for content.
 
@@ -242,32 +234,31 @@ class R2StorageService:
             Dict[str, str]: Metadata dictionary
         """
         # Base64 encode author name
-        safe_author = base64.b64encode(
-            author.encode()
-        ).decode()
-        
+        safe_author = base64.b64encode(author.encode()).decode()
+
         # Get current UTC time
         now = datetime.now(timezone.utc)
-        
+
         metadata = {
             "author": safe_author,
             "category": category.value,
             "content-type": content_type,
             "created-date": now.isoformat(),
             "file-format": (
-                mimetypes.guess_extension(content_type, strict=False) or ""
-            ).lstrip(".") if content_type else "bin",
+                (mimetypes.guess_extension(content_type, strict=False) or "").lstrip(
+                    "."
+                )
+                if content_type
+                else "bin"
+            ),
             "language": language,
             "source": source,
             "uploaded-date": now.isoformat(),
-            "version": version
+            "version": version,
         }
-        
-        logger.debug(
-            "Generated metadata",
-            extra={"metadata": metadata}
-        )
-        
+
+        logger.debug("Generated metadata", extra={"metadata": metadata})
+
         return metadata
 
     async def upload_file(
@@ -275,7 +266,7 @@ class R2StorageService:
         file_path: Union[str, Path],
         storage_path: str,
         metadata: Dict[str, str],
-        content_type: Optional[str] = None
+        content_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Upload a file to R2 storage with retries.
 
@@ -292,17 +283,21 @@ class R2StorageService:
             StorageError: If upload fails after retries or storage is disabled
         """
         if self.client is None:
-            raise StorageError("R2 storage service is disabled due to missing configuration")
-            
+            raise StorageError(
+                "R2 storage service is disabled due to missing configuration"
+            )
+
         file_path = Path(file_path)
         if not file_path.exists():
             raise StorageError(f"File not found: {file_path}")
-            
+
         if not content_type:
-            content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-            
+            content_type = (
+                mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+            )
+
         file_size = file_path.stat().st_size
-        
+
         # Start upload metrics
         start_time = time.time()
         try:
@@ -315,84 +310,67 @@ class R2StorageService:
                     "metadata": metadata,
                     "bucket": self.bucket,
                     "endpoint": settings.r2_endpoint,
-                    "file_size": file_size
-                }
+                    "file_size": file_size,
+                },
             )
-            
+
             with open(file_path, "rb") as f:
                 self.client.put_object(
                     Bucket=self.bucket,
                     Key=storage_path,
                     Body=f,
                     ContentType=content_type,
-                    Metadata=metadata
+                    Metadata=metadata,
                 )
-                
+
             duration = time.time() - start_time
-            
+
             logger.info(
                 "Successfully uploaded file to R2",
                 extra={
                     "storage_path": storage_path,
                     "bucket": self.bucket,
                     "size_bytes": file_size,
-                    "duration_seconds": duration
-                }
+                    "duration_seconds": duration,
+                },
             )
-            
+
             # Update metrics
-            r2_upload_requests.labels(
-                type=metadata["category"],
-                status="success"
-            ).inc()
-            r2_upload_bytes.labels(
-                category=metadata["category"]
-            ).inc(file_size)
+            r2_upload_requests.labels(type=metadata["category"], status="success").inc()
+            r2_upload_bytes.labels(category=metadata["category"]).inc(file_size)
             r2_upload_duration.observe(duration)
-            
+
             # Generate presigned URL for temporary access (default 1 hour)
             url = self.client.generate_presigned_url(
-                'get_object',
-                Params={
-                    'Bucket': self.bucket,
-                    'Key': storage_path
-                },
-                ExpiresIn=3600  # 1 hour
+                "get_object",
+                Params={"Bucket": self.bucket, "Key": storage_path},
+                ExpiresIn=3600,  # 1 hour
             )
-            
+
             logger.info(
                 "File uploaded successfully",
                 extra={
                     "storage_path": storage_path,
                     "size_bytes": file_size,
                     "duration_seconds": duration,
-                    "presigned_url": url
-                }
+                    "presigned_url": url,
+                },
             )
-            
+
             return {
                 "storage_path": storage_path,
                 "presigned_url": url,
                 "size_bytes": file_size,
                 "content_type": content_type,
-                "metadata": metadata
+                "metadata": metadata,
             }
-            
+
         except (BotoCoreError, ClientError) as e:
-            r2_upload_requests.labels(
-                type=metadata["category"],
-                status="error"
-            ).inc()
-            r2_upload_failures.labels(
-                error_type=type(e).__name__
-            ).inc()
-            
+            r2_upload_requests.labels(type=metadata["category"], status="error").inc()
+            r2_upload_failures.labels(error_type=type(e).__name__).inc()
+
             logger.exception(
-                "Upload failed",
-                extra={
-                    "storage_path": storage_path,
-                    "error": str(e)
-                }
+                "Upload failed", extra={"storage_path": storage_path, "error": str(e)}
             )
             raise StorageError(f"Upload failed: {str(e)}") from e
 
@@ -409,15 +387,14 @@ class R2StorageService:
             StorageError: If object not found or other error occurs
         """
         if self.client is None:
-            raise StorageError("R2 storage service is disabled due to missing configuration")
-            
-        try:
-            response = self.client.head_object(
-                Bucket=self.bucket,
-                Key=storage_path
+            raise StorageError(
+                "R2 storage service is disabled due to missing configuration"
             )
+
+        try:
+            response = self.client.head_object(Bucket=self.bucket, Key=storage_path)
             return response.get("Metadata", {})
-            
+
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
@@ -434,32 +411,22 @@ class R2StorageService:
             StorageError: If deletion fails
         """
         if self.client is None:
-            raise StorageError("R2 storage service is disabled due to missing configuration")
-            
+            raise StorageError(
+                "R2 storage service is disabled due to missing configuration"
+            )
+
         try:
-            self.client.delete_object(
-                Bucket=self.bucket,
-                Key=storage_path
-            )
-            logger.info(
-                "Object deleted",
-                extra={"storage_path": storage_path}
-            )
-            
+            self.client.delete_object(Bucket=self.bucket, Key=storage_path)
+            logger.info("Object deleted", extra={"storage_path": storage_path})
+
         except ClientError as e:
             logger.exception(
-                "Deletion failed",
-                extra={
-                    "storage_path": storage_path,
-                    "error": str(e)
-                }
+                "Deletion failed", extra={"storage_path": storage_path, "error": str(e)}
             )
             raise StorageError(f"Deletion failed: {str(e)}")
 
     async def list_objects(
-        self,
-        prefix: str,
-        max_keys: int = 1000
+        self, prefix: str, max_keys: int = 1000
     ) -> List[Dict[str, Any]]:
         """List objects in R2 storage with the given prefix.
 
@@ -478,37 +445,30 @@ class R2StorageService:
             StorageError: If listing fails
         """
         if self.client is None:
-            raise StorageError("R2 storage service is disabled due to missing configuration")
-            
+            raise StorageError(
+                "R2 storage service is disabled due to missing configuration"
+            )
+
         try:
             response = self.client.list_objects_v2(
-                Bucket=self.bucket,
-                Prefix=prefix,
-                MaxKeys=max_keys
+                Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys
             )
-            
+
             objects = []
             for obj in response.get("Contents", []):
                 # Get metadata for each object
                 try:
-                    head = self.client.head_object(
-                        Bucket=self.bucket,
-                        Key=obj["Key"]
-                    )
+                    head = self.client.head_object(Bucket=self.bucket, Key=obj["Key"])
                     obj["Metadata"] = head.get("Metadata", {})
                 except ClientError:
                     obj["Metadata"] = {}
-                    
+
                 objects.append(obj)
-                
+
             return objects
-            
+
         except ClientError as e:
             logger.exception(
-                "List objects failed",
-                extra={
-                    "prefix": prefix,
-                    "error": str(e)
-                }
+                "List objects failed", extra={"prefix": prefix, "error": str(e)}
             )
             raise StorageError(f"List objects failed: {str(e)}")

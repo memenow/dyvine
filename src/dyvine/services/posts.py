@@ -18,32 +18,28 @@ The module also defines custom exceptions related to post operations, such as
 PostNotFoundError, UserNotFoundError, and DownloadError.
 """
 
-from typing import Dict, Optional, List, Any
-from pathlib import Path
 import asyncio
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from f2.apps.douyin.handler import DouyinHandler
 from f2.apps.douyin.db import AsyncUserDB
+from f2.apps.douyin.handler import DouyinHandler
 
-from ..core.logging import ContextLogger
 from ..core.exceptions import (
-    PostNotFoundError,
-    UserNotFoundError,
     DownloadError,
-    ServiceError
+    PostNotFoundError,
+    ServiceError,
+    UserNotFoundError,
 )
-from ..schemas.posts import (
-    PostType,
-    DownloadStatus,
-    BulkDownloadResponse,
-    PostDetail
-)
+from ..core.logging import ContextLogger
+from ..schemas.posts import BulkDownloadResponse, DownloadStatus, PostDetail, PostType
 
 logger = ContextLogger(__name__)
 
 # Alias for backward compatibility
 PostServiceError = ServiceError
+
 
 class PostService:
     """Service class for handling Douyin post operations.
@@ -90,14 +86,11 @@ class PostService:
                 raise PostNotFoundError(f"Post not found: {aweme_id}")
 
             post_data = post._to_dict()
-            
+
             # Parse create_time string into a Unix timestamp (integer)
             create_time_str = post_data.get("create_time")
             try:
-                create_time_dt = datetime.strptime(
-                    create_time_str,
-                    "%Y-%m-%d %H-%M-%S"
-                )
+                create_time_dt = datetime.strptime(create_time_str, "%Y-%m-%d %H-%M-%S")
                 create_time = int(create_time_dt.timestamp())
             except (ValueError, TypeError):
                 create_time = 0
@@ -109,7 +102,7 @@ class PostService:
                 post_type=self._determine_post_type(post_data),
                 video_info=self._extract_video_info(post_data),
                 images=self._extract_image_info(post_data),
-                statistics=post_data.get("statistics", {})
+                statistics=post_data.get("statistics", {}),
             )
 
         except PostNotFoundError:
@@ -117,7 +110,7 @@ class PostService:
         except Exception as e:
             logger.exception(
                 "Error fetching post detail",
-                extra={"aweme_id": aweme_id, "error": str(e)}
+                extra={"aweme_id": aweme_id, "error": str(e)},
             )
             raise PostServiceError(f"Failed to fetch post: {str(e)}") from e
 
@@ -147,14 +140,12 @@ class PostService:
                 extra={
                     "sec_user_id": sec_user_id,
                     "max_cursor": max_cursor,
-                    "count": count
-                }
+                    "count": count,
+                },
             )
 
             posts_iterator = self.handler.fetch_user_post_videos(
-                sec_user_id=sec_user_id,
-                max_cursor=max_cursor,
-                page_counts=count
+                sec_user_id=sec_user_id, max_cursor=max_cursor, page_counts=count
             )
 
             try:
@@ -175,7 +166,7 @@ class PostService:
                     post_type=self._determine_post_type(post),
                     video_info=self._extract_video_info(post),
                     images=self._extract_image_info(post),
-                    statistics=post.get("statistics", {})
+                    statistics=post.get("statistics", {}),
                 )
                 for post in posts_data.get("aweme_list", [])
             ]
@@ -185,7 +176,7 @@ class PostService:
         except Exception as e:
             logger.exception(
                 "Error fetching user posts",
-                extra={"sec_user_id": sec_user_id, "error": str(e)}
+                extra={"sec_user_id": sec_user_id, "error": str(e)},
             )
             raise PostServiceError(f"Failed to fetch user posts: {str(e)}") from e
 
@@ -211,73 +202,59 @@ class PostService:
         download_stats = {post_type: 0 for post_type in PostType}
         download_path = None
         total_posts = 0
-        
+
         try:
             # Get user profile
             logger.info("Fetching user profile", extra={"sec_user_id": sec_user_id})
             profile = await self.handler.fetch_user_profile(sec_user_id)
             if not profile:
                 raise UserNotFoundError(f"User not found: {sec_user_id}")
-            
+
             total_posts = profile.aweme_count or 0
             logger.info(
                 "User profile fetched",
                 extra={
                     "sec_user_id": sec_user_id,
                     "nickname": profile.nickname,
-                    "total_posts": total_posts
-                }
+                    "total_posts": total_posts,
+                },
             )
 
             # Set up user directory
             async with AsyncUserDB("douyin_users.db") as db:
                 user_path = await self.handler.get_or_add_user_data(
-                    self.handler.kwargs,
-                    sec_user_id,
-                    db
+                    self.handler.kwargs, sec_user_id, db
                 )
                 download_path = str(user_path)
                 logger.info(
-                    "Download directory created",
-                    extra={"download_path": download_path}
+                    "Download directory created", extra={"download_path": download_path}
                 )
 
             current_cursor = max_cursor
             while True:
                 try:
-                    posts = await self._fetch_posts_batch(
-                        sec_user_id,
-                        current_cursor
-                    )
+                    posts = await self._fetch_posts_batch(sec_user_id, current_cursor)
                     if not posts:
                         break
 
-                    await self._process_posts_batch(
-                        posts,
-                        download_stats,
-                        user_path
-                    )
+                    await self._process_posts_batch(posts, download_stats, user_path)
 
                     # Handle pagination
                     has_more = posts.get("has_more", False)
                     next_cursor = posts.get("max_cursor", 0)
-                    
+
                     if not has_more or not next_cursor:
                         break
-                        
+
                     if next_cursor == current_cursor:
                         next_cursor = current_cursor + 1
-                        
+
                     current_cursor = next_cursor
-                    logger.info(
-                        "Moving to next page",
-                        extra={"cursor": current_cursor}
-                    )
+                    logger.info("Moving to next page", extra={"cursor": current_cursor})
 
                 except Exception as batch_error:
                     logger.error(
-                        "Error processing batch",
-                        extra={"error": str(batch_error)}
+                        "Error processing batch", extra={"error": str(batch_error)}
                     )
                     continue
 
@@ -286,15 +263,12 @@ class PostService:
         except Exception as e:
             logger.exception(
                 "Error in download process",
-                extra={"sec_user_id": sec_user_id, "error": str(e)}
+                extra={"sec_user_id": sec_user_id, "error": str(e)},
             )
             raise DownloadError(f"Download failed: {str(e)}") from e
 
         return self._create_download_response(
-            sec_user_id,
-            download_path,
-            total_posts,
-            download_stats
+            sec_user_id, download_path, total_posts, download_stats
         )
 
     async def _fetch_posts_batch(
@@ -315,16 +289,13 @@ class PostService:
                 posts are found for the given user and cursor.
         """
         logger.info(
-            "Fetching posts batch",
-            extra={"sec_user_id": sec_user_id, "cursor": cursor}
+            "Fetching posts batch", extra={"sec_user_id": sec_user_id, "cursor": cursor}
         )
-        
+
         posts_iterator = self.handler.fetch_user_post_videos(
-            sec_user_id=sec_user_id,
-            max_cursor=cursor,
-            page_counts=20
+            sec_user_id=sec_user_id, max_cursor=cursor, page_counts=20
         )
-        
+
         try:
             posts_filter = await posts_iterator.__anext__()
             return posts_filter._to_dict()
@@ -347,24 +318,18 @@ class PostService:
                 downloaded content.
         """
         post_list = posts.get("aweme_list", [])
-        logger.info(
-            "Processing posts batch",
-            extra={"post_count": len(post_list)}
-        )
-        
+        logger.info("Processing posts batch", extra={"post_count": len(post_list)})
+
         for post in post_list:
             try:
                 post_type = self._determine_post_type(post)
                 await self._download_post_content(post, post_type, user_path)
                 download_stats[post_type] += 1
-                
+
             except Exception as e:
                 logger.error(
                     "Error processing post",
-                    extra={
-                        "aweme_id": post.get("aweme_id"),
-                        "error": str(e)
-                    }
+                    extra={"aweme_id": post.get("aweme_id"), "error": str(e)},
                 )
 
     def _determine_post_type(self, post: Dict[str, Any]) -> PostType:
@@ -379,7 +344,7 @@ class PostService:
         """
         try:
             aweme_type = int(post.get("aweme_type", post.get("type", -1)))
-            
+
             # Special post types
             if aweme_type == 1:
                 return PostType.LIVE
@@ -387,23 +352,22 @@ class PostService:
                 return PostType.COLLECTION
             elif aweme_type == 4:
                 return PostType.STORY
-                
+
             # Check for images and videos
             has_images = bool(post.get("images"))
             has_video = bool(
-                post.get("video_play_addr") or
-                post.get("video", {}).get("play_addr")
+                post.get("video_play_addr") or post.get("video", {}).get("play_addr")
             )
-            
+
             if has_images and has_video:
                 return PostType.MIXED
             elif has_images:
                 return PostType.IMAGES
             elif has_video:
                 return PostType.VIDEO
-                
+
             return PostType.UNKNOWN
-            
+
         except (ValueError, TypeError):
             return PostType.UNKNOWN
 
@@ -423,45 +387,36 @@ class PostService:
         """
         logger.info(
             "Downloading post content",
-            extra={
-                "aweme_id": post.get("aweme_id"),
-                "post_type": post_type
-            }
+            extra={"aweme_id": post.get("aweme_id"), "post_type": post_type},
         )
-        
+
         try:
             if post_type == PostType.LIVE:
                 await self.handler.downloader.create_live_download_tasks(
-                    self.handler.kwargs,
-                    [post],
-                    user_path
+                    self.handler.kwargs, [post], user_path
                 )
             elif post_type == PostType.COLLECTION:
                 await self.handler.downloader.create_collection_download_tasks(
-                    self.handler.kwargs,
-                    [post],
-                    user_path
+                    self.handler.kwargs, [post], user_path
                 )
             elif post_type == PostType.STORY:
                 await self.handler.downloader.create_story_download_tasks(
-                    self.handler.kwargs,
-                    [post],
-                    user_path
+                    self.handler.kwargs, [post], user_path
                 )
             else:
                 if PostType.IMAGES in (post_type, PostType.MIXED):
                     await self._download_images(post, user_path)
                 if PostType.VIDEO in (post_type, PostType.MIXED):
                     await self._download_video(post, user_path)
-                    
+
         except Exception as e:
             logger.error(
                 "Error downloading content",
                 extra={
                     "aweme_id": post.get("aweme_id"),
                     "post_type": post_type,
-                    "error": str(e)
-                }
+                    "error": str(e),
+                },
             )
             raise
 
@@ -484,9 +439,7 @@ class PostService:
             "create_time": post.get("create_time", ""),
         }
         await self.handler.downloader.create_image_download_tasks(
-            self.handler.kwargs,
-            image_data,
-            user_path
+            self.handler.kwargs, image_data, user_path
         )
 
     async def _download_video(
@@ -502,9 +455,7 @@ class PostService:
                 downloaded video.
         """
         await self.handler.downloader.create_download_tasks(
-            self.handler.kwargs,
-            [post],
-            user_path
+            self.handler.kwargs, [post], user_path
         )
 
     def _extract_image_urls(self, post: Dict[str, Any]) -> List[str]:
@@ -521,10 +472,13 @@ class PostService:
         if isinstance(images, list):
             for img in images:
                 if isinstance(img, dict) and img.get("url_list"):
-                    image_urls.extend([
-                        url for url in img["url_list"]
-                        if url and url.startswith("http")
-                    ])
+                    image_urls.extend(
+                        [
+                            url
+                            for url in img["url_list"]
+                            if url and url.startswith("http")
+                        ]
+                    )
         return image_urls
 
     def _extract_video_info(self, post: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -546,11 +500,13 @@ class PostService:
                 "duration": video.get("duration", 0),
                 "ratio": video.get("ratio", ""),
                 "width": play_addr.get("width", 0),
-                "height": play_addr.get("height", 0)
+                "height": play_addr.get("height", 0),
             }
         return None
 
-    def _extract_image_info(self, post: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    def _extract_image_info(
+        self, post: Dict[str, Any]
+    ) -> Optional[List[Dict[str, Any]]]:
         """Extract image information from a Douyin post.
 
         Args:
@@ -564,15 +520,17 @@ class PostService:
         images = post.get("images", [])
         if not images:
             return None
-            
+
         image_info = []
         for img in images:
             if isinstance(img, dict) and img.get("url_list"):
-                image_info.append({
-                    "url": img["url_list"][0],
-                    "width": img.get("width", 0),
-                    "height": img.get("height", 0)
-                })
+                image_info.append(
+                    {
+                        "url": img["url_list"][0],
+                        "width": img.get("width", 0),
+                        "height": img.get("height", 0),
+                    }
+                )
         return image_info if image_info else None
 
     def _create_download_response(
@@ -597,13 +555,17 @@ class PostService:
                 download operation.
         """
         total_downloaded = sum(download_stats.values())
-        
+
         status = (
-            DownloadStatus.SUCCESS if total_downloaded == total_posts
-            else DownloadStatus.PARTIAL_SUCCESS if total_downloaded > 0
-            else DownloadStatus.FAILED
+            DownloadStatus.SUCCESS
+            if total_downloaded == total_posts
+            else (
+                DownloadStatus.PARTIAL_SUCCESS
+                if total_downloaded > 0
+                else DownloadStatus.FAILED
+            )
         )
-        
+
         message = (
             f"Downloaded {total_downloaded} out of {total_posts} posts. "
             f"(Videos: {download_stats[PostType.VIDEO]}, "
@@ -614,7 +576,7 @@ class PostService:
             f"Stories: {download_stats[PostType.STORY]}) "
             f"Files saved to {download_path}"
         )
-        
+
         return BulkDownloadResponse(
             sec_user_id=sec_user_id,
             download_path=download_path,
@@ -622,5 +584,5 @@ class PostService:
             downloaded_count=download_stats,
             total_downloaded=total_downloaded,
             status=status,
-            message=message
+            message=message,
         )

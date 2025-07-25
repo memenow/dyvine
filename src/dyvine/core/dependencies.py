@@ -94,10 +94,10 @@ class ServiceContainer:
 
         # Initialize Douyin handler with configuration
         douyin_config = self._create_douyin_config()
-        self._services['douyin_handler'] = DouyinHandler(douyin_config)
+        self._services["douyin_handler"] = DouyinHandler(douyin_config)
 
         # Initialize user service
-        self._services['user_service'] = UserService()
+        self._services["user_service"] = UserService()
 
         self._initialized = True
 
@@ -159,7 +159,7 @@ class ServiceContainer:
         Returns:
             DouyinHandler instance configured with application settings.
         """
-        return self.get_service('douyin_handler')
+        return self.get_service("douyin_handler")
 
     @property
     def user_service(self) -> UserService:
@@ -168,7 +168,7 @@ class ServiceContainer:
         Returns:
             UserService instance for user-related operations.
         """
-        return self.get_service('user_service')
+        return self.get_service("user_service")
 
 
 @lru_cache
@@ -234,4 +234,3 @@ def get_user_service() -> UserService:
             return await service.get_user(user_id)
     """
     return get_service_container().user_service
-

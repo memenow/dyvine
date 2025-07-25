@@ -55,24 +55,22 @@ Dependencies:
 
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Path, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+
+from ..core.dependencies import get_user_service
+from ..core.logging import ContextLogger
+from ..schemas.users import DownloadResponse, UserDownloadRequest, UserResponse
 from ..services.users import (
+    DownloadError,
+    UserNotFoundError,
     UserService,
     UserServiceError,
-    UserNotFoundError,
-    DownloadError
 )
-from ..schemas.users import (
-    UserResponse,
-    DownloadResponse,
-    UserDownloadRequest
-)
-from ..core.logging import ContextLogger
-from ..core.dependencies import get_user_service
 
 # Create router with comprehensive error response documentation
 router = APIRouter(
-    prefix="/users", 
+    prefix="/users",
     tags=["users"],
     responses={
         404: {
@@ -82,10 +80,10 @@ router = APIRouter(
                     "example": {
                         "error": True,
                         "message": "User not found",
-                        "error_code": "USER_NOT_FOUND"
+                        "error_code": "USER_NOT_FOUND",
                     }
                 }
-            }
+            },
         },
         422: {
             "description": "Validation error in request parameters",
@@ -94,10 +92,10 @@ router = APIRouter(
                     "example": {
                         "error": True,
                         "message": "Invalid user ID format",
-                        "error_code": "VALIDATION_ERROR"
+                        "error_code": "VALIDATION_ERROR",
                     }
                 }
-            }
+            },
         },
         500: {
             "description": "Internal server error",
@@ -106,30 +104,31 @@ router = APIRouter(
                     "example": {
                         "error": True,
                         "message": "Internal server error occurred",
-                        "error_code": "INTERNAL_SERVER_ERROR"
+                        "error_code": "INTERNAL_SERVER_ERROR",
                     }
                 }
-            }
-        }
-    }
+            },
+        },
+    },
 )
 
 # Initialize structured logger for this module
 logger = ContextLogger(__name__)
+
 
 @router.get(
     "/{user_id}",
     response_model=UserResponse,
     responses={
         404: {"description": "User not found"},
-        500: {"description": "Internal server error"}
+        500: {"description": "Internal server error"},
     },
     summary="Get user information",
-    description="Retrieves detailed information about a specific Douyin user"
+    description="Retrieves detailed information about a specific Douyin user",
 )
 async def get_user(
     user_id: str = Path(..., description="The unique identifier of the user"),
-    service: UserService = Depends(get_user_service)
+    service: UserService = Depends(get_user_service),
 ) -> UserResponse:
     """Retrieves information about a specific Douyin user.
 
@@ -154,27 +153,27 @@ async def get_user(
 
     except Exception as e:
         logger.exception(
-            "Error processing get_user request",
-            extra={"user_id": user_id}
+            "Error processing get_user request", extra={"user_id": user_id}
         )
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.post(
     "/{user_id}/content:download",
     response_model=DownloadResponse,
     summary="Download user content",
-    description="Initiates a download task for a user's content with specified options"
+    description="Initiates a download task for a user's content with specified options",
 )
 async def download_user_content(
     user_id: str = Path(..., description="The unique identifier of the user"),
     include_posts: bool = Query(True, description="Whether to download user's posts"),
-    include_likes: bool = Query(False, description="Whether to download user's liked posts"),
-    max_items: Optional[int] = Query(
-        None,
-        description="Maximum number of items to download (None for all)",
-        gt=0
+    include_likes: bool = Query(
+        False, description="Whether to download user's liked posts"
     ),
-    service: UserService = Depends(get_user_service)
+    max_items: Optional[int] = Query(
+        None, description="Maximum number of items to download (None for all)", gt=0
+    ),
+    service: UserService = Depends(get_user_service),
 ) -> DownloadResponse:
     """Initiates a download task for a user's content.
 
@@ -198,37 +197,39 @@ async def download_user_content(
                 "user_id": user_id,
                 "include_posts": include_posts,
                 "include_likes": include_likes,
-                "max_items": max_items
-            }
+                "max_items": max_items,
+            },
         )
         async with logger.track_time("download_user_content"):
             return await service.start_download(
                 user_id,
                 include_posts=include_posts,
                 include_likes=include_likes,
-                max_items=max_items
+                max_items=max_items,
             )
-            
+
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail=str(e))
-        
+
     except Exception as e:
         logger.exception(
-            "Error processing download_user_content request",
-            extra={"user_id": user_id}
+            "Error processing download_user_content request", extra={"user_id": user_id}
         )
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get(
     "/operations/{operation_id}",
     response_model=DownloadResponse,
     summary="Get operation status",
-    description="Retrieves the current status of a long-running download operation"
+    description="Retrieves the current status of a long-running download operation",
 )
 async def get_operation(
-    operation_id: str = Path(..., description="The unique identifier of the download operation"),
-    service: UserService = Depends(get_user_service)
+    operation_id: str = Path(
+        ..., description="The unique identifier of the download operation"
+    ),
+    service: UserService = Depends(get_user_service),
 ) -> DownloadResponse:
     """Retrieves the status of a long-running download operation.
 
@@ -244,22 +245,18 @@ async def get_operation(
     """
     try:
         logger.info(
-            "Processing get_operation request",
-            extra={"operation_id": operation_id}
+            "Processing get_operation request", extra={"operation_id": operation_id}
         )
         async with logger.track_time("get_operation"):
             return await service.get_download_status(operation_id)
-            
+
     except DownloadError as e:
-        logger.warning(
-            "Operation not found",
-            extra={"operation_id": operation_id}
-        )
+        logger.warning("Operation not found", extra={"operation_id": operation_id})
         raise HTTPException(status_code=404, detail=str(e))
-        
+
     except Exception as e:
         logger.exception(
             "Error processing get_operation request",
-            extra={"operation_id": operation_id}
+            extra={"operation_id": operation_id},
         )
         raise HTTPException(status_code=500, detail=str(e))
