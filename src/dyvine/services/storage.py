@@ -149,9 +149,9 @@ class R2StorageService:
         # Get file extension
         ext = Path(original_filename).suffix.lower().lstrip(".")
         if not ext:
-            ext = mimetypes.guess_extension(content_type, strict=False)
-            if ext:
-                ext = ext.lstrip(".")
+            guessed_ext = mimetypes.guess_extension(content_type, strict=False)
+            if guessed_ext:
+                ext = guessed_ext.lstrip(".")
             else:
                 ext = "bin"
 

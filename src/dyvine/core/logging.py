@@ -4,6 +4,7 @@ import json
 import logging
 import logging.handlers
 import sys
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ class JSONFormatter(logging.Formatter):
             "line": record.lineno,
         }
 
-        if record.exc_info:
+        if record.exc_info and record.exc_info[0] is not None:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__,
                 "message": str(record.exc_info[1]),
@@ -92,7 +93,7 @@ class ContextLogger:
         return self
 
     @asynccontextmanager
-    async def track_time(self, operation: str):
+    async def track_time(self, operation: str) -> AsyncGenerator[None, None]:
         start = perf_counter()
         try:
             yield
@@ -103,7 +104,7 @@ class ContextLogger:
             )
 
     @asynccontextmanager
-    async def track_memory(self, operation: str):
+    async def track_memory(self, operation: str) -> AsyncGenerator[None, None]:
         import psutil
 
         process = psutil.Process()
@@ -121,7 +122,12 @@ class ContextLogger:
             )
 
     def _log(
-        self, level: int, msg: str, *args, exc_info: bool = False, **kwargs
+        self,
+        level: int,
+        msg: str,
+        *args: Any,
+        exc_info: bool = False,
+        **kwargs: Any,
     ) -> None:
         extra = kwargs.pop("extra", {})
         if self.correlation_id:
@@ -130,18 +136,18 @@ class ContextLogger:
             extra.update(self.context)
         self.logger.log(level, msg, *args, exc_info=exc_info, extra=extra, **kwargs)
 
-    def debug(self, msg: str, *args, **kwargs) -> None:
+    def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._log(logging.DEBUG, msg, *args, **kwargs)
 
-    def info(self, msg: str, *args, **kwargs) -> None:
+    def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._log(logging.INFO, msg, *args, **kwargs)
 
-    def warning(self, msg: str, *args, **kwargs) -> None:
+    def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._log(logging.WARNING, msg, *args, **kwargs)
 
-    def error(self, msg: str, *args, **kwargs) -> None:
+    def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._log(logging.ERROR, msg, *args, **kwargs)
 
-    def exception(self, msg: str, *args, **kwargs) -> None:
+    def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
         kwargs["exc_info"] = True
         self._log(logging.ERROR, msg, *args, **kwargs)

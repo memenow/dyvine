@@ -22,8 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from f2.apps.douyin.db import AsyncUserDB
-from f2.apps.douyin.handler import DouyinHandler
+from f2.apps.douyin.db import AsyncUserDB  # type: ignore
+from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..core.exceptions import (
     DownloadError,

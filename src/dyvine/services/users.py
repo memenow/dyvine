@@ -68,7 +68,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from f2.apps.douyin.handler import DouyinHandler
+from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
@@ -149,13 +149,13 @@ class UserService:
     _instance = None
     _active_downloads: dict[str, dict] = {}
 
-    def __new__(cls):
+    def __new__(cls) -> "UserService":
         """Ensure a single instance of the UserService class (Singleton pattern)."""
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the UserService instance (only once)."""
         # Skip initialization if already initialized
         if hasattr(self, "_initialized"):

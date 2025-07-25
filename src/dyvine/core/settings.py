@@ -24,7 +24,7 @@ Example:
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -102,7 +102,7 @@ class SecuritySettings(BaseSettings):
     )
 
     @field_validator("secret_key", "api_key")
-    def validate_not_default(cls, v: str, info) -> str:
+    def validate_not_default(cls, v: str, info: ValidationInfo) -> str:
         """Validate that production secrets are not using default values.
 
         Args:
