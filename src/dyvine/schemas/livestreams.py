@@ -5,7 +5,7 @@ including request and response models for downloads and status tracking.
 
 Typical usage example:
     from .schemas.livestreams import LiveStreamDownloadRequest
-    
+
     request = LiveStreamDownloadRequest(
         user_id="123456",
         output_path="/downloads/stream.mp4"

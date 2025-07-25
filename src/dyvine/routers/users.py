@@ -34,7 +34,7 @@ Data Privacy:
 Example Usage:
     Get user profile:
         GET /api/v1/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc
-        
+
     Download user content:
         POST /api/v1/users/MS4wLjABAAAA.../content:download
         {
@@ -42,7 +42,7 @@ Example Usage:
             "include_likes": false,
             "max_items": 100
         }
-        
+
     Check download status:
         GET /api/v1/users/operations/550e8400-e29b-41d4-a716-446655440000
 

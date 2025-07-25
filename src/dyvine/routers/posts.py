@@ -23,10 +23,10 @@ Rate Limiting:
 Example Usage:
     Get post details:
         GET /api/v1/posts/7123456789012345678
-        
+
     List user posts:
         GET /api/v1/posts/users/MS4wLjABAAAA.../posts?count=20&max_cursor=0
-        
+
     Download user posts:
         POST /api/v1/posts/users/MS4wLjABAAAA.../posts:download
 """

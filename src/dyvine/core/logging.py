@@ -57,7 +57,10 @@ def setup_logging() -> None:
     # File handler with rotation
     log_file = logs_dir / f"dyvine-{datetime.now():%Y-%m-%d}.log"
     file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"  # 10MB
+        log_file,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",  # 10MB
     )
     file_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(file_handler)

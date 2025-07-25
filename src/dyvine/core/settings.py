@@ -5,14 +5,14 @@ using Pydantic Settings with environment variable support and validation.
 
 The settings are organized into logical groups:
 - APISettings: Core API configuration
-- SecuritySettings: Authentication and security settings  
+- SecuritySettings: Authentication and security settings
 - R2Settings: Cloudflare R2 storage configuration
 - DouyinSettings: Douyin platform-specific settings
 
 Example:
     Basic usage:
         from dyvine.core.settings import settings
-        
+
         if settings.debug:
             print(f"Running {settings.project_name} v{settings.version}")
 

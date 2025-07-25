@@ -34,7 +34,7 @@ Usage Patterns:
     Dependency Injection:
         service = UserService()
         user_info = await service.get_user_info(user_id)
-        
+
     Download Operations:
         download_task = await service.download_user_content(
             user_id="MS4wLjABAAAA...",
@@ -42,7 +42,7 @@ Usage Patterns:
             include_likes=False,
             max_items=100
         )
-        
+
     Status Monitoring:
         status = await service.get_operation_status(task_id)
 
@@ -441,8 +441,7 @@ class UserService:
             if completion_percentage >= 100:
                 # Consider anything >= 100% as complete success
                 logger.info(
-                    f"Successfully downloaded {downloaded_count} posts "
-                    f"(100% complete)"
+                    f"Successfully downloaded {downloaded_count} posts (100% complete)"
                 )
                 task["status"] = "completed"
                 task["progress"] = 100.0

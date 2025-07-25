@@ -44,13 +44,13 @@ Environment Configuration:
 Example Usage:
     Start the development server:
         uvicorn src.dyvine.main:app --reload --host 0.0.0.0 --port 8000
-        
+
     Production deployment:
         gunicorn src.dyvine.main:app -w 4 -k uvicorn.workers.UvicornWorker
-        
+
     Health check:
         curl http://localhost:8000/health
-        
+
     API documentation:
         Open http://localhost:8000/docs for Swagger UI
         Open http://localhost:8000/redoc for ReDoc documentation
