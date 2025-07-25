@@ -10,12 +10,13 @@ All models include proper type hints and validation.
 """
 
 from enum import Enum
-from typing import Dict, Optional, List
-from pydantic import BaseModel, Field, HttpUrl, ConfigDict
+
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+
 
 class PostType(str, Enum):
     """Enumeration of possible post content types.
-    
+
     Attributes:
         VIDEO: Single video content
         IMAGES: Image or multiple images
@@ -35,7 +36,7 @@ class PostType(str, Enum):
 
 class DownloadStatus(str, Enum):
     """Enumeration of possible download operation statuses.
-    
+
     Attributes:
         SUCCESS: All content downloaded successfully
         PARTIAL_SUCCESS: Some content downloaded successfully
@@ -47,7 +48,7 @@ class DownloadStatus(str, Enum):
 
 class PostBase(BaseModel):
     """Base model for post data.
-    
+
     Attributes:
         aweme_id: Unique identifier for the post
         desc: Post description/caption
@@ -59,7 +60,7 @@ class PostBase(BaseModel):
 
 class VideoInfo(BaseModel):
     """Video information model.
-    
+
     Attributes:
         play_addr: Video playback URL
         duration: Video duration in seconds
@@ -75,7 +76,7 @@ class VideoInfo(BaseModel):
 
 class ImageInfo(BaseModel):
     """Image information model.
-    
+
     Attributes:
         url: Image URL
         width: Image width in pixels
@@ -87,7 +88,7 @@ class ImageInfo(BaseModel):
 
 class PostDetail(PostBase):
     """Detailed post information model.
-    
+
     Attributes:
         post_type: Type of post content
         video_info: Video information if applicable
@@ -95,16 +96,17 @@ class PostDetail(PostBase):
         statistics: Post engagement statistics
     """
     post_type: PostType = Field(..., description="Type of post content")
-    video_info: Optional[VideoInfo] = Field(None, description="Video information")
-    images: Optional[List[ImageInfo]] = Field(None, description="List of image information")
-    statistics: Dict[str, int] = Field(
-        default_factory=dict,
-        description="Post engagement statistics"
+    video_info: VideoInfo | None = Field(None, description="Video information")
+    images: list[ImageInfo] | None = Field(
+        None, description="List of image information"
+    )
+    statistics: dict[str, int] = Field(
+        default_factory=dict, description="Post engagement statistics"
     )
 
 class BulkDownloadResponse(BaseModel):
     """Response model for bulk download operations.
-    
+
     Attributes:
         sec_user_id: Target user's identifier
         download_path: Local path where content was saved
@@ -118,7 +120,7 @@ class BulkDownloadResponse(BaseModel):
     sec_user_id: str = Field(..., description="Target user's identifier")
     download_path: str = Field(..., description="Local path where content was saved")
     total_posts: int = Field(..., description="Total number of posts available")
-    downloaded_count: Dict[PostType, int] = Field(
+    downloaded_count: dict[PostType, int] = Field(
         default_factory=lambda: {
             PostType.VIDEO: 0,
             PostType.IMAGES: 0,
@@ -135,7 +137,9 @@ class BulkDownloadResponse(BaseModel):
         description="Total number of successful downloads"
     )
     status: DownloadStatus = Field(..., description="Overall download operation status")
-    message: Optional[str] = Field(None, description="Human-readable status message")
-    error_details: Optional[str] = Field(None, description="Details of any errors encountered")
+    message: str | None = Field(None, description="Human-readable status message")
+    error_details: str | None = Field(
+        None, description="Details of any errors encountered"
+    )
 
     model_config = ConfigDict()

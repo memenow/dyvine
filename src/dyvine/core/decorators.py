@@ -1,28 +1,28 @@
 """Decorators for Dyvine."""
 
+from collections.abc import Callable
 from functools import wraps
-from typing import Callable, Dict, Type, Union
-from fastapi import HTTPException
-from fastapi.responses import JSONResponse
 
-from .logging import ContextLogger
+from fastapi import HTTPException
+
 from .exceptions import (
+    AuthenticationError,
+    DyvineError,
     NotFoundError,
+    RateLimitError,
     ServiceError,
     ValidationError,
-    AuthenticationError,
-    RateLimitError,
-    DyvineError
 )
+from .logging import ContextLogger
 
 
 def handle_errors(
-    error_mapping: Dict[Type[Exception], int] = None,
+    error_mapping: dict[type[Exception], int] = None,
     logger: ContextLogger = None
 ) -> Callable:
     """
     Decorator for handling exceptions in route handlers.
-    
+
     Args:
         error_mapping: Custom exception to status code mapping
         logger: Optional logger instance
@@ -34,10 +34,10 @@ def handle_errors(
         RateLimitError: 429,
         ServiceError: 500,
     }
-    
+
     if error_mapping:
         default_mapping.update(error_mapping)
-    
+
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def wrapper(*args, **kwargs):
@@ -60,13 +60,13 @@ def handle_errors(
                         "error_code": e.error_code,
                         "details": e.details
                     }
-                )
+                ) from e
             except Exception as e:
                 if logger:
                     logger.exception(f"Unexpected error: {str(e)}")
                 raise HTTPException(
                     status_code=500,
                     detail="Internal server error"
-                )
+                ) from e
         return wrapper
     return decorator
