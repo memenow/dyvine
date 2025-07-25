@@ -280,7 +280,7 @@ class R2StorageService:
         Raises:
             StorageError: If upload fails after retries or storage is disabled
         """
-        if self.client is None:
+        if self.client is None or self.bucket is None:
             raise StorageError(
                 "R2 storage service is disabled due to missing configuration"
             )
@@ -384,7 +384,7 @@ class R2StorageService:
         Raises:
             StorageError: If object not found or other error occurs
         """
-        if self.client is None:
+        if self.client is None or self.bucket is None:
             raise StorageError(
                 "R2 storage service is disabled due to missing configuration"
             )
@@ -394,8 +394,7 @@ class R2StorageService:
             return response.get("Metadata", {})
 
         except ClientError as e:
-            error_code = e.response["Error"]["Code"]
-            if error_code == "404":
+            if e.response.get("Error", {}).get("Code") == "404":
                 raise StorageError(f"Object not found: {storage_path}") from None
             raise StorageError(f"Error getting metadata: {str(e)}") from e
 
@@ -408,7 +407,7 @@ class R2StorageService:
         Raises:
             StorageError: If deletion fails
         """
-        if self.client is None:
+        if self.client is None or self.bucket is None:
             raise StorageError(
                 "R2 storage service is disabled due to missing configuration"
             )
@@ -442,7 +441,7 @@ class R2StorageService:
         Raises:
             StorageError: If listing fails
         """
-        if self.client is None:
+        if self.client is None or self.bucket is None:
             raise StorageError(
                 "R2 storage service is disabled due to missing configuration"
             )
@@ -452,18 +451,28 @@ class R2StorageService:
                 Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys
             )
 
-            objects = []
-            for obj in response.get("Contents", []):
-                # Get metadata for each object
+            objects = response.get("Contents", [])
+            results: list[dict[str, Any]] = []
+            for obj in objects:
+                obj_data: dict[str, Any] = {
+                    "Key": obj.get("Key"),
+                    "LastModified": obj.get("LastModified"),
+                    "ETag": obj.get("ETag"),
+                    "Size": obj.get("Size"),
+                    "StorageClass": obj.get("StorageClass"),
+                }
                 try:
-                    head = self.client.head_object(Bucket=self.bucket, Key=obj["Key"])
-                    obj["Metadata"] = head.get("Metadata", {})
+                    if "Key" in obj and obj["Key"]:
+                        head = self.client.head_object(
+                            Bucket=self.bucket, Key=obj["Key"]
+                        )
+                        obj_data["Metadata"] = head.get("Metadata", {})
+                    else:
+                        obj_data["Metadata"] = {}
                 except ClientError:
-                    obj["Metadata"] = {}
-
-                objects.append(obj)
-
-            return objects
+                    obj_data["Metadata"] = {}
+                results.append(obj_data)
+            return results
 
         except ClientError as e:
             logger.exception(

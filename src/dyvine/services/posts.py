@@ -317,8 +317,14 @@ class PostService:
 
         try:
             posts_filter = await posts_iterator.__anext__()
-            return posts_filter._to_dict()
+            return dict(posts_filter._to_dict())
         except StopAsyncIteration:
+            return {}
+        except Exception as e:
+            logger.exception(
+                "Error fetching posts batch",
+                extra={"sec_user_id": sec_user_id, "cursor": cursor, "error": str(e)},
+            )
             return {}
 
     async def _process_posts_batch(

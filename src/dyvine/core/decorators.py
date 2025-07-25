@@ -28,7 +28,7 @@ def handle_errors(
         error_mapping: Custom exception to status code mapping
         logger: Optional logger instance
     """
-    default_mapping = {
+    default_mapping: dict[type[Exception], int] = {
         NotFoundError: 404,
         ValidationError: 400,
         AuthenticationError: 401,
