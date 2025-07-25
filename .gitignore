@@ -197,6 +197,7 @@ data/douyin/logs/
 data/temp/
 data/cache/
 Download/
+temp_downloads/
 
 # Test data
 test/data/
@@ -210,6 +211,9 @@ server.log
 
 # FastAPI/Gunicorn
 gunicorn.conf.py
+gunicorn.pid
+gunicorn-error.log
+gunicorn-access.log
 
 # Temporary files
 *.tmp
@@ -232,3 +236,54 @@ config/production.py
 .claude
 .github/workflows/claude-code.yml
 .serena
+
+# Python tools and caches
+.ruff_cache/
+.mypy_cache/
+.pytype/
+
+# Cloudflare R2 storage config
+.r2-config
+r2-credentials.json
+
+# Monitoring and metrics
+prometheus-data/
+grafana-data/
+
+# Session data
+sessions/
+.sessions/
+
+# Pre-commit hooks
+.pre-commit-config.yaml.backup
+
+# Project logs
+logs/
+*.log
+
+# Jupyter notebooks
+*.ipynb_checkpoints
+.ipynb_checkpoints/
+
+# Profiling
+*.prof
+.profiling/
+
+# Documentation build
+docs/_build/
+docs/build/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Virtual environments
+.venv/
+venv/
+.env/
+env/
+
+# Project specific backups
+*.bak
+*.backup
