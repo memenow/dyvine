@@ -32,7 +32,7 @@ Example:
 from functools import lru_cache
 from typing import Any
 
-from f2.apps.douyin.handler import DouyinHandler
+from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..services.users import UserService
 from .settings import settings
@@ -168,7 +168,10 @@ class ServiceContainer:
         Returns:
             UserService instance for user-related operations.
         """
-        return self.get_service("user_service")
+        service = self.get_service("user_service")
+        if not isinstance(service, UserService):
+            raise TypeError("user_service is not a UserService instance")
+        return service
 
 
 @lru_cache

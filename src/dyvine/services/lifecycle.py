@@ -95,7 +95,12 @@ class LifecycleManager:
         Returns:
             Dict[str, Any]: Summary of actions taken
         """
-        summary = {"transitioned": 0, "deleted": 0, "errors": 0, "details": []}
+        summary: dict[str, Any] = {
+            "transitioned": 0,
+            "deleted": 0,
+            "errors": 0,
+            "details": [],
+        }
 
         try:
             # Process each content type
@@ -122,7 +127,7 @@ class LifecycleManager:
                     except Exception as e:
                         logger.exception(
                             "Error applying rule to object",
-                            extra={"object_key": obj["Key"], "error": str(e)},
+                            extra={"object_key": obj.get("Key"), "error": str(e)},
                         )
                         summary["errors"] += 1
 
@@ -149,16 +154,16 @@ class LifecycleManager:
             Optional[Dict[str, Any]]: Action taken, if any
         """
         now = datetime.now(UTC)
-        last_modified = obj["LastModified"].replace(tzinfo=UTC)
+        last_modified = obj.get("LastModified", now).replace(tzinfo=UTC)
         age_days = (now - last_modified).days
 
         # Check for deletion
         if "retention_days" in rule:
             if age_days >= rule["retention_days"]:
-                await self.storage.delete_object(obj["Key"])
+                await self.storage.delete_object(obj.get("Key", ""))
                 return {
                     "action": "delete",
-                    "object_key": obj["Key"],
+                    "object_key": obj.get("Key", ""),
                     "reason": (
                         f"Age {age_days} days exceeded retention "
                         f"{rule['retention_days']} days"
@@ -176,7 +181,7 @@ class LifecycleManager:
                 # R2 currently doesn't support storage class transitions
                 return {
                     "action": "transition",
-                    "object_key": obj["Key"],
+                    "object_key": obj.get("Key", ""),
                     "from_class": obj.get("StorageClass", "STANDARD"),
                     "to_class": transition["storage_class"],
                     "reason": (

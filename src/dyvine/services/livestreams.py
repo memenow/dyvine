@@ -1,8 +1,9 @@
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import httpx
-from f2.apps.douyin.dl import DouyinDownloader
+from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
 
 from ..core.exceptions import (
     DownloadError,
@@ -86,7 +87,9 @@ class LivestreamService:
         }
         return config
 
-    async def get_room_info(self, room_id: str, logger: ContextLogger = logger) -> dict:
+    async def get_room_info(
+        self, room_id: str, logger: ContextLogger = logger
+    ) -> dict[str, Any]:
         """Get room information for a given room ID.
 
         Args:

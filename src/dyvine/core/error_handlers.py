@@ -19,11 +19,11 @@ class ErrorResponse:
     def create_response(
         status_code: int,
         message: str,
-        error_code: str = None,
-        details: dict[str, Any] = None,
-        correlation_id: str = None,
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
         include_traceback: bool = False,
-        exception: Exception = None,
+        exception: Exception | None = None,
     ) -> JSONResponse:
         """Create standardized error response."""
         content = {
@@ -114,7 +114,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     )
 
 
-def register_error_handlers(app) -> None:
+def register_error_handlers(app: Any) -> None:
     """Register all error handlers with the FastAPI app."""
 
     # Handle all DyvineError subclasses with one handler

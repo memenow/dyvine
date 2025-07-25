@@ -213,7 +213,7 @@ app.add_middleware(
 
 
 @app.middleware("http")
-async def request_middleware(request: Request, call_next):
+async def request_middleware(request: Request, call_next: Any) -> Any:
     """HTTP request correlation and logging middleware.
 
     This middleware provides comprehensive request tracking and logging for all

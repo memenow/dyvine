@@ -67,7 +67,9 @@ async def download_livestream(
                 url=f"https://www.douyin.com/user/{user_id}", output_path=output_path
             )
 
-            return LiveStreamDownloadResponse(status=status, download_path=path)
+            return LiveStreamDownloadResponse(
+                status=status, download_path=path, error=None
+            )
 
     except DownloadError as e:
         logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
@@ -122,7 +124,9 @@ async def download_livestream_url(
                 url=request.url, output_path=request.output_path
             )
 
-            return LiveStreamDownloadResponse(status=status, download_path=path)
+            return LiveStreamDownloadResponse(
+                status=status, download_path=path, error=None
+            )
 
     except DownloadError as e:
         logger.error("Download failed", extra={"url": request.url, "error": str(e)})
@@ -170,7 +174,7 @@ async def get_download_status(
                 result = await service.get_download_status(operation_id)
                 logger.info("get_download_status completed")
                 return LiveStreamDownloadResponse(
-                    status="success", download_path=result
+                    status="success", download_path=result, error=None
                 )
             except NotImplementedError as e:
                 raise DownloadError("Operation not found") from e

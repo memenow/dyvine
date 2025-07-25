@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from functools import wraps
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -17,7 +18,8 @@ from .logging import ContextLogger
 
 
 def handle_errors(
-    error_mapping: dict[type[Exception], int] = None, logger: ContextLogger = None
+    error_mapping: dict[type[Exception], int] | None = None,
+    logger: ContextLogger | None = None,
 ) -> Callable:
     """
     Decorator for handling exceptions in route handlers.
@@ -39,7 +41,7 @@ def handle_errors(
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             try:
                 return await func(*args, **kwargs)
             except DyvineError as e:

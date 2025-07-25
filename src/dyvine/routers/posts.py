@@ -33,7 +33,7 @@ Example Usage:
 
 from typing import Annotated
 
-from f2.apps.douyin.handler import DouyinHandler
+from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from ..core.decorators import handle_errors
