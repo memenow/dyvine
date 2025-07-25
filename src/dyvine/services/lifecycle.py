@@ -22,7 +22,7 @@ from ..core.settings import settings
 from .storage import R2StorageService, StorageError, ContentType
 
 # Initialize logger
-logger = ContextLogger(logging.getLogger(__name__))
+logger = ContextLogger(__name__)
 
 class LifecycleError(Exception):
     """Base exception for lifecycle management operations."""

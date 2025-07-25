@@ -1,29 +1,41 @@
 # Build stage
-FROM continuumio/miniconda3:latest AS builder
+FROM python:3.12-slim AS builder
 
-# Copy environment file first for better caching
-COPY environment.yml .
+# Install system dependencies for building
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Create conda environment
-RUN conda env create -f environment.yml
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Install additional dependencies
-RUN conda run -n dyvine pip install uvicorn gunicorn
+# Copy dependency files first for better caching
+COPY pyproject.toml .
 
-# Runtime stage - use smaller base image
-FROM continuumio/miniconda3:latest
+# Install dependencies in virtual environment
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -e .
 
-# Install curl for health check
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# Runtime stage
+FROM python:3.12-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
 # Create non-root user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # Set working directory
 WORKDIR /app
-
-# Copy conda environment from builder
-COPY --from=builder /opt/conda/envs/dyvine /opt/conda/envs/dyvine
 
 # Create necessary directories with proper permissions
 RUN mkdir -p data/douyin/downloads/livestreams \
@@ -39,10 +51,10 @@ COPY pyproject.toml .
 RUN chown -R appuser:appuser /app
 
 # Set environment variables
-ENV PATH=/opt/conda/envs/dyvine/bin:$PATH \
-    PYTHONPATH=/app \
+ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
 
 # Switch to non-root user
 USER appuser

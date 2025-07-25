@@ -12,18 +12,17 @@ and includes comprehensive error handling and logging.
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, Path, Body
 from ..core.logging import ContextLogger
-from ..schemas.livestreams import LiveStreamDownloadRequest, LiveStreamDownloadResponse
+from ..schemas.livestreams import LiveStreamDownloadRequest, LiveStreamDownloadResponse, LiveStreamURLDownloadRequest
 from ..services.livestreams import (
     LivestreamService,
     LivestreamError,
     UserNotFoundError,
-    DownloadError,
-    livestream_service
+    DownloadError
 )
 
 router = APIRouter(prefix="/livestreams", tags=["livestreams"])
 import logging
-logger = ContextLogger(logging.getLogger(__name__))
+logger = ContextLogger(__name__)
 
 def get_livestream_service() -> LivestreamService:
     """Creates a configured LivestreamService instance.
@@ -70,7 +69,7 @@ async def download_livestream(
         
         async with logger.track_time("download_livestream"):
             status, path = await service.download_stream(
-                url=f"https://live.douyin.com/{user_id}",
+                url=f"https://www.douyin.com/user/{user_id}",
                 output_path=output_path
             )
             
@@ -107,6 +106,74 @@ async def download_livestream(
         logger.exception(
             "Error processing download_livestream request",
             extra={"user_id": user_id}
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post(
+    "/stream:download", 
+    response_model=LiveStreamDownloadResponse,
+    responses={
+        404: {"description": "Livestream not found"}, 
+        500: {"description": "Download failed"}
+    }
+)
+async def download_livestream_url(
+    request: LiveStreamURLDownloadRequest,
+    service: LivestreamService = Depends(get_livestream_service)
+) -> LiveStreamDownloadResponse:
+    """Downloads a livestream from a direct URL.
+
+    Args:
+        request: The download request containing the livestream URL.
+        service: Injected LiveStreamService instance.
+
+    Returns:
+        LiveStreamDownloadResponse: Contains download status and path information.
+
+    Raises:
+        HTTPException: If livestream not found (404) or download fails (500).
+    """
+    try:
+        logger.info(
+            "Processing download_livestream_url request",
+            extra={"url": request.url}
+        )
+        
+        async with logger.track_time("download_livestream_url"):
+            status, path = await service.download_stream(
+                url=request.url,
+                output_path=request.output_path
+            )
+            
+            return LiveStreamDownloadResponse(
+                status=status,
+                download_path=path
+            )
+            
+    except DownloadError as e:
+        logger.error(
+            "Download failed",
+            extra={
+                "url": request.url,
+                "error": str(e)
+            }
+        )
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    except LivestreamError as e:
+        logger.warning(
+            "Livestream error",
+            extra={
+                "url": request.url,
+                "error": str(e)
+            }
+        )
+        raise HTTPException(status_code=404, detail=str(e))
+        
+    except Exception as e:
+        logger.exception(
+            "Error processing download_livestream_url request",
+            extra={"url": request.url}
         )
         raise HTTPException(status_code=500, detail=str(e))
 
