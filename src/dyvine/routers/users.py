@@ -72,10 +72,10 @@ router = APIRouter(
                     "example": {
                         "error": True,
                         "message": "User not found",
-                        "error_code": "USER_NOT_FOUND"
+                        "error_code": "USER_NOT_FOUND",
                     }
                 }
-            }
+            },
         },
         422: {
             "description": "Validation error in request parameters",
@@ -84,10 +84,10 @@ router = APIRouter(
                     "example": {
                         "error": True,
                         "message": "Invalid user ID format",
-                        "error_code": "VALIDATION_ERROR"
+                        "error_code": "VALIDATION_ERROR",
                     }
                 }
-            }
+            },
         },
         500: {
             "description": "Internal server error",
@@ -96,26 +96,27 @@ router = APIRouter(
                     "example": {
                         "error": True,
                         "message": "Internal server error occurred",
-                        "error_code": "INTERNAL_SERVER_ERROR"
+                        "error_code": "INTERNAL_SERVER_ERROR",
                     }
                 }
-            }
-        }
-    }
+            },
+        },
+    },
 )
 
 # Initialize structured logger for this module
 logger = ContextLogger(__name__)
+
 
 @router.get(
     "/{user_id}",
     response_model=UserResponse,
     responses={
         404: {"description": "User not found"},
-        500: {"description": "Internal server error"}
+        500: {"description": "Internal server error"},
     },
     summary="Get user information",
-    description="Retrieves detailed information about a specific Douyin user"
+    description="Retrieves detailed information about a specific Douyin user",
 )
 async def get_user(
     user_id: str = Path(..., description="The unique identifier of the user"),
@@ -149,11 +150,12 @@ async def get_user(
         )
         raise HTTPException(status_code=500, detail=str(e)) from e
 
+
 @router.post(
     "/{user_id}/content:download",
     response_model=DownloadResponse,
     summary="Download user content",
-    description="Initiates a download task for a user's content with specified options"
+    description="Initiates a download task for a user's content with specified options",
 )
 async def download_user_content(
     user_id: str = Path(..., description="The unique identifier of the user"),
@@ -190,15 +192,15 @@ async def download_user_content(
                 "user_id": user_id,
                 "include_posts": include_posts,
                 "include_likes": include_likes,
-                "max_items": max_items
-            }
+                "max_items": max_items,
+            },
         )
         async with logger.track_time("download_user_content"):
             return await service.start_download(
                 user_id,
                 include_posts=include_posts,
                 include_likes=include_likes,
-                max_items=max_items
+                max_items=max_items,
             )
 
     except UserNotFoundError as e:
@@ -212,11 +214,12 @@ async def download_user_content(
         )
         raise HTTPException(status_code=500, detail=str(e)) from e
 
+
 @router.get(
     "/operations/{operation_id}",
     response_model=DownloadResponse,
     summary="Get operation status",
-    description="Retrieves the current status of a long-running download operation"
+    description="Retrieves the current status of a long-running download operation",
 )
 async def get_operation(
     operation_id: str = Path(
@@ -239,8 +242,7 @@ async def get_operation(
     """
     try:
         logger.info(
-            "Processing get_operation request",
-            extra={"operation_id": operation_id}
+            "Processing get_operation request", extra={"operation_id": operation_id}
         )
         async with logger.track_time("get_operation"):
             return await service.get_download_status(operation_id)

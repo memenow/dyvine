@@ -17,6 +17,7 @@ logger = ContextLogger(__name__)
 # Alias for backward compatibility
 LivestreamError = ServiceError
 
+
 class LivestreamService:
     """Service class for managing Douyin livestream operations.
 
@@ -51,37 +52,37 @@ class LivestreamService:
             Dict: Containing Douyin downloader configuration.
         """
         config = {
-            'cookie': self.settings.douyin_cookie,
-            'headers': {
-                'authority': 'live.douyin.com',
-                'accept': 'application/json, text/plain, */*',
-                'accept-language': 'zh-CN,zh;q=0.9,en;q=0.8',
-                'cache-control': 'no-cache',
-                'cookie': self.settings.douyin_cookie,
-                'origin': 'https://live.douyin.com',
-                'pragma': 'no-cache',
-                'referer': 'https://live.douyin.com/',
-                'sec-ch-ua': (
+            "cookie": self.settings.douyin_cookie,
+            "headers": {
+                "authority": "live.douyin.com",
+                "accept": "application/json, text/plain, */*",
+                "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "cache-control": "no-cache",
+                "cookie": self.settings.douyin_cookie,
+                "origin": "https://live.douyin.com",
+                "pragma": "no-cache",
+                "referer": "https://live.douyin.com/",
+                "sec-ch-ua": (
                     '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"'
                 ),
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"macOS"',
-                'sec-fetch-dest': 'empty',
-                'sec-fetch-mode': 'cors',
-                'sec-fetch-site': 'same-origin',
-                'user-agent': self.settings.douyin_user_agent,
-                'x-secsdk-csrf-token': (
-                    '000100000001d40084dca1e2d5f6e2f8c2e4d7e2d3c2e6e09fab5dcae72468976d4d15139b417e8c4527b6eb2ff0'
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-origin",
+                "user-agent": self.settings.douyin_user_agent,
+                "x-secsdk-csrf-token": (
+                    "000100000001d40084dca1e2d5f6e2f8c2e4d7e2d3c2e6e09fab5dcae72468976d4d15139b417e8c4527b6eb2ff0"
                 ),
-                'x-use-ppe': '1'
+                "x-use-ppe": "1",
             },
-            'proxies': self.settings.douyin_proxies,
-            'verify': True,
-            'timeout': 30,  # Default timeout
-            'naming': '{room_id}_{nickname}',
-            'mode': 'live',
-            'auto_cookie': True,
-            'folderize': False,
+            "proxies": self.settings.douyin_proxies,
+            "verify": True,
+            "timeout": 30,  # Default timeout
+            "naming": "{room_id}_{nickname}",
+            "mode": "live",
+            "auto_cookie": True,
+            "folderize": False,
         }
         return config
 
@@ -104,32 +105,32 @@ class LivestreamService:
 
             # Correct parameters format
             params = {
-                'type_id': '0',
-                'live_id': '1',
-                'room_id': room_id,
-                'app_id': '1128',
+                "type_id": "0",
+                "live_id": "1",
+                "room_id": room_id,
+                "app_id": "1128",
             }
 
             # Set appropriate headers with cookie
             headers = {
-                'authority': 'webcast.amemv.com',
-                'user-agent': (
-                    'Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_1 like Mac OS X) '
-                    'AppleWebKit/603.1.30 (KHTML, like Gecko) Version/10.0 '
-                    'Mobile/14E304 Safari/602.1'
+                "authority": "webcast.amemv.com",
+                "user-agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_1 like Mac OS X) "
+                    "AppleWebKit/603.1.30 (KHTML, like Gecko) Version/10.0 "
+                    "Mobile/14E304 Safari/602.1"
                 ),
-                'cookie': (
-                    '_tea_utm_cache_1128={'
-                    '%22utm_source%22:%22copy%22,'
-                    '%22utm_medium%22:%22android%22,'
-                    '%22utm_campaign%22:%22client_share%22}'
+                "cookie": (
+                    "_tea_utm_cache_1128={"
+                    "%22utm_source%22:%22copy%22,"
+                    "%22utm_medium%22:%22android%22,"
+                    "%22utm_campaign%22:%22client_share%22}"
                 ),
             }
 
             # Only include proxies if they are configured
             proxies = None
-            if any(self.config['proxies'].values()):
-                proxies = self.config['proxies']
+            if any(self.config["proxies"].values()):
+                proxies = self.config["proxies"]
 
             async with httpx.AsyncClient(
                 headers=headers,
@@ -154,7 +155,7 @@ class LivestreamService:
                 room_data = response_data["data"]["room"]
 
                 # Check if stream is live (status=2 means live)
-                status = room_data.get('status', 0)
+                status = room_data.get("status", 0)
                 logger.info(f"Room status: {status}")
 
                 return room_data
@@ -179,7 +180,7 @@ class LivestreamService:
 
             # Create concat file
             concat_file = output_dir / f"{room_id}_concat.txt"
-            with open(concat_file, 'w') as f:
+            with open(concat_file, "w") as f:
                 for ts_file in ts_files:
                     f.write(f"file '{ts_file.name}'\n")
 
@@ -192,7 +193,7 @@ class LivestreamService:
             process = await asyncio.create_subprocess_shell(
                 merge_command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
             await process.wait()
 
@@ -219,7 +220,7 @@ class LivestreamService:
             while True:
                 try:
                     room_info = await self.get_room_info(room_id)
-                    if room_info.get('status') != 2:  # Not live anymore
+                    if room_info.get("status") != 2:  # Not live anymore
                         logger.info(f"Stream ended for room {room_id}")
                         # Kill ffmpeg process
                         if room_id in self.download_processes:
@@ -271,15 +272,19 @@ class LivestreamService:
                 room_id = url
             # Handle livestream URL format: https://live.douyin.com/123456789
             elif "live.douyin.com/" in url:
-                parts = url.rstrip('/').split('/')
+                parts = url.rstrip("/").split("/")
                 if parts and parts[-1].isdigit():
                     room_id = parts[-1]
                 else:
-                    return "error", "Invalid livestream URL format. Expected: https://live.douyin.com/[room_id]"
+                    return (
+                        "error",
+                        "Invalid livestream URL format. Expected: https://live.douyin.com/[room_id]",
+                    )
             # Handle webcast.amemv.com URL format
             elif "webcast.amemv.com" in url and "/webcast/reflow/" in url:
                 import re
-                match = re.search(r'/webcast/reflow/(\d+)', url)
+
+                match = re.search(r"/webcast/reflow/(\d+)", url)
                 if match:
                     room_id = match.group(1)
                 else:
@@ -291,7 +296,7 @@ class LivestreamService:
             elif "douyin.com/user/" in url:
                 try:
                     # Extract user ID from URL
-                    user_id = url.split('/')[-1] if '/' in url else url
+                    user_id = url.split("/")[-1] if "/" in url else url
                     user_info = await self.user_service.get_user_info(user_id)
                     if not user_info.is_living or not user_info.room_id:
                         return "error", (
@@ -323,24 +328,24 @@ class LivestreamService:
                 return "error", str(e)
 
             # Check if user is live (status 2 = live)
-            status_code = room_info.get('status')
+            status_code = room_info.get("status")
             if status_code != 2:
                 return "error", (
                     f"User is not currently streaming (status code: {status_code})"
                 )
 
             # Get stream URL
-            stream_url = room_info.get('stream_url', {})
-            hls_pull_url_map = stream_url.get('hls_pull_url_map', {})
+            stream_url = room_info.get("stream_url", {})
+            hls_pull_url_map = stream_url.get("hls_pull_url_map", {})
             if not hls_pull_url_map:
                 logger.warning(f"No stream URLs found for room ID: {room_id}")
                 return "error", "No live stream available for this user"
 
             # Get highest quality stream URL (FULL_HD1)
-            stream_urls = hls_pull_url_map.get('FULL_HD1')
+            stream_urls = hls_pull_url_map.get("FULL_HD1")
             if not stream_urls:
                 # Fallback to HD1 if FULL_HD1 not available
-                stream_urls = hls_pull_url_map.get('HD1')
+                stream_urls = hls_pull_url_map.get("HD1")
                 if not stream_urls:
                     return "error", "No suitable quality stream found"
 
@@ -350,7 +355,6 @@ class LivestreamService:
             else:
                 output_dir = Path("data/douyin/downloads/livestreams")
             output_dir.mkdir(parents=True, exist_ok=True)
-
 
             # Add to active downloads
             self.active_downloads.add(room_id)
@@ -370,7 +374,7 @@ class LivestreamService:
                 process = await asyncio.create_subprocess_shell(
                     command,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                    stderr=asyncio.subprocess.PIPE,
                 )
 
                 # Store process for later cleanup
@@ -419,6 +423,7 @@ class LivestreamService:
             return "Merging downloaded files."
 
         raise NotImplementedError("Operation not found or status unknown.")
+
 
 # Create service instance after class definition
 livestream_service = LivestreamService()

@@ -31,7 +31,6 @@ Example Usage:
         POST /api/v1/posts/users/MS4wLjABAAAA.../posts:download
 """
 
-
 from typing import Annotated
 
 from f2.apps.douyin.handler import DouyinHandler
@@ -54,8 +53,8 @@ router = APIRouter(
     responses={
         404: {"description": "Post or user not found"},
         422: {"description": "Validation error"},
-        500: {"description": "Internal server error"}
-    }
+        500: {"description": "Internal server error"},
+    },
 )
 
 
@@ -64,6 +63,7 @@ async def get_post_service(
 ) -> PostService:
     """Create PostService instance with injected Douyin handler."""
     return PostService(douyin_handler)
+
 
 @router.get(
     "/{post_id}",
@@ -134,12 +134,10 @@ async def get_post(
     """
     logger.info(
         "Fetching post details",
-        extra={
-            "post_id": post_id,
-            "operation": "get_post_detail"
-        }
+        extra={"post_id": post_id, "operation": "get_post_detail"},
     )
     return await service.get_post_detail(post_id)
+
 
 @router.get(
     "/users/{user_id}/posts",
@@ -238,11 +236,7 @@ async def list_user_posts(
     try:
         logger.info(
             "Processing list_user_posts request",
-            extra={
-                "user_id": user_id,
-                "max_cursor": max_cursor,
-                "count": count
-            }
+            extra={"user_id": user_id, "max_cursor": max_cursor, "count": count},
         )
         return await service.get_user_posts(user_id, max_cursor, count)
 
@@ -252,16 +246,16 @@ async def list_user_posts(
 
     except Exception as e:
         logger.exception(
-            "Error processing list_user_posts request",
-            extra={"user_id": user_id}
+            "Error processing list_user_posts request", extra={"user_id": user_id}
         )
         raise HTTPException(status_code=500, detail=str(e)) from e
+
 
 @router.post(
     "/users/{user_id}/posts:download",
     response_model=BulkDownloadResponse,
     summary="Download user posts",
-    description="Downloads all available posts from a specific user"
+    description="Downloads all available posts from a specific user",
 )
 async def download_user_posts(
     service: Annotated[PostService, Depends(get_post_service)],
@@ -285,10 +279,7 @@ async def download_user_posts(
     try:
         logger.info(
             "Processing download_user_posts request",
-            extra={
-                "user_id": user_id,
-                "max_cursor": max_cursor
-            }
+            extra={"user_id": user_id, "max_cursor": max_cursor},
         )
         return await service.download_all_user_posts(user_id, max_cursor)
 
@@ -297,15 +288,11 @@ async def download_user_posts(
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     except DownloadError as e:
-        logger.error(
-            "Download failed",
-            extra={"user_id": user_id, "error": str(e)}
-        )
+        logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
-            "Error processing download_user_posts request",
-            extra={"user_id": user_id}
+            "Error processing download_user_posts request", extra={"user_id": user_id}
         )
         raise HTTPException(status_code=500, detail=str(e)) from e

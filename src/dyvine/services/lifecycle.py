@@ -22,9 +22,12 @@ from .storage import ContentType, R2StorageService
 # Initialize logger
 logger = ContextLogger(__name__)
 
+
 class LifecycleError(Exception):
     """Base exception for lifecycle management operations."""
+
     pass
+
 
 class LifecycleManager:
     """Service for managing R2 storage lifecycle policies.
@@ -50,8 +53,7 @@ class LifecycleManager:
         self._load_config()
 
         logger.info(
-            "LifecycleManager initialized",
-            extra={"rules_count": len(self.rules)}
+            "LifecycleManager initialized", extra={"rules_count": len(self.rules)}
         )
 
     def _load_config(self) -> None:
@@ -64,24 +66,17 @@ class LifecycleManager:
                 config = json.load(f)
 
             # Validate and store rules
-            self.rules = {
-                rule["content_type"]: rule
-                for rule in config["rules"]
-            }
+            self.rules = {rule["content_type"]: rule for rule in config["rules"]}
             self.audit_config = config["audit"]
 
             logger.info(
                 "Loaded lifecycle configuration",
-                extra={
-                    "version": config["version"],
-                    "rules": list(self.rules.keys())
-                }
+                extra={"version": config["version"], "rules": list(self.rules.keys())},
             )
 
         except Exception as e:
             logger.exception(
-                "Failed to load lifecycle configuration",
-                extra={"error": str(e)}
+                "Failed to load lifecycle configuration", extra={"error": str(e)}
             )
             raise LifecycleError(
                 f"Failed to load lifecycle configuration: {str(e)}"
@@ -100,12 +95,7 @@ class LifecycleManager:
         Returns:
             Dict[str, Any]: Summary of actions taken
         """
-        summary = {
-            "transitioned": 0,
-            "deleted": 0,
-            "errors": 0,
-            "details": []
-        }
+        summary = {"transitioned": 0, "deleted": 0, "errors": 0, "details": []}
 
         try:
             # Process each content type
@@ -132,10 +122,7 @@ class LifecycleManager:
                     except Exception as e:
                         logger.exception(
                             "Error applying rule to object",
-                            extra={
-                                "object_key": obj["Key"],
-                                "error": str(e)
-                            }
+                            extra={"object_key": obj["Key"], "error": str(e)},
                         )
                         summary["errors"] += 1
 
@@ -146,18 +133,11 @@ class LifecycleManager:
             return summary
 
         except Exception as e:
-            logger.exception(
-                "Error applying lifecycle rules",
-                extra={"error": str(e)}
-            )
-            raise LifecycleError(
-                f"Lifecycle rule application failed: {str(e)}"
-            ) from e
+            logger.exception("Error applying lifecycle rules", extra={"error": str(e)})
+            raise LifecycleError(f"Lifecycle rule application failed: {str(e)}") from e
 
     async def _apply_rule_to_object(
-        self,
-        obj: dict[str, Any],
-        rule: dict[str, Any]
+        self, obj: dict[str, Any], rule: dict[str, Any]
     ) -> dict[str, Any] | None:
         """Apply a lifecycle rule to a specific object.
 
@@ -189,8 +169,8 @@ class LifecycleManager:
         if "transition" in rule:
             transition = rule["transition"]
             if (
-                age_days >= transition["days"] and
-                obj.get("StorageClass") != transition["storage_class"]
+                age_days >= transition["days"]
+                and obj.get("StorageClass") != transition["storage_class"]
             ):
                 # Note: Actual transition would be implemented here
                 # R2 currently doesn't support storage class transitions
@@ -226,7 +206,7 @@ class LifecycleManager:
                         action=action["action"],
                         object_key=action["object_key"],
                         metadata_size="0B",
-                        status="success"
+                        status="success",
                     )
                     f.write(log_entry + "\n")
 
@@ -234,10 +214,7 @@ class LifecycleManager:
             self._rotate_audit_logs()
 
         except Exception as e:
-            logger.exception(
-                "Failed to write audit log",
-                extra={"error": str(e)}
-            )
+            logger.exception("Failed to write audit log", extra={"error": str(e)})
 
     def _rotate_audit_logs(self) -> None:
         """Rotate audit logs based on retention policy."""
@@ -247,37 +224,25 @@ class LifecycleManager:
             if not log_dir.exists():
                 return
 
-            cutoff = datetime.now(UTC) - timedelta(
-                days=retention_days
-            )
+            cutoff = datetime.now(UTC) - timedelta(days=retention_days)
 
             for log_file in log_dir.glob("r2_lifecycle_audit.*.log"):
                 try:
                     # Parse timestamp from filename
                     timestamp_str = log_file.stem.split(".")[-1]
-                    timestamp = datetime.strptime(
-                        timestamp_str,
-                        "%Y%m%d"
-                    ).replace(tzinfo=UTC)
+                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d").replace(
+                        tzinfo=UTC
+                    )
 
                     if timestamp < cutoff:
                         log_file.unlink()
-                        logger.info(
-                            "Rotated audit log",
-                            extra={"file": str(log_file)}
-                        )
+                        logger.info("Rotated audit log", extra={"file": str(log_file)})
 
                 except (ValueError, OSError) as e:
                     logger.error(
                         "Error rotating log file",
-                        extra={
-                            "file": str(log_file),
-                            "error": str(e)
-                        }
+                        extra={"file": str(log_file), "error": str(e)},
                     )
 
         except Exception as e:
-            logger.exception(
-                "Failed to rotate audit logs",
-                extra={"error": str(e)}
-            )
+            logger.exception("Failed to rotate audit logs", extra={"error": str(e)})
