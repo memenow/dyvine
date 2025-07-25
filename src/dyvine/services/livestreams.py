@@ -155,7 +155,7 @@ class LivestreamService:
                 ):
                     raise ValueError("Could not get room info")
 
-                room_data = response_data["data"]["room"]
+                room_data: dict[str, Any] = response_data["data"]["room"]
 
                 # Check if stream is live (status=2 means live)
                 status = room_data.get("status", 0)

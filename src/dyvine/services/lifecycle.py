@@ -48,8 +48,8 @@ class LifecycleManager:
             storage: Configured R2StorageService instance
         """
         self.storage = storage
-        self.rules = {}
-        self.audit_config = {}
+        self.rules: dict[str, Any] = {}
+        self.audit_config: dict[str, Any] = {}
         self._load_config()
 
         logger.info(
