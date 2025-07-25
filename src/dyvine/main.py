@@ -44,13 +44,13 @@ Environment Configuration:
 Example Usage:
     Start the development server:
         uvicorn src.dyvine.main:app --reload --host 0.0.0.0 --port 8000
-        
+
     Production deployment:
         gunicorn src.dyvine.main:app -w 4 -k uvicorn.workers.UvicornWorker
-        
+
     Health check:
         curl http://localhost:8000/health
-        
+
     API documentation:
         Open http://localhost:8000/docs for Swagger UI
         Open http://localhost:8000/redoc for ReDoc documentation
@@ -62,60 +62,59 @@ Version: 1.0.0
 
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict
+from typing import Any
 
-from f2.apps.douyin.handler import DouyinHandler
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from .core.logging import ContextLogger, setup_logging
-from .core.settings import settings
 from .core.dependencies import get_service_container
 from .core.error_handlers import register_error_handlers
+from .core.logging import ContextLogger, setup_logging
+from .core.settings import settings
 from .routers import livestreams, posts, users
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """FastAPI application lifespan context manager.
-    
+
     Manages the complete lifecycle of the Dyvine application including:
     - Startup initialization (logging, services, dependencies)
     - Runtime state management
     - Graceful shutdown procedures
     - Resource cleanup and finalization
-    
+
     This context manager ensures proper initialization order and handles
     both successful startup/shutdown and error scenarios during application
     lifecycle events.
-    
+
     Startup Sequence:
         1. Initialize structured logging system
         2. Create and configure logger instance
         3. Record application start time for uptime tracking
         4. Initialize service container with all dependencies
         5. Log successful startup with environment information
-        
+
     Shutdown Sequence:
         1. Log shutdown initiation with uptime statistics
         2. Allow service container cleanup (if implemented)
         3. Flush any pending logs or metrics
         4. Release system resources
-    
+
     Args:
         app: FastAPI application instance to manage.
-        
+
     Yields:
         None: Control is yielded to the running application.
-        
+
     Example:
         This function is automatically called by FastAPI when configured
         as the lifespan handler:
-        
+
         app = FastAPI(lifespan=lifespan)
-        
+
     Note:
         Any unhandled exceptions during startup will prevent the application
         from starting. During shutdown, exceptions are logged but don't
@@ -125,12 +124,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     app.state.logger = ContextLogger(__name__)
     app.state.start_time = time.time()
-    
+
     # Initialize service container with all dependencies
     container = get_service_container()
     container.initialize()
     app.state.container = container
-    
+
     # Log successful startup with environment context
     app.state.logger.info(
         "Dyvine application started successfully",
@@ -142,15 +141,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "startup_time": time.time() - app.state.start_time
         }
     )
-    
+
     # === RUNTIME PHASE ===
     # Yield control to the running application
     yield
-    
+
     # === SHUTDOWN PHASE ===
     shutdown_start = time.time()
     total_uptime = shutdown_start - app.state.start_time
-    
+
     app.state.logger.info(
         "Dyvine application shutting down gracefully",
         extra={
@@ -165,17 +164,17 @@ app = FastAPI(
     title=settings.project_name,
     description="""
     Dyvine is a high-performance REST API for Douyin (TikTok) content management.
-    
+
     Features:
     • Download videos, images, and live streams
     • User profile and content analysis
     • Bulk content operations with progress tracking
     • Cloudflare R2 storage integration
     • Real-time operation monitoring
-    
+
     Authentication:
     Configure DOUYIN_COOKIE environment variable with valid session data.
-    
+
     Rate Limits:
     • General endpoints: 10 requests/second
     • Download operations: 2 concurrent per user
@@ -214,19 +213,19 @@ app.add_middleware(
 @app.middleware("http")
 async def request_middleware(request: Request, call_next):
     """HTTP request correlation and logging middleware.
-    
+
     This middleware provides comprehensive request tracking and logging for all
     HTTP requests processed by the application. It generates unique correlation
     IDs for request tracing, measures request duration, and logs request/response
     metadata for monitoring and debugging purposes.
-    
+
     Features:
         - Generates unique correlation ID for each request
         - Logs request start with method, path, and client information
         - Measures and logs request processing duration
         - Adds correlation ID to response headers for client tracking
         - Handles both successful and failed request scenarios
-        
+
     Request Flow:
         1. Generate unique UUID4 correlation ID
         2. Attach correlation ID to request state and logger context
@@ -235,17 +234,17 @@ async def request_middleware(request: Request, call_next):
         5. Measure total processing time
         6. Log request completion with performance metrics
         7. Add correlation header to response
-        
+
     Args:
         request: Incoming HTTP request object with headers and metadata.
         call_next: Next middleware or route handler in the processing chain.
-        
+
     Returns:
         HTTP response object with added correlation ID header and timing data.
-        
+
     Headers Added:
         X-Correlation-ID: Unique request identifier for tracing and debugging.
-        
+
     Logging Context:
         All log entries within the request include:
         - correlation_id: Unique request identifier
@@ -254,7 +253,7 @@ async def request_middleware(request: Request, call_next):
         - client: Client IP address
         - status_code: HTTP response status
         - duration_ms: Request processing time in milliseconds
-        
+
     Example:
         Request logs:
         ```
@@ -264,7 +263,7 @@ async def request_middleware(request: Request, call_next):
             "path": "/api/v1/users/123",
             "client": "192.168.1.100"
         }
-        
+
         INFO: Request completed {
             "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
             "status_code": 200,
@@ -275,14 +274,14 @@ async def request_middleware(request: Request, call_next):
     # Generate unique correlation ID for request tracing
     correlation_id = str(uuid.uuid4())
     request.state.correlation_id = correlation_id
-    
+
     # Configure logger with correlation context
     logger = app.state.logger
     logger.set_correlation_id(correlation_id)
 
     # Record request start time for duration measurement
     start_time = time.time()
-    
+
     # Log request initiation with metadata
     logger.info(
         "HTTP request initiated",
@@ -298,10 +297,10 @@ async def request_middleware(request: Request, call_next):
 
     # Process request through application stack
     response = await call_next(request)
-    
+
     # Calculate total processing duration
     duration = time.time() - start_time
-    
+
     # Log request completion with performance metrics
     logger.info(
         "HTTP request completed",
@@ -312,10 +311,10 @@ async def request_middleware(request: Request, call_next):
             "cache_status": response.headers.get("cache-control")
         }
     )
-    
+
     # Add correlation ID to response headers for client tracing
     response.headers["X-Correlation-ID"] = correlation_id
-    
+
     return response
 
 
@@ -345,25 +344,25 @@ app.include_router(
     response_description="API metadata and documentation links",
     tags=["System"]
 )
-async def root() -> Dict[str, str]:
+async def root() -> dict[str, str]:
     """API root endpoint providing basic service information and navigation.
-    
+
     This endpoint serves as the entry point for the Dyvine API, providing
     essential information about the service including version, name, and
     links to interactive documentation.
-    
+
     Returns:
         Dict[str, str]: Service metadata including:
             - name: Human-readable API name
             - version: Current API version (semantic versioning)
             - docs: URL path to Swagger/OpenAPI documentation
             - redoc: URL path to ReDoc documentation
-            
+
     Example:
         ```bash
         curl -X GET "https://api.example.com/"
         ```
-        
+
         Response:
         ```json
         {
@@ -373,7 +372,7 @@ async def root() -> Dict[str, str]:
             "redoc": "/redoc"
         }
         ```
-        
+
     Note:
         This endpoint is always available and doesn't require authentication.
         It's commonly used for service discovery and API health verification.
@@ -395,21 +394,21 @@ async def root() -> Dict[str, str]:
     response_description="Health status with system metrics and uptime information",
     tags=["System"]
 )
-async def health_check() -> Dict[str, Any]:
+async def health_check() -> dict[str, Any]:
     """Comprehensive health check endpoint for monitoring and diagnostics.
-    
+
     This endpoint provides detailed health information about the Dyvine API
     including system metrics, resource usage, and operational status. It's
     designed for use by monitoring systems, load balancers, and operational
     dashboards.
-    
+
     Health Metrics Included:
         - Application status and version
         - System uptime since last restart
         - Memory usage (RSS) in megabytes
         - CPU utilization percentage
         - Service dependencies status
-        
+
     Returns:
         Dict[str, Any]: Comprehensive health information including:
             - status: Overall health status ("healthy", "degraded", "unhealthy")
@@ -419,16 +418,16 @@ async def health_check() -> Dict[str, Any]:
             - memory_mb: Current memory usage in MB
             - cpu_percent: Current CPU usage percentage
             - dependencies: Status of external dependencies
-            
+
     Status Codes:
         - 200: Service is healthy and operational
         - 503: Service is unhealthy or degraded (if implemented)
-        
+
     Example:
         ```bash
         curl -X GET "https://api.example.com/health"
         ```
-        
+
         Response:
         ```json
         {
@@ -444,7 +443,7 @@ async def health_check() -> Dict[str, Any]:
             }
         }
         ```
-        
+
     Note:
         This endpoint is used by:
         - Kubernetes liveness and readiness probes
@@ -453,30 +452,30 @@ async def health_check() -> Dict[str, Any]:
         - Operational dashboards and alerting
     """
     import psutil
-    
+
     # Get current process information
     process = psutil.Process()
     uptime_seconds = int(time.time() - app.state.start_time)
-    
+
     # Calculate human-readable uptime
     hours = uptime_seconds // 3600
     minutes = (uptime_seconds % 3600) // 60
     uptime_human = f"{hours} hours, {minutes} minutes"
-    
+
     # Check dependency status (can be expanded for real health checks)
     dependencies = {
         "douyin_api": "unknown",  # Could implement actual connectivity check
         "r2_storage": "available" if settings.r2.is_configured else "not_configured",
         "logging_system": "operational"
     }
-    
+
     # Determine overall health status
     status = "healthy"
     if uptime_seconds < 30:  # Still starting up
         status = "starting"
     elif process.memory_info().rss > 1024 * 1024 * 1024:  # > 1GB RAM
         status = "degraded"
-    
+
     return {
         "status": status,
         "version": settings.version,

@@ -34,7 +34,7 @@ Data Privacy:
 Example Usage:
     Get user profile:
         GET /api/v1/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc
-        
+
     Download user content:
         POST /api/v1/users/MS4wLjABAAAA.../content:download
         {
@@ -42,7 +42,7 @@ Example Usage:
             "include_likes": false,
             "max_items": 100
         }
-        
+
     Check download status:
         GET /api/v1/users/operations/550e8400-e29b-41d4-a716-446655440000
 
@@ -53,26 +53,16 @@ Dependencies:
     - Dependency injection: Service lifecycle management
 """
 
-import logging
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Path, Query
-from ..services.users import (
-    UserService,
-    UserServiceError,
-    UserNotFoundError,
-    DownloadError
-)
-from ..schemas.users import (
-    UserResponse,
-    DownloadResponse,
-    UserDownloadRequest
-)
-from ..core.logging import ContextLogger
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
+
 from ..core.dependencies import get_user_service
+from ..core.logging import ContextLogger
+from ..schemas.users import DownloadResponse, UserResponse
+from ..services.users import DownloadError, UserNotFoundError, UserService
 
 # Create router with comprehensive error response documentation
 router = APIRouter(
-    prefix="/users", 
+    prefix="/users",
     tags=["users"],
     responses={
         404: {
@@ -129,7 +119,8 @@ logger = ContextLogger(__name__)
 )
 async def get_user(
     user_id: str = Path(..., description="The unique identifier of the user"),
-    service: UserService = Depends(get_user_service)
+    # B008: FastAPI uses Depends in the function signature for dependency injection
+    service: UserService = Depends(get_user_service),  # noqa: B008
 ) -> UserResponse:
     """Retrieves information about a specific Douyin user.
 
@@ -150,14 +141,13 @@ async def get_user(
 
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
-            "Error processing get_user request",
-            extra={"user_id": user_id}
+            "Error processing get_user request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @router.post(
     "/{user_id}/content:download",
@@ -168,13 +158,14 @@ async def get_user(
 async def download_user_content(
     user_id: str = Path(..., description="The unique identifier of the user"),
     include_posts: bool = Query(True, description="Whether to download user's posts"),
-    include_likes: bool = Query(False, description="Whether to download user's liked posts"),
-    max_items: Optional[int] = Query(
-        None,
-        description="Maximum number of items to download (None for all)",
-        gt=0
+    include_likes: bool = Query(
+        False, description="Whether to download user's liked posts"
     ),
-    service: UserService = Depends(get_user_service)
+    max_items: int | None = Query(
+        None, description="Maximum number of items to download (None for all)", gt=0
+    ),
+    # B008: FastAPI uses Depends in the function signature for dependency injection
+    service: UserService = Depends(get_user_service),  # noqa: B008
 ) -> DownloadResponse:
     """Initiates a download task for a user's content.
 
@@ -186,7 +177,8 @@ async def download_user_content(
         service: An instance of UserService for handling the request.
 
     Returns:
-        DownloadResponse: Download task information including task ID and initial status.
+        DownloadResponse: Download task information including task ID and
+        initial status.
 
     Raises:
         HTTPException: If the user is not found or an unexpected error occurs.
@@ -208,17 +200,17 @@ async def download_user_content(
                 include_likes=include_likes,
                 max_items=max_items
             )
-            
+
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e))
-        
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
     except Exception as e:
         logger.exception(
             "Error processing download_user_content request",
-            extra={"user_id": user_id}
+            extra={"user_id": user_id},
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @router.get(
     "/operations/{operation_id}",
@@ -227,8 +219,11 @@ async def download_user_content(
     description="Retrieves the current status of a long-running download operation"
 )
 async def get_operation(
-    operation_id: str = Path(..., description="The unique identifier of the download operation"),
-    service: UserService = Depends(get_user_service)
+    operation_id: str = Path(
+        ..., description="The unique identifier of the download operation"
+    ),
+    # B008: FastAPI uses Depends in the function signature for dependency injection
+    service: UserService = Depends(get_user_service),  # noqa: B008
 ) -> DownloadResponse:
     """Retrieves the status of a long-running download operation.
 
@@ -249,17 +244,14 @@ async def get_operation(
         )
         async with logger.track_time("get_operation"):
             return await service.get_download_status(operation_id)
-            
+
     except DownloadError as e:
-        logger.warning(
-            "Operation not found",
-            extra={"operation_id": operation_id}
-        )
-        raise HTTPException(status_code=404, detail=str(e))
-        
+        logger.warning("Operation not found", extra={"operation_id": operation_id})
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
     except Exception as e:
         logger.exception(
             "Error processing get_operation request",
-            extra={"operation_id": operation_id}
+            extra={"operation_id": operation_id},
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

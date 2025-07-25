@@ -5,15 +5,17 @@ including request and response models for downloads and status tracking.
 
 Typical usage example:
     from .schemas.livestreams import LiveStreamDownloadRequest
-    
+
     request = LiveStreamDownloadRequest(
         user_id="123456",
         output_path="/downloads/stream.mp4"
     )
 """
 
-from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
 class LiveStreamDownloadRequest(BaseModel):
     """Request model for initiating a livestream download.
 
@@ -26,7 +28,7 @@ class LiveStreamDownloadRequest(BaseModel):
         ...,
         description="The unique identifier of the user whose stream to download"
     )
-    output_path: Optional[str] = Field(
+    output_path: str | None = Field(
         None,
         description="Optional custom path where the stream should be saved"
     )
@@ -43,7 +45,7 @@ class LiveStreamURLDownloadRequest(BaseModel):
         ...,
         description="The livestream URL (user profile or direct room URL)"
     )
-    output_path: Optional[str] = Field(
+    output_path: str | None = Field(
         None,
         description="Optional custom path where the stream should be saved"
     )
@@ -60,11 +62,11 @@ class LiveStreamDownloadResponse(BaseModel):
         ...,
         description="Status of the download operation"
     )
-    download_path: Optional[str] = Field(
+    download_path: str | None = Field(
         None,
         description="Path where the stream was saved"
     )
-    error: Optional[str] = Field(
+    error: str | None = Field(
         None,
         description="Error message if the operation failed"
     )

@@ -1,23 +1,15 @@
 import asyncio
-import logging
-import os
-import signal
-import urllib.parse
 from pathlib import Path
-from typing import Dict, Optional, Set, Tuple
 
 import httpx
-from f2.apps.douyin.dl import DouyinDownloader, Live
+from f2.apps.douyin.dl import DouyinDownloader
 
-from ..core.logging import ContextLogger
 from ..core.exceptions import (
-    UserNotFoundError,
     DownloadError,
     ServiceError,
-    LivestreamNotFoundError
 )
+from ..core.logging import ContextLogger
 from ..core.settings import settings
-from .users import UserNotFoundError as UserServiceNotFoundError
 from .users import UserService
 
 logger = ContextLogger(__name__)
@@ -48,11 +40,11 @@ class LivestreamService:
         self.settings = settings
         self.config = self._build_douyin_config()
         self.downloader = DouyinDownloader(self.config)
-        self.active_downloads: Set[str] = set()
-        self.download_processes: Dict[str, asyncio.subprocess.Process] = {}
+        self.active_downloads: set[str] = set()
+        self.download_processes: dict[str, asyncio.subprocess.Process] = {}
         self.user_service = UserService()
 
-    def _build_douyin_config(self) -> Dict:
+    def _build_douyin_config(self) -> dict:
         """Build Douyin downloader configuration from settings.
 
         Returns:
@@ -69,27 +61,31 @@ class LivestreamService:
                 'origin': 'https://live.douyin.com',
                 'pragma': 'no-cache',
                 'referer': 'https://live.douyin.com/',
-                'sec-ch-ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+                'sec-ch-ua': (
+                    '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"'
+                ),
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"macOS"',
                 'sec-fetch-dest': 'empty',
                 'sec-fetch-mode': 'cors',
                 'sec-fetch-site': 'same-origin',
                 'user-agent': self.settings.douyin_user_agent,
-                'x-secsdk-csrf-token': '000100000001d40084dca1e2d5f6e2f8c2e4d7e2d3c2e6e09fab5dcae72468976d4d15139b417e8c4527b6eb2ff0',
+                'x-secsdk-csrf-token': (
+                    '000100000001d40084dca1e2d5f6e2f8c2e4d7e2d3c2e6e09fab5dcae72468976d4d15139b417e8c4527b6eb2ff0'
+                ),
                 'x-use-ppe': '1'
             },
             'proxies': self.settings.douyin_proxies,
             'verify': True,
             'timeout': 30,  # Default timeout
-            'naming': '{room_id}_{nickname}',  # Include room_id and nickname in filename
+            'naming': '{room_id}_{nickname}',
             'mode': 'live',
             'auto_cookie': True,
             'folderize': False,
         }
         return config
 
-    async def get_room_info(self, room_id: str, logger: logging.Logger = logger) -> Dict:
+    async def get_room_info(self, room_id: str, logger: ContextLogger = logger) -> dict:
         """Get room information for a given room ID.
 
         Args:
@@ -105,22 +101,31 @@ class LivestreamService:
         try:
             # Use correct Douyin live API endpoint
             url = "https://webcast.amemv.com/webcast/room/reflow/info/"
-            
+
             # Correct parameters format
             params = {
                 'type_id': '0',
-                'live_id': '1', 
+                'live_id': '1',
                 'room_id': room_id,
                 'app_id': '1128',
             }
-            
+
             # Set appropriate headers with cookie
             headers = {
                 'authority': 'webcast.amemv.com',
-                'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_1 like Mac OS X) AppleWebKit/603.1.30 (KHTML, like Gecko) Version/10.0 Mobile/14E304 Safari/602.1',
-                'cookie': '_tea_utm_cache_1128={%22utm_source%22:%22copy%22%2C%22utm_medium%22:%22android%22%2C%22utm_campaign%22:%22client_share%22}',
+                'user-agent': (
+                    'Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_1 like Mac OS X) '
+                    'AppleWebKit/603.1.30 (KHTML, like Gecko) Version/10.0 '
+                    'Mobile/14E304 Safari/602.1'
+                ),
+                'cookie': (
+                    '_tea_utm_cache_1128={'
+                    '%22utm_source%22:%22copy%22,'
+                    '%22utm_medium%22:%22android%22,'
+                    '%22utm_campaign%22:%22client_share%22}'
+                ),
             }
-            
+
             # Only include proxies if they are configured
             proxies = None
             if any(self.config['proxies'].values()):
@@ -137,7 +142,7 @@ class LivestreamService:
 
                 response_data = response.json()
                 logger.info(f"Parsed response data keys: {list(response_data.keys())}")
-                
+
                 if (
                     not response_data
                     or "data" not in response_data
@@ -145,15 +150,15 @@ class LivestreamService:
                     or not response_data["data"]["room"]
                 ):
                     raise ValueError("Could not get room info")
-                
+
                 room_data = response_data["data"]["room"]
-                
+
                 # Check if stream is live (status=2 means live)
                 status = room_data.get('status', 0)
                 logger.info(f"Room status: {status}")
-                
+
                 return room_data
-                
+
         except Exception as e:
             logger.error(f"Error getting room info: {str(e)}")
             raise
@@ -167,7 +172,7 @@ class LivestreamService:
         """
         try:
             # Get list of ts files for this room
-            ts_files = sorted([f for f in output_dir.glob(f"{room_id}__*.ts")])
+            ts_files = sorted(output_dir.glob(f"{room_id}__*.ts"))
             if not ts_files:
                 logger.warning(f"No ts files found for room {room_id}")
                 return
@@ -242,7 +247,9 @@ class LivestreamService:
             if room_id in self.active_downloads:
                 self.active_downloads.remove(room_id)
 
-    async def download_stream(self, url: str, output_path: Optional[str] = None) -> Tuple[str, str]:
+    async def download_stream(
+        self, url: str, output_path: str | None = None
+    ) -> tuple[str, str]:
         """Download a Douyin livestream.
 
         Args:
@@ -258,7 +265,7 @@ class LivestreamService:
         try:
             # Extract room ID from livestream URL
             room_id = None
-            
+
             # Handle direct room ID
             if url.isdigit():
                 room_id = url
@@ -276,21 +283,31 @@ class LivestreamService:
                 if match:
                     room_id = match.group(1)
                 else:
-                    return "error", "Invalid webcast URL format. Could not extract room ID"
-            # Handle user profile URL - try to get room ID from user info
+                    return "error", (
+                        "Invalid webcast URL format. Could not extract room ID"
+                    )
+            # Handle user profile URL
+            # - try to get room ID from user info
             elif "douyin.com/user/" in url:
                 try:
                     # Extract user ID from URL
                     user_id = url.split('/')[-1] if '/' in url else url
                     user_info = await self.user_service.get_user_info(user_id)
                     if not user_info.is_living or not user_info.room_id:
-                        return "error", "User is not currently streaming or room ID not available"
+                        return "error", (
+                            "User is not currently streaming or room ID not available"
+                        )
                     room_id = str(user_info.room_id)
-                    logger.info(f"Extracted room_id {room_id} from user profile {user_id}")
+                    logger.info(
+                        f"Extracted room_id {room_id} from user profile {user_id}"
+                    )
                 except Exception as e:
                     return "error", f"Failed to get room ID from user profile: {str(e)}"
             else:
-                return "error", "Invalid URL format. Expected livestream URL (https://live.douyin.com/[room_id]) or user profile URL"
+                return "error", (
+                    "Invalid URL format. Expected livestream URL "
+                    "(https://live.douyin.com/[room_id]) or user profile URL"
+                )
 
             if not room_id:
                 return "error", "Could not extract room ID from URL"
@@ -308,7 +325,9 @@ class LivestreamService:
             # Check if user is live (status 2 = live)
             status_code = room_info.get('status')
             if status_code != 2:
-                return "error", f"User is not currently streaming (status code: {status_code})"
+                return "error", (
+                    f"User is not currently streaming (status code: {status_code})"
+                )
 
             # Get stream URL
             stream_url = room_info.get('stream_url', {})
@@ -326,8 +345,12 @@ class LivestreamService:
                     return "error", "No suitable quality stream found"
 
             # Set up output directory
-            output_dir = Path("data/douyin/downloads/livestreams")
+            if output_path:
+                output_dir = Path(output_path)
+            else:
+                output_dir = Path("data/douyin/downloads/livestreams")
             output_dir.mkdir(parents=True, exist_ok=True)
+
 
             # Add to active downloads
             self.active_downloads.add(room_id)
@@ -335,12 +358,12 @@ class LivestreamService:
             try:
                 # Create output filename
                 output_filename = f"{room_id}"
-                output_path = output_dir / output_filename
+                final_output_path = output_dir / output_filename
 
                 # Use ffmpeg to download and save as ts files
                 command = (
                     f'ffmpeg -i "{stream_urls}" -c copy -f segment -segment_time 10 '
-                    f'-segment_format mpegts "{output_path}__%03d.ts"'
+                    f'-segment_format mpegts "{final_output_path}__%03d.ts"'
                 )
 
                 # Start download process
@@ -361,7 +384,7 @@ class LivestreamService:
 
             except Exception as e:
                 logger.error(f"Download task error: {str(e)}")
-                raise DownloadError(f"Failed to start download: {str(e)}")
+                raise DownloadError(f"Failed to start download: {str(e)}") from e
             finally:
                 if room_id in self.active_downloads:
                     self.active_downloads.remove(room_id)
@@ -369,6 +392,33 @@ class LivestreamService:
         except Exception as e:
             logger.error(f"Error downloading stream: {str(e)}")
             return "error", str(e)
+
+    async def get_download_status(self, operation_id: str) -> str:
+        """Get the status of a download operation.
+
+        Args:
+            operation_id (str): The operation ID (room_id).
+
+        Returns:
+            str: The path to the downloaded file if complete, otherwise a status
+                message.
+        """
+        # operation_id is the room_id
+        output_dir = Path("data/douyin/downloads/livestreams")
+        output_file = output_dir / f"{operation_id}_merged.mp4"
+
+        if output_file.exists():
+            return str(output_file)
+
+        if operation_id in self.active_downloads:
+            return "Download in progress."
+
+        # Check for ts files to see if it's merging
+        ts_files = list(output_dir.glob(f"{operation_id}__*.ts"))
+        if ts_files:
+            return "Merging downloaded files."
+
+        raise NotImplementedError("Operation not found or status unknown.")
 
 # Create service instance after class definition
 livestream_service = LivestreamService()
