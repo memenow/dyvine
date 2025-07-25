@@ -34,8 +34,8 @@ from typing import Any
 
 from f2.apps.douyin.handler import DouyinHandler
 
-from ..services.users import UserService
-from .settings import settings
+from dyvine.core.settings import settings
+from dyvine.services.users import UserService
 
 
 class ServiceContainer:
@@ -94,10 +94,10 @@ class ServiceContainer:
 
         # Initialize Douyin handler with configuration
         douyin_config = self._create_douyin_config()
-        self._services["douyin_handler"] = DouyinHandler(douyin_config)
+        self._services['douyin_handler'] = DouyinHandler(douyin_config)
 
         # Initialize user service
-        self._services["user_service"] = UserService()
+        self._services['user_service'] = UserService()
 
         self._initialized = True
 
@@ -159,7 +159,7 @@ class ServiceContainer:
         Returns:
             DouyinHandler instance configured with application settings.
         """
-        return self.get_service("douyin_handler")
+        return self.get_service('douyin_handler')
 
     @property
     def user_service(self) -> UserService:

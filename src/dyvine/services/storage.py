@@ -11,15 +11,13 @@ R2 storage operations including:
 """
 
 import base64
-import logging
 import mimetypes
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
-from urllib.parse import quote
+from typing import Any
 
 import boto3
 from botocore.config import Config
@@ -83,15 +81,13 @@ class R2StorageService:
         Configures the boto3 client with R2-specific settings and retry config.
         """
         # Check if R2 configuration is available
-        if not all(
-            [
-                settings.r2_endpoint,
-                settings.r2_account_id,
-                settings.r2_access_key_id,
-                settings.r2_secret_access_key,
-                settings.r2_bucket_name,
-            ]
-        ):
+        if not all([
+            settings.r2_endpoint,
+            settings.r2_account_id,
+            settings.r2_access_key_id,
+            settings.r2_secret_access_key,
+            settings.r2_bucket_name
+        ]):
             logger.warning(
                 "R2 configuration incomplete, storage service will be disabled"
             )
@@ -100,7 +96,12 @@ class R2StorageService:
             return
 
         # Configure retry settings
-        config = Config(retries=dict(max_attempts=3, mode="adaptive"))
+        config = Config(
+            retries={
+                "max_attempts": 3,
+                "mode": "adaptive"
+            }
+        )
 
         # Format R2 endpoint URL
         endpoint_url = settings.r2_endpoint.format(account_id=settings.r2_account_id)
@@ -138,12 +139,12 @@ class R2StorageService:
             str: Generated storage path
         """
         # Get current UTC date for prefix
-        date_prefix = datetime.now(timezone.utc).strftime("%Y%m%d")
+        date_prefix = datetime.now(UTC).strftime("%Y%m%d")
 
         # Base64 encode filename (URL safe)
-        safe_filename = (
-            base64.urlsafe_b64encode(original_filename.encode()).decode().rstrip("=")
-        )
+        safe_filename = base64.urlsafe_b64encode(
+            original_filename.encode()
+        ).decode().rstrip("=")
 
         # Generate 8-char UUID
         uuid_str = str(uuid.uuid4())[:8]
@@ -218,8 +219,8 @@ class R2StorageService:
         content_type: str,
         source: str,
         language: str = "zh-CN",
-        version: str = "1.0.0",
-    ) -> Dict[str, str]:
+        version: str = "1.0.0"
+    ) -> dict[str, str]:
         """Generate standardized metadata for content.
 
         Args:
@@ -234,10 +235,12 @@ class R2StorageService:
             Dict[str, str]: Metadata dictionary
         """
         # Base64 encode author name
-        safe_author = base64.b64encode(author.encode()).decode()
+        safe_author = base64.b64encode(
+            author.encode()
+        ).decode()
 
         # Get current UTC time
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         metadata = {
             "author": safe_author,
@@ -257,17 +260,20 @@ class R2StorageService:
             "version": version,
         }
 
-        logger.debug("Generated metadata", extra={"metadata": metadata})
+        logger.debug(
+            "Generated metadata",
+            extra={"metadata": metadata}
+        )
 
         return metadata
 
     async def upload_file(
         self,
-        file_path: Union[str, Path],
+        file_path: str | Path,
         storage_path: str,
-        metadata: Dict[str, str],
-        content_type: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        metadata: dict[str, str],
+        content_type: str | None = None
+    ) -> dict[str, Any]:
         """Upload a file to R2 storage with retries.
 
         Args:
@@ -336,45 +342,20 @@ class R2StorageService:
             )
 
             # Update metrics
-            r2_upload_requests.labels(type=metadata["category"], status="success").inc()
-            r2_upload_bytes.labels(category=metadata["category"]).inc(file_size)
-            r2_upload_duration.observe(duration)
-
-            # Generate presigned URL for temporary access (default 1 hour)
-            url = self.client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": self.bucket, "Key": storage_path},
-                ExpiresIn=3600,  # 1 hour
-            )
-
-            logger.info(
-                "File uploaded successfully",
-                extra={
-                    "storage_path": storage_path,
-                    "size_bytes": file_size,
-                    "duration_seconds": duration,
-                    "presigned_url": url,
-                },
-            )
-
-            return {
-                "storage_path": storage_path,
-                "presigned_url": url,
-                "size_bytes": file_size,
-                "content_type": content_type,
-                "metadata": metadata,
-            }
-
-        except (BotoCoreError, ClientError) as e:
-            r2_upload_requests.labels(type=metadata["category"], status="error").inc()
-            r2_upload_failures.labels(error_type=type(e).__name__).inc()
+            r2_upload_requests.labels(
+                type=metadata["category"],
+                status="success"
+            ).inc()
+            r2_upload_failures.labels(
+                error_type=type(e).__name__
+            ).inc()
 
             logger.exception(
                 "Upload failed", extra={"storage_path": storage_path, "error": str(e)}
             )
             raise StorageError(f"Upload failed: {str(e)}") from e
 
-    async def get_object_metadata(self, storage_path: str) -> Dict[str, str]:
+    async def get_object_metadata(self, storage_path: str) -> dict[str, str]:
         """Get metadata for an object in R2 storage.
 
         Args:
@@ -392,14 +373,17 @@ class R2StorageService:
             )
 
         try:
-            response = self.client.head_object(Bucket=self.bucket, Key=storage_path)
+            response = self.client.head_object(
+                Bucket=self.bucket,
+                Key=storage_path
+            )
             return response.get("Metadata", {})
 
         except ClientError as e:
             error_code = e.response["Error"]["Code"]
             if error_code == "404":
-                raise StorageError(f"Object not found: {storage_path}")
-            raise StorageError(f"Error getting metadata: {str(e)}")
+                raise StorageError(f"Object not found: {storage_path}") from None
+            raise StorageError(f"Error getting metadata: {str(e)}") from e
 
     async def delete_object(self, storage_path: str) -> None:
         """Delete an object from R2 storage.
@@ -416,18 +400,26 @@ class R2StorageService:
             )
 
         try:
-            self.client.delete_object(Bucket=self.bucket, Key=storage_path)
-            logger.info("Object deleted", extra={"storage_path": storage_path})
+            self.client.delete_object(
+                Bucket=self.bucket,
+                Key=storage_path
+            )
+            logger.info(
+                "Object deleted",
+                extra={"storage_path": storage_path}
+            )
 
         except ClientError as e:
             logger.exception(
                 "Deletion failed", extra={"storage_path": storage_path, "error": str(e)}
             )
-            raise StorageError(f"Deletion failed: {str(e)}")
+            raise StorageError(f"Deletion failed: {str(e)}") from e
 
     async def list_objects(
-        self, prefix: str, max_keys: int = 1000
-    ) -> List[Dict[str, Any]]:
+        self,
+        prefix: str,
+        max_keys: int = 1000
+    ) -> list[dict[str, Any]]:
         """List objects in R2 storage with the given prefix.
 
         Args:
@@ -471,4 +463,4 @@ class R2StorageService:
             logger.exception(
                 "List objects failed", extra={"prefix": prefix, "error": str(e)}
             )
-            raise StorageError(f"List objects failed: {str(e)}")
+            raise StorageError(f"List objects failed: {str(e)}") from e

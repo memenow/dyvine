@@ -62,13 +62,12 @@ Version: 1.0.0
 
 import time
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict
+from typing import Any
 
-from f2.apps.douyin.handler import DouyinHandler
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from .core.dependencies import get_service_container
 from .core.error_handlers import register_error_handlers
@@ -166,17 +165,17 @@ app = FastAPI(
     title=settings.project_name,
     description="""
     Dyvine is a high-performance REST API for Douyin (TikTok) content management.
-    
+
     Features:
     • Download videos, images, and live streams
     • User profile and content analysis
     • Bulk content operations with progress tracking
     • Cloudflare R2 storage integration
     • Real-time operation monitoring
-    
+
     Authentication:
     Configure DOUYIN_COOKIE environment variable with valid session data.
-    
+
     Rate Limits:
     • General endpoints: 10 requests/second
     • Download operations: 2 concurrent per user
@@ -339,7 +338,7 @@ app.include_router(livestreams.router, prefix=settings.prefix)
     response_description="API metadata and documentation links",
     tags=["System"],
 )
-async def root() -> Dict[str, str]:
+async def root() -> dict[str, str]:
     """API root endpoint providing basic service information and navigation.
 
     This endpoint serves as the entry point for the Dyvine API, providing
@@ -389,7 +388,7 @@ async def root() -> Dict[str, str]:
     response_description="Health status with system metrics and uptime information",
     tags=["System"],
 )
-async def health_check() -> Dict[str, Any]:
+async def health_check() -> dict[str, Any]:
     """Comprehensive health check endpoint for monitoring and diagnostics.
 
     This endpoint provides detailed health information about the Dyvine API

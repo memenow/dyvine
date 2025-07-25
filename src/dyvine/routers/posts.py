@@ -249,13 +249,13 @@ async def list_user_posts(
 
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
             "Error processing list_user_posts request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post(
@@ -280,7 +280,8 @@ async def download_user_posts(
         BulkDownloadResponse: A response containing download operation results.
 
     Raises:
-        HTTPException: If the user is not found, the download fails, or an unexpected error occurs.
+        HTTPException: If the user is not found, the download fails, or an
+            unexpected error occurs.
     """
     try:
         logger.info(
@@ -291,14 +292,14 @@ async def download_user_posts(
 
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except DownloadError as e:
         logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
             "Error processing download_user_posts request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

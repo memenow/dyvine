@@ -116,17 +116,17 @@ def sanitize_filename(filename: str) -> str:
         titles and descriptions.
     """
     # Remove emoji and non-ASCII characters for compatibility
-    filename = re.sub(r"[^\x00-\x7F]+", "", filename)
+    filename = re.sub(r'[^\x00-\x7F]+', '', filename)
 
     # Replace filesystem-reserved characters with underscores
     # Covers Windows, macOS, and Linux reserved characters
-    filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
+    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
 
     # Collapse multiple consecutive underscores to improve readability
-    filename = re.sub(r"_+", "_", filename)
+    filename = re.sub(r'_+', '_', filename)
 
     # Remove leading/trailing whitespace and underscores
-    filename = filename.strip("_ ")
+    filename = filename.strip('_ ')
 
     # Provide fallback for empty filenames
     return filename or "untitled"
@@ -148,7 +148,7 @@ class UserService:
     """
 
     _instance = None
-    _active_downloads: Dict[str, Dict] = {}
+    _active_downloads: dict[str, dict] = {}
 
     def __new__(cls):
         """Ensure a single instance of the UserService class (Singleton pattern)."""
@@ -199,13 +199,13 @@ class UserService:
             return UserResponse(
                 user_id=user_id,
                 nickname=user_data.nickname,
-                avatar_url=user_data.avatar_url,
-                signature=user_data.signature,
-                following_count=user_data.following_count,
-                follower_count=user_data.follower_count,
-                total_favorited=user_data.total_favorited,
+                avatar_url=str(user_data.avatar_url or ""),
+                signature=str(user_data.signature or ""),
+                following_count=int(user_data.following_count or 0),
+                follower_count=int(user_data.follower_count or 0),
+                total_favorited=int(user_data.total_favorited or 0),
                 is_living=bool(user_data.room_id),
-                room_id=user_data.room_id,
+                room_id=int(user_data.room_id) if user_data.room_id else None,
             )
         except Exception as e:
             logger.exception("Failed to get user info", extra={"user_id": user_id})
@@ -216,7 +216,7 @@ class UserService:
         user_id: str,
         include_posts: bool = True,
         include_likes: bool = False,
-        max_items: Optional[int] = None,
+        max_items: int | None = None,
     ) -> DownloadResponse:
         """Start an asynchronous download of user content from Douyin.
 
@@ -227,7 +227,8 @@ class UserService:
             max_items: Maximum number of items to download.
 
         Returns:
-            DownloadResponse: Object containing details about the initiated download task.
+            DownloadResponse: Object containing details about the initiated download
+                task.
         """
         task_id = str(uuid.uuid4())
 
@@ -246,7 +247,13 @@ class UserService:
         asyncio.create_task(self._process_download(task_id))
 
         return DownloadResponse(
-            task_id=task_id, status="pending", message="Download started", progress=0.0
+            task_id=task_id,
+            status="pending",
+            message="Download started",
+            progress=0.0,
+            total_items=None,
+            downloaded_items=None,
+            error=None,
         )
 
     async def get_download_status(self, task_id: str) -> DownloadResponse:
@@ -265,7 +272,7 @@ class UserService:
             raise DownloadError(f"Download task {task_id} not found")
 
         task = self._active_downloads[task_id]
-        response = DownloadResponse(
+        return DownloadResponse(
             task_id=task_id,
             status=task["status"],
             message=f"Download {task['status']}",
@@ -274,7 +281,6 @@ class UserService:
             downloaded_items=task.get("downloaded_items"),
             error=task.get("error"),
         )
-        return response
 
     async def _process_download(self, task_id: str) -> None:
         """Process a download task asynchronously.
@@ -283,7 +289,7 @@ class UserService:
             task_id (str): The unique identifier of the download task.
         """
         task = self._active_downloads[task_id]
-
+        temp_dir = None
         try:
             # Update status to running
             task["status"] = "running"
@@ -302,7 +308,7 @@ class UserService:
                 },
                 "proxy": settings.douyin_proxy_http,
                 "download_path": str(temp_dir),
-                "max_counts": task["max_items"] if task["max_items"] else None,
+                "max_counts": task["max_items"],
                 "download_favorite": task["include_likes"],
                 "timeout": 5,
                 "folderize": True,
@@ -322,7 +328,8 @@ class UserService:
                 raise UserNotFoundError(f"User {task['user_id']} not found")
 
             # Get total posts count from profile
-            total_posts = user_data.aweme_count
+            aweme_count = user_data.aweme_count
+            total_posts = int(aweme_count) if isinstance(aweme_count, int) else 0
             if total_posts == 0:
                 logger.info(f"User {task['user_id']} has no posts")
                 task["status"] = "completed"
@@ -349,7 +356,7 @@ class UserService:
                     min_cursor=0,
                     max_cursor=max_cursor,
                     page_counts=100,  # Increased page size
-                    max_counts=None,  # Don't limit per-page count
+                    max_counts=task["max_items"],
                 ):
                     if not aweme_data.has_aweme:
                         has_more = False
@@ -358,10 +365,15 @@ class UserService:
                     current_batch_size = len(aweme_data.aweme_id)
                     downloaded_count += current_batch_size
                     task["downloaded_items"] = downloaded_count
-                    task["progress"] = (downloaded_count / total_posts) * 100
+                    if total_posts > 0:
+                        task["progress"] = (downloaded_count / total_posts) * 100
+                    else:
+                        task["progress"] = 100.0
+
 
                     logger.info(
-                        f"Downloaded {downloaded_count}/{total_posts} posts ({task['progress']:.1f}%)"
+                        f"Downloaded {downloaded_count}/{total_posts} posts "
+                        f"({task['progress']:.1f}%)"
                     )
 
                     # Download files to temp directory
@@ -414,11 +426,16 @@ class UserService:
                                 )
 
                     # Update cursor for next page
-                    if aweme_data.max_cursor != max_cursor:
+                    if (
+                        aweme_data.max_cursor
+                        and isinstance(aweme_data.max_cursor, int)
+                        and aweme_data.max_cursor != max_cursor
+                    ):
                         max_cursor = aweme_data.max_cursor
                         has_more = aweme_data.has_more
                     else:
-                        # If cursor didn't change but we haven't got all posts, increment it
+                        # If cursor didn't change but we haven't got all posts,
+                        # increment it
                         if downloaded_count < total_posts:
                             max_cursor += 1
                             has_more = True
@@ -426,17 +443,18 @@ class UserService:
                             has_more = False
 
                     # If max_items is set and we've reached it, stop
-                    if (
-                        task["max_items"]
-                        and task["downloaded_items"] >= task["max_items"]
-                    ):
+                    if (task["max_items"] and
+                        task["downloaded_items"] >= task["max_items"]):
                         has_more = False
                         break
 
                     # Add delay between pages
                     await asyncio.sleep(handler_kwargs.get("timeout", 5))
             # Verify download completion
-            completion_percentage = (downloaded_count / total_posts) * 100
+            if total_posts > 0:
+                completion_percentage = (downloaded_count / total_posts) * 100
+            else:
+                completion_percentage = 100.0
 
             if completion_percentage >= 100:
                 # Consider anything >= 100% as complete success
@@ -468,7 +486,7 @@ class UserService:
         finally:
             # Clean up temp directory and task
             try:
-                if temp_dir.exists():
+                if temp_dir and temp_dir.exists():
                     for file in temp_dir.glob("**/*"):
                         if file.is_file():
                             file.unlink()

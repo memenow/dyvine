@@ -134,7 +134,7 @@ class BulkDownloadResponse(BaseModel):
     sec_user_id: str = Field(..., description="Target user's identifier")
     download_path: str = Field(..., description="Local path where content was saved")
     total_posts: int = Field(..., description="Total number of posts available")
-    downloaded_count: Dict[PostType, int] = Field(
+    downloaded_count: dict[PostType, int] = Field(
         default_factory=lambda: {
             PostType.VIDEO: 0,
             PostType.IMAGES: 0,

@@ -12,14 +12,12 @@ content based on content type and age.
 """
 
 import json
-import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ..core.logging import ContextLogger
-from ..core.settings import settings
-from .storage import ContentType, R2StorageService, StorageError
+from .storage import ContentType, R2StorageService
 
 # Initialize logger
 logger = ContextLogger(__name__)
@@ -78,11 +76,14 @@ class LifecycleManager:
 
         except Exception as e:
             logger.exception(
-                "Failed to load lifecycle configuration", extra={"error": str(e)}
+                "Failed to load lifecycle configuration",
+                extra={"error": str(e)}
             )
-            raise LifecycleError(f"Failed to load lifecycle configuration: {str(e)}")
+            raise LifecycleError(
+                f"Failed to load lifecycle configuration: {str(e)}"
+            ) from e
 
-    async def apply_lifecycle_rules(self) -> Dict[str, Any]:
+    async def apply_lifecycle_rules(self) -> dict[str, Any]:
         """Apply lifecycle rules to all content in storage.
 
         This method:
@@ -95,7 +96,12 @@ class LifecycleManager:
         Returns:
             Dict[str, Any]: Summary of actions taken
         """
-        summary = {"transitioned": 0, "deleted": 0, "errors": 0, "details": []}
+        summary = {
+            "transitioned": 0,
+            "deleted": 0,
+            "errors": 0,
+            "details": []
+        }
 
         try:
             # Process each content type
@@ -133,12 +139,19 @@ class LifecycleManager:
             return summary
 
         except Exception as e:
-            logger.exception("Error applying lifecycle rules", extra={"error": str(e)})
-            raise LifecycleError(f"Lifecycle rule application failed: {str(e)}")
+            logger.exception(
+                "Error applying lifecycle rules",
+                extra={"error": str(e)}
+            )
+            raise LifecycleError(
+                f"Lifecycle rule application failed: {str(e)}"
+            ) from e
 
     async def _apply_rule_to_object(
-        self, obj: Dict[str, Any], rule: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+        self,
+        obj: dict[str, Any],
+        rule: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Apply a lifecycle rule to a specific object.
 
         Args:
@@ -148,8 +161,8 @@ class LifecycleManager:
         Returns:
             Optional[Dict[str, Any]]: Action taken, if any
         """
-        now = datetime.now(timezone.utc)
-        last_modified = obj["LastModified"].replace(tzinfo=timezone.utc)
+        now = datetime.now(UTC)
+        last_modified = obj["LastModified"].replace(tzinfo=UTC)
         age_days = (now - last_modified).days
 
         # Check for deletion
@@ -159,7 +172,10 @@ class LifecycleManager:
                 return {
                     "action": "delete",
                     "object_key": obj["Key"],
-                    "reason": f"Age {age_days} days exceeded retention {rule['retention_days']} days",
+                    "reason": (
+                        f"Age {age_days} days exceeded retention "
+                        f"{rule['retention_days']} days"
+                    ),
                 }
 
         # Check for storage class transition
@@ -176,19 +192,22 @@ class LifecycleManager:
                     "object_key": obj["Key"],
                     "from_class": obj.get("StorageClass", "STANDARD"),
                     "to_class": transition["storage_class"],
-                    "reason": f"Age {age_days} days exceeded transition threshold {transition['days']} days",
+                    "reason": (
+                        f"Age {age_days} days exceeded transition threshold "
+                        f"{transition['days']} days"
+                    ),
                 }
 
         return None
 
-    def _write_audit_log(self, summary: Dict[str, Any]) -> None:
+    def _write_audit_log(self, summary: dict[str, Any]) -> None:
         """Write lifecycle actions to audit log.
 
         Args:
             summary: Summary of actions taken
         """
         try:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             log_path = Path("logs/r2_lifecycle_audit.log")
             log_path.parent.mkdir(exist_ok=True)
 
@@ -218,19 +237,25 @@ class LifecycleManager:
             if not log_dir.exists():
                 return
 
-            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            cutoff = datetime.now(UTC) - timedelta(
+                days=retention_days
+            )
 
             for log_file in log_dir.glob("r2_lifecycle_audit.*.log"):
                 try:
                     # Parse timestamp from filename
                     timestamp_str = log_file.stem.split(".")[-1]
-                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d").replace(
-                        tzinfo=timezone.utc
-                    )
+                    timestamp = datetime.strptime(
+                        timestamp_str,
+                        "%Y%m%d"
+                    ).replace(tzinfo=UTC)
 
                     if timestamp < cutoff:
                         log_file.unlink()
-                        logger.info("Rotated audit log", extra={"file": str(log_file)})
+                        logger.info(
+                            "Rotated audit log",
+                            extra={"file": str(log_file)}
+                        )
 
                 except (ValueError, OSError) as e:
                     logger.error(

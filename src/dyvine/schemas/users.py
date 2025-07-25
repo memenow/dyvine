@@ -3,7 +3,7 @@
 This module defines Pydantic models for user data validation and serialization.
 """
 
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 

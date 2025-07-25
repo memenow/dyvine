@@ -1,13 +1,14 @@
 """Unified error handling for Dyvine API."""
 
 import traceback
-from typing import Any, Dict, Union
+from typing import Any
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
 
 from .exceptions import DyvineError, NotFoundError, ServiceError
 from .logging import ContextLogger
+from dyvine.core.settings import settings
 
 logger = ContextLogger(__name__)
 
@@ -19,11 +20,11 @@ class ErrorResponse:
     def create_response(
         status_code: int,
         message: str,
-        error_code: str = None,
-        details: Dict[str, Any] = None,
-        correlation_id: str = None,
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
         include_traceback: bool = False,
-        exception: Exception = None,
+        exception: Exception | None = None,
     ) -> JSONResponse:
         """Create standardized error response."""
         content = {
@@ -49,7 +50,7 @@ class ErrorResponse:
 
 async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONResponse:
     """Handle all Dyvine-specific errors in a unified way."""
-    correlation_id = getattr(request.state, "correlation_id", None)
+    correlation_id = getattr(request.state, 'correlation_id', None)
 
     # Determine status code based on exception type
     if isinstance(exc, NotFoundError):
@@ -86,7 +87,7 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unexpected exceptions."""
-    correlation_id = getattr(request.state, "correlation_id", None)
+    correlation_id = getattr(request.state, 'correlation_id', None)
 
     logger.error(
         f"Unexpected error: {exc}",
@@ -100,7 +101,6 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     )
 
     # Don't expose internal error details in production
-    from .settings import settings
 
     include_traceback = settings.debug
 

@@ -17,7 +17,8 @@ from .logging import ContextLogger
 
 
 def handle_errors(
-    error_mapping: dict[type[Exception], int] = None, logger: ContextLogger = None
+    error_mapping: dict[type[Exception], int] | None = None,
+    logger: ContextLogger | None = None,
 ) -> Callable:
     """
     Decorator for handling exceptions in route handlers.
@@ -54,16 +55,15 @@ def handle_errors(
                     detail={
                         "error": str(e),
                         "error_code": e.error_code,
-                        "details": e.details,
-                    },
+                        "details": e.details
+                    }
                 ) from e
             except Exception as e:
                 if logger:
                     logger.exception(f"Unexpected error: {str(e)}")
                 raise HTTPException(
-                    status_code=500, detail="Internal server error"
+                    status_code=500,
+                    detail="Internal server error"
                 ) from e
-
         return wrapper
-
     return decorator

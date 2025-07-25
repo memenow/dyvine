@@ -53,20 +53,14 @@ Dependencies:
     - Dependency injection: Service lifecycle management
 """
 
-import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from ..core.dependencies import get_user_service
 from ..core.logging import ContextLogger
-from ..schemas.users import DownloadResponse, UserDownloadRequest, UserResponse
-from ..services.users import (
-    DownloadError,
-    UserNotFoundError,
-    UserService,
-    UserServiceError,
-)
+from ..schemas.users import DownloadResponse, UserResponse
+from ..services.users import DownloadError, UserNotFoundError, UserService
 
 # Create router with comprehensive error response documentation
 router = APIRouter(
@@ -149,13 +143,13 @@ async def get_user(
 
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
             "Error processing get_user request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post(
@@ -185,7 +179,8 @@ async def download_user_content(
         service: An instance of UserService for handling the request.
 
     Returns:
-        DownloadResponse: Download task information including task ID and initial status.
+        DownloadResponse: Download task information including task ID and
+        initial status.
 
     Raises:
         HTTPException: If the user is not found or an unexpected error occurs.
@@ -210,13 +205,14 @@ async def download_user_content(
 
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
-            "Error processing download_user_content request", extra={"user_id": user_id}
+            "Error processing download_user_content request",
+            extra={"user_id": user_id},
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get(
@@ -252,11 +248,11 @@ async def get_operation(
 
     except DownloadError as e:
         logger.warning("Operation not found", extra={"operation_id": operation_id})
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(
             "Error processing get_operation request",
             extra={"operation_id": operation_id},
         )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

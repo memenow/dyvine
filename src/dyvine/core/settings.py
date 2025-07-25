@@ -227,7 +227,7 @@ class DouyinSettings(BaseSettings):
     )
 
     @property
-    def headers(self) -> Dict[str, str]:
+    def headers(self) -> dict[str, str]:
         """Generate HTTP headers dictionary for Douyin requests.
 
         Returns:
@@ -241,7 +241,7 @@ class DouyinSettings(BaseSettings):
         }
 
     @property
-    def proxies(self) -> Dict[str, Optional[str]]:
+    def proxies(self) -> dict[str, str | None]:
         """Generate proxy configuration dictionary.
 
         Returns:
@@ -313,7 +313,7 @@ class Settings(BaseSettings):
         return self.api.project_name
 
     @property
-    def cors_origins(self) -> List[str]:
+    def cors_origins(self) -> list[str]:
         """Get CORS allowed origins from API settings."""
         return self.api.cors_origins
 
@@ -344,12 +344,12 @@ class Settings(BaseSettings):
         return self.douyin.cookie
 
     @property
-    def douyin_headers(self) -> Dict[str, str]:
+    def douyin_headers(self) -> dict[str, str]:
         """Get Douyin headers from Douyin settings."""
         return self.douyin.headers
 
     @property
-    def douyin_proxies(self) -> Dict[str, Optional[str]]:
+    def douyin_proxies(self) -> dict[str, str | None]:
         """Get Douyin proxies from Douyin settings."""
         return self.douyin.proxies
 
@@ -389,12 +389,12 @@ class Settings(BaseSettings):
         return self.r2.endpoint
 
     @property
-    def douyin_proxy_http(self) -> Optional[str]:
+    def douyin_proxy_http(self) -> str | None:
         """Get HTTP proxy from Douyin settings."""
         return self.douyin.proxy_http
 
     @property
-    def douyin_proxy_https(self) -> Optional[str]:
+    def douyin_proxy_https(self) -> str | None:
         """Get HTTPS proxy from Douyin settings."""
         return self.douyin.proxy_https
 
@@ -403,7 +403,7 @@ class Settings(BaseSettings):
     )
 
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance with environment variables loaded.
 

@@ -1,6 +1,6 @@
 """Unified exception hierarchy for Dyvine."""
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class DyvineError(Exception):
@@ -9,8 +9,8 @@ class DyvineError(Exception):
     def __init__(
         self,
         message: str,
-        error_code: Optional[str] = None,
-        details: Optional[Dict[str, Any]] = None,
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None
     ):
         super().__init__(message)
         self.message = message
@@ -74,5 +74,4 @@ class AuthenticationError(DyvineError):
 
 class RateLimitError(DyvineError):
     """Rate limit exceeded."""
-
     pass

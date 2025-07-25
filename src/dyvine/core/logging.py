@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, Optional
+from typing import Any
 
 from .settings import settings
 
@@ -84,8 +84,8 @@ class ContextLogger:
 
     def __init__(self, name: str) -> None:
         self.logger = logging.getLogger(name)
-        self.correlation_id: Optional[str] = None
-        self.context: Dict[str, Any] = {}
+        self.correlation_id: str | None = None
+        self.context: dict[str, Any] = {}
 
     def set_correlation_id(self, correlation_id: str) -> None:
         self.correlation_id = correlation_id
@@ -102,7 +102,8 @@ class ContextLogger:
         finally:
             duration_ms = (perf_counter() - start) * 1000
             self.info(
-                f"{operation} completed", extra={"duration_ms": round(duration_ms, 2)}
+                f"{operation} completed",
+                extra={"duration_ms": round(duration_ms, 2)}
             )
 
     @asynccontextmanager
