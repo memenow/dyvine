@@ -430,16 +430,16 @@ class UserService:
                             has_more = False
                     
                     # If max_items is set and we've reached it, stop
-                    if task["max_items"] and task["downloaded_items"] >= task["max_items"]:
+                    if (task["max_items"] and 
+                        task["downloaded_items"] >= task["max_items"]):
                         has_more = False
                         break
-                    
+
                     # Add delay between pages
                     await asyncio.sleep(handler_kwargs.get("timeout", 5))
-                    
             # Verify download completion
             completion_percentage = (downloaded_count / total_posts) * 100
-            
+
             if completion_percentage >= 100:
                 # Consider anything >= 100% as complete success
                 logger.info(
@@ -455,9 +455,11 @@ class UserService:
                     f"({completion_percentage:.1f}%). Some posts may have been missed."
                 )
                 task["status"] = "partial"
-                task["error"] = f"Only downloaded {downloaded_count} out of {total_posts} posts"
+                task["error"] = (
+                    f"Only downloaded {downloaded_count} out of {total_posts} posts"
+                )
                 task["progress"] = completion_percentage
-            
+
         except Exception as e:
             logger.exception(
                 "Download failed",
@@ -468,7 +470,7 @@ class UserService:
             )
             task["status"] = "failed"
             task["error"] = str(e)
-            
+
         finally:
             # Clean up temp directory and task
             try:
@@ -482,6 +484,6 @@ class UserService:
                     temp_dir.rmdir()
             except Exception as e:
                 logger.error(f"Failed to clean up temp directory: {str(e)}")
-                
+
             await asyncio.sleep(3600)  # Keep task info for 1 hour
             self._active_downloads.pop(task_id, None)
