@@ -170,8 +170,7 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Environment files
-.env
+# Environment files (removing duplicate .env)
 .env.local
 .env.*.local
 
@@ -191,10 +190,45 @@ logs/
 *.db
 *.sqlite3
 
-# Downloaded content
+# Downloaded content - be more specific
 downloads/
-data/
+data/douyin/downloads/
+data/douyin/logs/
+data/temp/
+data/cache/
 Download/
 
-# Test Data
+# Test data
 test/data/
+tests/fixtures/data/
+
+# Project-specific additions
+# Application runtime data
+douyin_users.db
+server.log
+*.pid
+
+# FastAPI/Gunicorn
+gunicorn.conf.py
+
+# Temporary files
+*.tmp
+*.temp
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Security
+*.key
+*.pem
+*.cert
+config/production.py
+
+# Docker
+.dockerignore
+
+# AI assistants
+.claude
+.github/workflows/claude-code.yml
+.serena

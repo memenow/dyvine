@@ -10,41 +10,20 @@ import httpx
 from f2.apps.douyin.dl import DouyinDownloader, Live
 
 from ..core.logging import ContextLogger
+from ..core.exceptions import (
+    UserNotFoundError,
+    DownloadError,
+    ServiceError,
+    LivestreamNotFoundError
+)
 from ..core.settings import settings
 from .users import UserNotFoundError as UserServiceNotFoundError
 from .users import UserService
 
-logger = ContextLogger(logging.getLogger(__name__))
+logger = ContextLogger(__name__)
 
-class LivestreamError(Exception):
-    """Base exception for livestream-related errors.
-
-    This exception serves as a general parent class for all custom exceptions
-    related to livestream operations, providing a way to catch all livestream
-    errors in a single except block if needed.
-    """
-    pass
-
-class UserNotFoundError(LivestreamError):
-    """Exception raised when a user is not found.
-
-    This exception indicates that a user, typically identified by their user ID
-    or room ID, could not be found or does not exist. It inherits from
-    LivestreamError, allowing it to be caught as a general livestream error or
-    specifically as a user-not-found error.
-    """
-    pass
-
-class DownloadError(LivestreamError):
-    """Exception raised when a download fails.
-
-    This exception indicates that an error occurred during the download process
-    of a livestream. It could be due to various reasons, such as network issues,
-    invalid stream URLs, or problems with the download configuration. It
-    inherits from LivestreamError, allowing it to be caught as a general
-    livestream error or specifically as a download error.
-    """
-    pass
+# Alias for backward compatibility
+LivestreamError = ServiceError
 
 class LivestreamService:
     """Service class for managing Douyin livestream operations.
@@ -124,56 +103,57 @@ class LivestreamService:
             ValueError: If room doesn't exist or stream ended.
         """
         try:
-            # Get room info using downloader's get_fetch_data method
-            # Use Douyin's room info API
-            url = f"https://live.douyin.com/webcast/room/web/enter/"
+            # Use correct Douyin live API endpoint
+            url = "https://webcast.amemv.com/webcast/room/reflow/info/"
+            
+            # Correct parameters format
             params = {
-                "aid": "6383",
-                "app_name": "douyin_web",
-                "live_id": "1",
-                "device_platform": "web",
-                "enter_from": "web_live",
-                "web_rid": room_id,
-                "room_id_str": room_id,
-                "enter_source": "room",
-                "browser_language": "zh-CN",
-                "browser_platform": "Win32",
-                "browser_name": "Chrome",
-                "browser_version": "121.0.0.0",
-                "cookie_enabled": "true",
-                "screen_width": "1920",
-                "screen_height": "1080",
-                "update_version_code": "1.3.0",
-                "identity": "audience"
+                'type_id': '0',
+                'live_id': '1', 
+                'room_id': room_id,
+                'app_id': '1128',
             }
+            
+            # Set appropriate headers with cookie
+            headers = {
+                'authority': 'webcast.amemv.com',
+                'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_1 like Mac OS X) AppleWebKit/603.1.30 (KHTML, like Gecko) Version/10.0 Mobile/14E304 Safari/602.1',
+                'cookie': '_tea_utm_cache_1128={%22utm_source%22:%22copy%22%2C%22utm_medium%22:%22android%22%2C%22utm_campaign%22:%22client_share%22}',
+            }
+            
             # Only include proxies if they are configured
             proxies = None
             if any(self.config['proxies'].values()):
                 proxies = self.config['proxies']
 
             async with httpx.AsyncClient(
-                headers=self.config["headers"],
-                params=params,
+                headers=headers,
                 proxies=proxies,
                 timeout=30,
             ) as client:
-                response = await client.get(url)
-                logger.info(f"API Response type: {type(response)}")
+                response = await client.get(url, params=params)
                 logger.info(f"API Response status code: {response.status_code}")
-                logger.info(f"API Response headers: {response.headers}")
-                logger.info(f"API Response content: {response.text}")
+                logger.info(f"API Response content: {response.text[:500]}...")
 
                 response_data = response.json()
-                logger.info(f"Parsed response data: {response_data}")
+                logger.info(f"Parsed response data keys: {list(response_data.keys())}")
+                
                 if (
                     not response_data
                     or "data" not in response_data
-                    or "data" not in response_data["data"]
-                    or not response_data["data"]["data"]
+                    or "room" not in response_data["data"]
+                    or not response_data["data"]["room"]
                 ):
                     raise ValueError("Could not get room info")
-                room_data = response_data["data"]["data"][0]
+                
+                room_data = response_data["data"]["room"]
+                
+                # Check if stream is live (status=2 means live)
+                status = room_data.get('status', 0)
+                logger.info(f"Room status: {status}")
+                
                 return room_data
+                
         except Exception as e:
             logger.error(f"Error getting room info: {str(e)}")
             raise
@@ -266,7 +246,7 @@ class LivestreamService:
         """Download a Douyin livestream.
 
         Args:
-            url (str): The URL or room ID of the livestream.
+            url (str): The livestream room URL (e.g., https://live.douyin.com/123456789).
             output_path (Optional[str]): Optional path where to save the stream.
 
         Returns:
@@ -276,23 +256,44 @@ class LivestreamService:
             LivestreamError: If download fails.
         """
         try:
-            # Extract ID from URL if needed
-            id_str = url.split('/')[-1] if '/' in url else url
-
-            # Try to parse as room ID first (numeric)
-            try:
-                room_id = str(int(id_str))  # Will fail if not numeric
-            except ValueError:
-                # If not numeric, treat as user ID and get room ID from profile
+            # Extract room ID from livestream URL
+            room_id = None
+            
+            # Handle direct room ID
+            if url.isdigit():
+                room_id = url
+            # Handle livestream URL format: https://live.douyin.com/123456789
+            elif "live.douyin.com/" in url:
+                parts = url.rstrip('/').split('/')
+                if parts and parts[-1].isdigit():
+                    room_id = parts[-1]
+                else:
+                    return "error", "Invalid livestream URL format. Expected: https://live.douyin.com/[room_id]"
+            # Handle webcast.amemv.com URL format
+            elif "webcast.amemv.com" in url and "/webcast/reflow/" in url:
+                import re
+                match = re.search(r'/webcast/reflow/(\d+)', url)
+                if match:
+                    room_id = match.group(1)
+                else:
+                    return "error", "Invalid webcast URL format. Could not extract room ID"
+            # Handle user profile URL - try to get room ID from user info
+            elif "douyin.com/user/" in url:
                 try:
-                    user_info = await self.user_service.get_user_info(id_str)
+                    # Extract user ID from URL
+                    user_id = url.split('/')[-1] if '/' in url else url
+                    user_info = await self.user_service.get_user_info(user_id)
                     if not user_info.is_living or not user_info.room_id:
-                        return "error", "User is not currently streaming"
+                        return "error", "User is not currently streaming or room ID not available"
                     room_id = str(user_info.room_id)
-                except UserServiceNotFoundError:
-                    return "error", f"User {id_str} not found"
+                    logger.info(f"Extracted room_id {room_id} from user profile {user_id}")
                 except Exception as e:
-                    return "error", f"Failed to get user info: {str(e)}"
+                    return "error", f"Failed to get room ID from user profile: {str(e)}"
+            else:
+                return "error", "Invalid URL format. Expected livestream URL (https://live.douyin.com/[room_id]) or user profile URL"
+
+            if not room_id:
+                return "error", "Could not extract room ID from URL"
 
             # Check if already downloading
             if room_id in self.active_downloads:

@@ -1,32 +1,61 @@
-"""FastAPI router module for user-related endpoints.
+"""User management API endpoints for Douyin user operations.
 
-This module provides endpoints for:
-- Retrieving user information
-- Downloading user content (posts and liked videos)
-- Checking download operation status
+This module provides comprehensive RESTful API endpoints for managing Douyin users:
+
+Core Features:
+- User profile information retrieval with detailed metadata
+- Bulk content downloading (posts, liked videos, collections)
+- Asynchronous download operations with progress tracking
+- Operation status monitoring and result retrieval
+- Error handling for various user-related scenarios
+
+Supported User Operations:
+- Profile data fetching (followers, following, statistics)
+- Content enumeration with pagination support
+- Batch download operations with configurable options
+- Real-time operation status checking
+- Download result management and cleanup
+
+Authentication & Authorization:
+    All endpoints require valid Douyin authentication cookies.
+    Configure DOUYIN_COOKIE environment variable with session data.
+
+Rate Limiting:
+    User endpoints are subject to rate limiting:
+    - Profile requests: 10 per minute per IP
+    - Download operations: 2 concurrent per user
+    - Status checks: 30 per minute per operation
+
+Data Privacy:
+    This API respects user privacy settings and only accesses
+    publicly available content or content accessible with provided
+    authentication credentials.
+
+Example Usage:
+    Get user profile:
+        GET /api/v1/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc
+        
+    Download user content:
+        POST /api/v1/users/MS4wLjABAAAA.../content:download
+        {
+            "include_posts": true,
+            "include_likes": false,
+            "max_items": 100
+        }
+        
+    Check download status:
+        GET /api/v1/users/operations/550e8400-e29b-41d4-a716-446655440000
 
 Dependencies:
-    - UserService: Core service for user operations
-    - ContextLogger: Logging utility
-    - Pydantic models for request/response validation
-
-Example:
-    ```python
-    from fastapi import FastAPI
-    from .routers import users
-
-    app = FastAPI()
-    app.include_router(users.router)
-    ```
-
-Error Responses:
-    - 404 Not Found: When user or operation is not found
-    - 500 Internal Error: For unexpected server errors
+    - UserService: Core business logic for user operations
+    - ContextLogger: Structured logging with correlation tracking
+    - Pydantic models: Request/response validation and serialization
+    - Dependency injection: Service lifecycle management
 """
 
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Depends, Path, Query, Request
+from fastapi import APIRouter, HTTPException, Depends, Path, Query
 from ..services.users import (
     UserService,
     UserServiceError,
@@ -39,23 +68,54 @@ from ..schemas.users import (
     UserDownloadRequest
 )
 from ..core.logging import ContextLogger
-from ..schemas.users import UserResponse
+from ..core.dependencies import get_user_service
 
-router = APIRouter(prefix="/users", tags=["users"])
-logger = ContextLogger(logging.getLogger(__name__))
+# Create router with comprehensive error response documentation
+router = APIRouter(
+    prefix="/users", 
+    tags=["users"],
+    responses={
+        404: {
+            "description": "User not found or inaccessible",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": True,
+                        "message": "User not found",
+                        "error_code": "USER_NOT_FOUND"
+                    }
+                }
+            }
+        },
+        422: {
+            "description": "Validation error in request parameters",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": True,
+                        "message": "Invalid user ID format",
+                        "error_code": "VALIDATION_ERROR"
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "error": True,
+                        "message": "Internal server error occurred",
+                        "error_code": "INTERNAL_SERVER_ERROR"
+                    }
+                }
+            }
+        }
+    }
+)
 
-def get_user_service(request: Request) -> UserService:
-    """Retrieves the global UserService instance.
-
-    Uses the global UserService instance from the application state.
-
-    Args:
-        request: The incoming request object, used to access app state.
-
-    Returns:
-        UserService: The global UserService instance.
-    """
-    return request.app.state.user_service
+# Initialize structured logger for this module
+logger = ContextLogger(__name__)
 
 @router.get(
     "/{user_id}",

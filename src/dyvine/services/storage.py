@@ -30,7 +30,7 @@ from ..core.logging import ContextLogger
 from ..core.settings import settings
 
 # Initialize logger
-logger = ContextLogger(logging.getLogger(__name__))
+logger = ContextLogger(__name__)
 
 # Prometheus metrics
 r2_upload_requests = Counter(

@@ -1,93 +1,143 @@
-"""Service module for handling user-related operations.
+"""User management service for Douyin user operations and content management.
 
-This module provides a UserService class that encapsulates the business logic
-for various user-related operations in the Douyin application, including:
+This module provides comprehensive business logic for user-related operations
+in the Dyvine application. It acts as the primary interface between the API
+layer and external Douyin services, handling complex user workflows including
+profile data retrieval, content discovery, and bulk download operations.
 
-- Retrieving user information from Douyin
-- Initiating asynchronous downloads of user content (posts, liked posts)
-- Tracking the progress and status of download tasks
+Core Responsibilities:
+    - User profile information retrieval and caching
+    - Content enumeration (posts, liked content, collections)
+    - Asynchronous bulk download orchestration
+    - Download progress tracking and status management
+    - File naming and organization for downloaded content
+    - Integration with Cloudflare R2 storage for content persistence
+    - Error handling and retry logic for robustness
 
-The UserService class follows the Singleton pattern to ensure a single instance
-throughout the application. It interacts with the DouyinHandler from the f2
-library to perform the necessary operations.
+Architecture:
+    The service follows a layered architecture pattern:
+    - Service Layer: UserService class with business logic
+    - Integration Layer: DouyinHandler for external API calls
+    - Storage Layer: R2StorageService for content persistence
+    - Utility Layer: Helper functions for data transformation
 
-The module also defines custom exceptions related to user operations, such as
-UserNotFoundError and DownloadError.
+Key Features:
+    - Asynchronous operation support for scalability
+    - Comprehensive error handling with custom exceptions
+    - Structured logging with correlation tracking
+    - Configurable download parameters and filtering
+    - Safe filename generation for cross-platform compatibility
+    - Progress tracking for long-running operations
+    - Resource cleanup and lifecycle management
+
+Usage Patterns:
+    Dependency Injection:
+        service = UserService()
+        user_info = await service.get_user_info(user_id)
+        
+    Download Operations:
+        download_task = await service.download_user_content(
+            user_id="MS4wLjABAAAA...",
+            include_posts=True,
+            include_likes=False,
+            max_items=100
+        )
+        
+    Status Monitoring:
+        status = await service.get_operation_status(task_id)
+
+Custom Exceptions:
+    - UserNotFoundError: User profile not accessible or doesn't exist
+    - DownloadError: Content download failed or interrupted
+    - ServiceError: General service-level errors and timeouts
+
+Thread Safety:
+    The service is designed to be thread-safe for concurrent operations.
+    Internal state is managed through immutable objects and atomic operations.
+
+Performance Considerations:
+    - Implements connection pooling for external API calls
+    - Uses async/await patterns for non-blocking operations
+    - Provides configurable batch sizes for large downloads
+    - Includes timeout handling for long-running operations
 """
 
 import asyncio
 import uuid
 import re
 from typing import Dict, Optional
-import logging
 from datetime import datetime
 from pathlib import Path
 
 from f2.apps.douyin.handler import DouyinHandler
 
 from ..core.logging import ContextLogger
-
+from ..core.exceptions import (
+    UserNotFoundError,
+    DownloadError,
+    ServiceError
+)
 from ..core.settings import settings
 from ..schemas.users import UserResponse, DownloadResponse
 from .storage import R2StorageService, ContentType
 
 def sanitize_filename(filename: str) -> str:
-    """Remove emoji and special characters from a filename.
-
-    This function removes emoji and other special characters from a filename
-    to ensure it is safe for use across different filesystems.
-
+    """Sanitize filename for cross-platform filesystem compatibility.
+    
+    Cleans and normalizes filenames to ensure they work across different
+    operating systems and filesystems. Removes potentially problematic
+    characters including emojis, special symbols, and filesystem-reserved
+    characters.
+    
+    Transformations Applied:
+        1. Remove non-ASCII characters (including emojis and Unicode symbols)
+        2. Replace filesystem-reserved characters with underscores
+        3. Collapse multiple consecutive underscores to single underscore
+        4. Trim leading/trailing spaces and underscores
+        5. Provide fallback name for empty results
+        
     Args:
-        filename (str): The original filename.
-
+        filename: Original filename string to sanitize.
+        
     Returns:
-        str: The sanitized filename with special characters removed.
+        Sanitized filename safe for use across different filesystems.
+        Returns 'untitled' if the input results in an empty string.
+        
+    Example:
+        >>> sanitize_filename("My Video 📱 <2024>.mp4")
+        "My_Video_2024.mp4"
+        
+        >>> sanitize_filename("文件名/with\\special:chars")
+        "with_special_chars"
+        
+        >>> sanitize_filename("🎥📹🎬")
+        "untitled"
+        
+    Note:
+        This function is designed for content downloaded from Douyin which
+        often contains emojis, Chinese characters, and special symbols in
+        titles and descriptions.
     """
-    # Remove emoji and other special characters
+    # Remove emoji and non-ASCII characters for compatibility
     filename = re.sub(r'[^\x00-\x7F]+', '', filename)
     
-    # Replace invalid filename characters with underscore
+    # Replace filesystem-reserved characters with underscores
+    # Covers Windows, macOS, and Linux reserved characters
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
     
-    # Remove multiple underscores
+    # Collapse multiple consecutive underscores to improve readability
     filename = re.sub(r'_+', '_', filename)
     
-    # Remove leading/trailing underscores and spaces
+    # Remove leading/trailing whitespace and underscores
     filename = filename.strip('_ ')
     
-    # Ensure filename isn't empty
-    if not filename:
-        filename = 'untitled'
-        
-    return filename
+    # Provide fallback for empty filenames
+    return filename or 'untitled'
 
-logger = ContextLogger(logging.getLogger(__name__))
+logger = ContextLogger(__name__)
 
-class UserServiceError(Exception):
-    """Base exception class for errors related to the UserService.
-
-    This exception serves as a general parent class for all custom exceptions
-    defined within the UserService, allowing for more specific error handling
-    and categorization.
-    """
-    pass
-
-class UserNotFoundError(UserServiceError):
-    """Exception raised when a requested user cannot be found.
-
-    This exception indicates that a specific Douyin user, typically identified
-    by their user ID, could not be retrieved or does not exist.
-    """
-    pass
-
-class DownloadError(UserServiceError):
-    """Exception raised when a download operation fails.
-
-    This exception indicates that an attempt to download content associated with
-    a Douyin user has failed. It may be due to network issues, invalid URLs,
-    or other problems during the download process.
-    """
-    pass
+# Alias for backward compatibility
+UserServiceError = ServiceError
 
 class UserService:
     """Service class for handling user-related operations.

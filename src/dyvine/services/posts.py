@@ -21,13 +21,18 @@ PostNotFoundError, UserNotFoundError, and DownloadError.
 from typing import Dict, Optional, List, Any
 from pathlib import Path
 import asyncio
-import logging
 from datetime import datetime
 
 from f2.apps.douyin.handler import DouyinHandler
 from f2.apps.douyin.db import AsyncUserDB
 
 from ..core.logging import ContextLogger
+from ..core.exceptions import (
+    PostNotFoundError,
+    UserNotFoundError,
+    DownloadError,
+    ServiceError
+)
 from ..schemas.posts import (
     PostType,
     DownloadStatus,
@@ -35,41 +40,10 @@ from ..schemas.posts import (
     PostDetail
 )
 
-logger = ContextLogger(logging.getLogger(__name__))
+logger = ContextLogger(__name__)
 
-class PostServiceError(Exception):
-    """Base exception class for errors related to the PostService.
-
-    This exception serves as a general parent class for all custom exceptions
-    defined within the PostService, allowing for more specific error handling
-    and categorization.
-    """
-    pass
-
-class PostNotFoundError(PostServiceError):
-    """Exception raised when a requested post cannot be found.
-
-    This exception indicates that a specific Douyin post, typically identified
-    by its aweme_id, could not be retrieved or does not exist.
-    """
-    pass
-
-class UserNotFoundError(PostServiceError):
-    """Exception raised when a requested user cannot be found.
-
-    This exception indicates that a specific Douyin user, typically identified
-    by their sec_user_id, could not be retrieved or does not exist.
-    """
-    pass
-
-class DownloadError(PostServiceError):
-    """Exception raised when a content download operation fails.
-
-    This exception indicates that an attempt to download content (video, images,
-    etc.) associated with a Douyin post has failed. It may be due to network
-    issues, invalid URLs, or other problems during the download process.
-    """
-    pass
+# Alias for backward compatibility
+PostServiceError = ServiceError
 
 class PostService:
     """Service class for handling Douyin post operations.
