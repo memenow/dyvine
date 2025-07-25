@@ -1,7 +1,7 @@
 """Unified error handling for Dyvine API."""
 
-from typing import Dict, Any, Union
 import traceback
+from typing import Any
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
@@ -14,13 +14,13 @@ logger = ContextLogger(__name__)
 
 class ErrorResponse:
     """Standardized error response structure."""
-    
+
     @staticmethod
     def create_response(
         status_code: int,
         message: str,
         error_code: str = None,
-        details: Dict[str, Any] = None,
+        details: dict[str, Any] = None,
         correlation_id: str = None,
         include_traceback: bool = False,
         exception: Exception = None
@@ -32,25 +32,25 @@ class ErrorResponse:
             "error_code": error_code or "UNKNOWN_ERROR",
             "status_code": status_code
         }
-        
+
         if details:
             content["details"] = details
-            
+
         if correlation_id:
             content["correlation_id"] = correlation_id
-            
+
         if include_traceback and exception:
             content["traceback"] = traceback.format_exception(
                 type(exception), exception, exception.__traceback__
             )
-        
+
         return JSONResponse(status_code=status_code, content=content)
 
 
 async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONResponse:
     """Handle all Dyvine-specific errors in a unified way."""
     correlation_id = getattr(request.state, 'correlation_id', None)
-    
+
     # Determine status code based on exception type
     if isinstance(exc, NotFoundError):
         status_code = status.HTTP_404_NOT_FOUND
@@ -61,7 +61,7 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
     else:
         status_code = status.HTTP_400_BAD_REQUEST
         log_level = "warning"
-    
+
     # Log the error with appropriate level
     log_message = f"{exc.__class__.__name__}: {exc.message}"
     extra = {
@@ -69,12 +69,12 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
         "correlation_id": correlation_id,
         "exception_type": exc.__class__.__name__
     }
-    
+
     if log_level == "error":
         logger.error(log_message, extra=extra, exc_info=True)
     else:
         logger.warning(log_message, extra=extra)
-    
+
     return ErrorResponse.create_response(
         status_code=status_code,
         message=exc.message,
@@ -87,7 +87,7 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unexpected exceptions."""
     correlation_id = getattr(request.state, 'correlation_id', None)
-    
+
     logger.error(
         f"Unexpected error: {exc}",
         extra={
@@ -98,11 +98,11 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         },
         exc_info=True
     )
-    
+
     # Don't expose internal error details in production
     from .settings import settings
     include_traceback = settings.debug
-    
+
     return ErrorResponse.create_response(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         message="Internal server error occurred",
@@ -115,9 +115,10 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 def register_error_handlers(app) -> None:
     """Register all error handlers with the FastAPI app."""
-    
+
     # Handle all DyvineError subclasses with one handler
     app.add_exception_handler(DyvineError, dyvine_error_handler)
-    
+
     # Handle unexpected exceptions
     app.add_exception_handler(Exception, generic_exception_handler)
+
