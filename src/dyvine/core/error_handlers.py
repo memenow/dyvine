@@ -23,14 +23,14 @@ class ErrorResponse:
         details: dict[str, Any] = None,
         correlation_id: str = None,
         include_traceback: bool = False,
-        exception: Exception = None
+        exception: Exception = None,
     ) -> JSONResponse:
         """Create standardized error response."""
         content = {
             "error": True,
             "message": message,
             "error_code": error_code or "UNKNOWN_ERROR",
-            "status_code": status_code
+            "status_code": status_code,
         }
 
         if details:
@@ -49,7 +49,7 @@ class ErrorResponse:
 
 async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONResponse:
     """Handle all Dyvine-specific errors in a unified way."""
-    correlation_id = getattr(request.state, 'correlation_id', None)
+    correlation_id = getattr(request.state, "correlation_id", None)
 
     # Determine status code based on exception type
     if isinstance(exc, NotFoundError):
@@ -67,7 +67,7 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
     extra = {
         "error_code": exc.error_code,
         "correlation_id": correlation_id,
-        "exception_type": exc.__class__.__name__
+        "exception_type": exc.__class__.__name__,
     }
 
     if log_level == "error":
@@ -80,13 +80,13 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
         message=exc.message,
         error_code=exc.error_code,
         details=exc.details,
-        correlation_id=correlation_id
+        correlation_id=correlation_id,
     )
 
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Handle unexpected exceptions."""
-    correlation_id = getattr(request.state, 'correlation_id', None)
+    correlation_id = getattr(request.state, "correlation_id", None)
 
     logger.error(
         f"Unexpected error: {exc}",
@@ -94,13 +94,14 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
             "correlation_id": correlation_id,
             "exception_type": exc.__class__.__name__,
             "path": request.url.path,
-            "method": request.method
+            "method": request.method,
         },
-        exc_info=True
+        exc_info=True,
     )
 
     # Don't expose internal error details in production
     from .settings import settings
+
     include_traceback = settings.debug
 
     return ErrorResponse.create_response(
@@ -109,7 +110,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
         error_code="INTERNAL_SERVER_ERROR",
         correlation_id=correlation_id,
         include_traceback=include_traceback,
-        exception=exc if include_traceback else None
+        exception=exc if include_traceback else None,
     )
 
 
@@ -121,4 +122,3 @@ def register_error_handlers(app) -> None:
 
     # Handle unexpected exceptions
     app.add_exception_handler(Exception, generic_exception_handler)
-

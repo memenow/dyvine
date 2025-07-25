@@ -138,8 +138,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "version": settings.version,
             "debug_mode": settings.debug,
             "api_prefix": settings.prefix,
-            "startup_time": time.time() - app.state.start_time
-        }
+            "startup_time": time.time() - app.state.start_time,
+        },
     )
 
     # === RUNTIME PHASE ===
@@ -155,9 +155,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         extra={
             "total_uptime_seconds": round(total_uptime, 2),
             "total_uptime_hours": round(total_uptime / 3600, 2),
-            "shutdown_initiated_at": shutdown_start
-        }
+            "shutdown_initiated_at": shutdown_start,
+        },
     )
+
 
 # Create FastAPI application instance with comprehensive configuration
 app = FastAPI(
@@ -189,13 +190,13 @@ app = FastAPI(
     contact={
         "name": "Dyvine API Support",
         "email": "billduke@memenow.xyz",
-        "url": "https://github.com/memenow/dyvine"
+        "url": "https://github.com/memenow/dyvine",
     },
     license_info={
         "name": "Apache 2.0",
-        "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
+        "url": "https://www.apache.org/licenses/LICENSE-2.0.html",
     },
-    terms_of_service="https://github.com/memenow/dyvine/blob/main/LICENSE"
+    terms_of_service="https://github.com/memenow/dyvine/blob/main/LICENSE",
 )
 
 
@@ -203,12 +204,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # Configurable via CORS_ORIGINS env var
-    allow_credentials=True,                # Allow cookies and auth headers
-    allow_methods=["*"],                   # Allow all HTTP methods
-    allow_headers=["*"],                   # Allow all headers
-    expose_headers=["X-Correlation-ID"],   # Expose correlation ID to clients
-    max_age=3600                          # Cache preflight responses for 1 hour
+    allow_credentials=True,  # Allow cookies and auth headers
+    allow_methods=["*"],  # Allow all HTTP methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["X-Correlation-ID"],  # Expose correlation ID to clients
+    max_age=3600,  # Cache preflight responses for 1 hour
 )
+
 
 @app.middleware("http")
 async def request_middleware(request: Request, call_next):
@@ -291,8 +293,8 @@ async def request_middleware(request: Request, call_next):
             "query_params": str(request.query_params) if request.query_params else None,
             "client_ip": request.client.host if request.client else "unknown",
             "user_agent": request.headers.get("user-agent"),
-            "content_length": request.headers.get("content-length")
-        }
+            "content_length": request.headers.get("content-length"),
+        },
     )
 
     # Process request through application stack
@@ -308,8 +310,8 @@ async def request_middleware(request: Request, call_next):
             "status_code": response.status_code,
             "duration_ms": round(duration * 1000, 2),
             "content_length": response.headers.get("content-length"),
-            "cache_status": response.headers.get("cache-control")
-        }
+            "cache_status": response.headers.get("cache-control"),
+        },
     )
 
     # Add correlation ID to response headers for client tracing
@@ -322,27 +324,19 @@ async def request_middleware(request: Request, call_next):
 register_error_handlers(app)
 
 # Include routers
-app.include_router(
-    posts.router,
-    prefix=settings.prefix
-)
+app.include_router(posts.router, prefix=settings.prefix)
 
-app.include_router(
-    users.router,
-    prefix=settings.prefix
-)
+app.include_router(users.router, prefix=settings.prefix)
 
-app.include_router(
-    livestreams.router,
-    prefix=settings.prefix
-)
+app.include_router(livestreams.router, prefix=settings.prefix)
+
 
 @app.get(
     "/",
     summary="API root information",
     description="Returns basic API information and navigation links",
     response_description="API metadata and documentation links",
-    tags=["System"]
+    tags=["System"],
 )
 async def root() -> dict[str, str]:
     """API root endpoint providing basic service information and navigation.
@@ -383,7 +377,7 @@ async def root() -> dict[str, str]:
         "docs": "/docs",
         "redoc": "/redoc",
         "status": "operational",
-        "api_prefix": settings.prefix
+        "api_prefix": settings.prefix,
     }
 
 
@@ -392,7 +386,7 @@ async def root() -> dict[str, str]:
     summary="Application health check",
     description="Returns detailed health and performance metrics for monitoring",
     response_description="Health status with system metrics and uptime information",
-    tags=["System"]
+    tags=["System"],
 )
 async def health_check() -> dict[str, Any]:
     """Comprehensive health check endpoint for monitoring and diagnostics.
@@ -466,7 +460,7 @@ async def health_check() -> dict[str, Any]:
     dependencies = {
         "douyin_api": "unknown",  # Could implement actual connectivity check
         "r2_storage": "available" if settings.r2.is_configured else "not_configured",
-        "logging_system": "operational"
+        "logging_system": "operational",
     }
 
     # Determine overall health status
@@ -486,5 +480,5 @@ async def health_check() -> dict[str, Any]:
         "cpu_percent": round(process.cpu_percent(), 2),
         "dependencies": dependencies,
         "timestamp": time.time(),
-        "api_prefix": settings.prefix
+        "api_prefix": settings.prefix,
     }

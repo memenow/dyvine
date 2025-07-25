@@ -24,14 +24,14 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
             "module": record.module,
             "function": record.funcName,
-            "line": record.lineno
+            "line": record.lineno,
         }
 
         if record.exc_info:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__,
                 "message": str(record.exc_info[1]),
-                "traceback": self.formatException(record.exc_info)
+                "traceback": self.formatException(record.exc_info),
             }
 
         for attr in ["correlation_id", "extra"]:
@@ -39,6 +39,7 @@ class JSONFormatter(logging.Formatter):
                 log_data[attr] = getattr(record, attr)
 
         return json.dumps(log_data)
+
 
 def setup_logging() -> None:
     """Configure application logging."""
@@ -56,10 +57,7 @@ def setup_logging() -> None:
     # File handler with rotation
     log_file = logs_dir / f"dyvine-{datetime.now():%Y-%m-%d}.log"
     file_handler = logging.handlers.RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"  # 10MB
     )
     file_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(file_handler)
@@ -67,13 +65,16 @@ def setup_logging() -> None:
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     if settings.debug:
-        console_handler.setFormatter(logging.Formatter(
-            "[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        ))
+        console_handler.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
     else:
         console_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(console_handler)
+
 
 class ContextLogger:
     """Logger with context and performance tracking."""
@@ -98,13 +99,13 @@ class ContextLogger:
         finally:
             duration_ms = (perf_counter() - start) * 1000
             self.info(
-                f"{operation} completed",
-                extra={"duration_ms": round(duration_ms, 2)}
+                f"{operation} completed", extra={"duration_ms": round(duration_ms, 2)}
             )
 
     @asynccontextmanager
     async def track_memory(self, operation: str):
         import psutil
+
         process = psutil.Process()
         start_mem = process.memory_info().rss
         try:
@@ -115,8 +116,8 @@ class ContextLogger:
                 f"{operation} memory usage",
                 extra={
                     "memory_diff_mb": round((end_mem - start_mem) / 1024 / 1024, 2),
-                    "total_memory_mb": round(end_mem / 1024 / 1024, 2)
-                }
+                    "total_memory_mb": round(end_mem / 1024 / 1024, 2),
+                },
             )
 
     def _log(

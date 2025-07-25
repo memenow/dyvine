@@ -8,14 +8,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class UserDownloadRequest(BaseModel):
     """Schema for user download request."""
+
     user_id: str = Field(..., description="Douyin user ID")
     include_posts: bool = Field(True, description="Whether to include user posts")
     include_likes: bool = Field(False, description="Whether to include liked posts")
     max_items: int | None = Field(None, description="Maximum items to download")
     model_config = ConfigDict()
 
+
 class UserResponse(BaseModel):
     """Schema for user information response."""
+
     user_id: str = Field(..., description="Douyin user ID")
     nickname: str = Field(..., description="User nickname")
     avatar_url: str = Field(..., description="User avatar URL")
@@ -29,8 +32,10 @@ class UserResponse(BaseModel):
     room_id: int | None = Field(None, description="Live room ID if streaming")
     model_config = ConfigDict()
 
+
 class DownloadResponse(BaseModel):
     """Schema for download operation response."""
+
     task_id: str = Field(..., description="Unique task identifier")
     status: str = Field(
         ..., description="Task status (pending/running/completed/failed)"

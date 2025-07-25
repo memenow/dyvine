@@ -115,25 +115,27 @@ def sanitize_filename(filename: str) -> str:
         titles and descriptions.
     """
     # Remove emoji and non-ASCII characters for compatibility
-    filename = re.sub(r'[^\x00-\x7F]+', '', filename)
+    filename = re.sub(r"[^\x00-\x7F]+", "", filename)
 
     # Replace filesystem-reserved characters with underscores
     # Covers Windows, macOS, and Linux reserved characters
-    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
 
     # Collapse multiple consecutive underscores to improve readability
-    filename = re.sub(r'_+', '_', filename)
+    filename = re.sub(r"_+", "_", filename)
 
     # Remove leading/trailing whitespace and underscores
-    filename = filename.strip('_ ')
+    filename = filename.strip("_ ")
 
     # Provide fallback for empty filenames
-    return filename or 'untitled'
+    return filename or "untitled"
+
 
 logger = ContextLogger(__name__)
 
 # Alias for backward compatibility
 UserServiceError = ServiceError
+
 
 class UserService:
     """Service class for handling user-related operations.
@@ -156,7 +158,7 @@ class UserService:
     def __init__(self):
         """Initialize the UserService instance (only once)."""
         # Skip initialization if already initialized
-        if hasattr(self, '_initialized'):
+        if hasattr(self, "_initialized"):
             return
 
         self._initialized = True
@@ -184,7 +186,7 @@ class UserService:
                     "Referer": settings.douyin_referer,
                 },
                 "proxy": settings.douyin_proxy_http,
-                "mode": "post"
+                "mode": "post",
             }
 
             handler = DouyinHandler(handler_kwargs)
@@ -237,13 +239,11 @@ class UserService:
             "start_time": datetime.now(),
             "include_posts": include_posts,
             "include_likes": include_likes,
-            "max_items": max_items
+            "max_items": max_items,
         }
 
         # Start download task
-        asyncio.create_task(
-            self._process_download(task_id)
-        )
+        asyncio.create_task(self._process_download(task_id))
 
         return DownloadResponse(
             task_id=task_id,
@@ -314,7 +314,7 @@ class UserService:
                 "mode": "post",
                 "naming": "{create}_{desc}",
                 "download_image": True,
-                "filename_filter": sanitize_filename  # Add filename sanitization
+                "filename_filter": sanitize_filename,  # Add filename sanitization
             }
 
             handler = DouyinHandler(handler_kwargs)
@@ -369,7 +369,6 @@ class UserService:
                     else:
                         task["progress"] = 100.0
 
-
                     logger.info(
                         f"Downloaded {downloaded_count}/{total_posts} posts "
                         f"({task['progress']:.1f}%)"
@@ -377,9 +376,7 @@ class UserService:
 
                     # Download files to temp directory
                     await handler.downloader.create_download_tasks(
-                        handler_kwargs,
-                        aweme_data._to_list(),
-                        user_dir
+                        handler_kwargs, aweme_data._to_list(), user_dir
                     )
 
                     # Upload downloaded files to R2 (search recursively)
@@ -397,16 +394,12 @@ class UserService:
                                         "image/" + file_path.suffix.lower().lstrip(".")
                                     )
                                     r2_path = self.storage.generate_ugc_path(
-                                        task["user_id"],
-                                        file_path.name,
-                                        content_type
+                                        task["user_id"], file_path.name, content_type
                                     )
                                 else:
                                     content_type = "video/mp4"
                                     r2_path = self.storage.generate_ugc_path(
-                                        task["user_id"],
-                                        file_path.name,
-                                        content_type
+                                        task["user_id"], file_path.name, content_type
                                     )
 
                                 # Generate metadata
@@ -414,15 +407,12 @@ class UserService:
                                     author=user_data.nickname,
                                     category=ContentType.POSTS,
                                     content_type=content_type,
-                                    source="douyin"
+                                    source="douyin",
                                 )
 
                                 # Upload to R2
                                 await self.storage.upload_file(
-                                    file_path,
-                                    r2_path,
-                                    metadata,
-                                    content_type
+                                    file_path, r2_path, metadata, content_type
                                 )
 
                                 # Delete local file after upload
@@ -451,8 +441,10 @@ class UserService:
                             has_more = False
 
                     # If max_items is set and we've reached it, stop
-                    if (task["max_items"] and
-                        task["downloaded_items"] >= task["max_items"]):
+                    if (
+                        task["max_items"]
+                        and task["downloaded_items"] >= task["max_items"]
+                    ):
                         has_more = False
                         break
 
@@ -487,10 +479,7 @@ class UserService:
         except Exception as e:
             logger.exception(
                 "Download failed",
-                extra={
-                    "task_id": task_id,
-                    "user_id": task["user_id"]
-                }
+                extra={"task_id": task_id, "user_id": task["user_id"]},
             )
             task["status"] = "failed"
             task["error"] = str(e)

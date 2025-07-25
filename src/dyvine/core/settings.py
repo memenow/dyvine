@@ -48,40 +48,22 @@ class APISettings(BaseSettings):
         All attributes can be configured via environment variables with
         the 'API_' prefix (e.g., API_DEBUG, API_PORT).
     """
-    version: str = Field(
-        default="1.0.0",
-        description="Application version string"
-    )
-    prefix: str = Field(
-        default="/api/v1",
-        description="API URL prefix"
-    )
+
+    version: str = Field(default="1.0.0", description="Application version string")
+    prefix: str = Field(default="/api/v1", description="API URL prefix")
     project_name: str = Field(
-        default="Dyvine API",
-        description="Human-readable project name"
+        default="Dyvine API", description="Human-readable project name"
     )
     debug: bool = Field(
-        default=False,
-        description="Enable debug mode with verbose logging"
+        default=False, description="Enable debug mode with verbose logging"
     )
-    host: str = Field(
-        default="0.0.0.0",
-        description="Server bind address"
-    )
-    port: int = Field(
-        default=8000,
-        ge=1,
-        le=65535,
-        description="Server bind port"
-    )
+    host: str = Field(default="0.0.0.0", description="Server bind address")
+    port: int = Field(default=8000, ge=1, le=65535, description="Server bind port")
     rate_limit_per_second: int = Field(
-        default=10,
-        ge=1,
-        description="API rate limiting threshold per second"
+        default=10, ge=1, description="API rate limiting threshold per second"
     )
     cors_origins: list[str] = Field(
-        default=["*"],
-        description="List of allowed CORS origins"
+        default=["*"], description="List of allowed CORS origins"
     )
 
     model_config = SettingsConfigDict(env_prefix="API_")
@@ -107,18 +89,16 @@ class SecuritySettings(BaseSettings):
         Default values must be changed in production environments.
         The validator will raise an error if defaults are used in non-debug mode.
     """
+
     secret_key: str = Field(
         default="change-me-in-production",
-        description="Secret key for cryptographic operations"
+        description="Secret key for cryptographic operations",
     )
     api_key: str = Field(
-        default="change-me-in-production",
-        description="API authentication key"
+        default="change-me-in-production", description="API authentication key"
     )
     access_token_expire_minutes: int = Field(
-        default=60,
-        ge=1,
-        description="JWT token expiration time in minutes"
+        default=60, ge=1, description="JWT token expiration time in minutes"
     )
 
     @field_validator("secret_key", "api_key")
@@ -136,8 +116,11 @@ class SecuritySettings(BaseSettings):
             ValueError: If default values are used in production.
         """
         import os
-        if (v == "change-me-in-production" and
-            os.getenv("API_DEBUG", "true").lower() != "true"):
+
+        if (
+            v == "change-me-in-production"
+            and os.getenv("API_DEBUG", "true").lower() != "true"
+        ):
             raise ValueError(f"{info.field_name} must be changed in production")
         return v
 
@@ -170,26 +153,16 @@ class R2Settings(BaseSettings):
             if r2_settings.is_configured:
                 print("R2 storage is ready")
     """
-    account_id: str = Field(
-        default="",
-        description="Cloudflare account identifier"
-    )
+
+    account_id: str = Field(default="", description="Cloudflare account identifier")
     access_key_id: str = Field(
-        default="",
-        description="R2 access key ID for authentication"
+        default="", description="R2 access key ID for authentication"
     )
     secret_access_key: str = Field(
-        default="",
-        description="R2 secret access key for authentication"
+        default="", description="R2 secret access key for authentication"
     )
-    bucket_name: str = Field(
-        default="",
-        description="Name of the R2 storage bucket"
-    )
-    endpoint: str = Field(
-        default="",
-        description="R2 API endpoint URL"
-    )
+    bucket_name: str = Field(default="", description="Name of the R2 storage bucket")
+    endpoint: str = Field(default="", description="R2 API endpoint URL")
 
     @property
     def is_configured(self) -> bool:
@@ -199,12 +172,14 @@ class R2Settings(BaseSettings):
             True if all required R2 credentials and settings are provided,
             False otherwise.
         """
-        return all([
-            self.account_id,
-            self.access_key_id,
-            self.secret_access_key,
-            self.bucket_name
-        ])
+        return all(
+            [
+                self.account_id,
+                self.access_key_id,
+                self.secret_access_key,
+                self.bucket_name,
+            ]
+        )
 
     model_config = SettingsConfigDict(env_prefix="R2_")
 
@@ -233,25 +208,21 @@ class DouyinSettings(BaseSettings):
         A valid cookie is required for most Douyin API operations.
         The default User-Agent mimics a Windows Chrome browser.
     """
-    cookie: str = Field(
-        default="",
-        description="Douyin authentication cookie string"
-    )
+
+    cookie: str = Field(default="", description="Douyin authentication cookie string")
     user_agent: str = Field(
         default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        description="HTTP User-Agent header for requests"
+        description="HTTP User-Agent header for requests",
     )
     referer: str = Field(
         default="https://www.douyin.com/",
-        description="HTTP Referer header for requests"
+        description="HTTP Referer header for requests",
     )
     proxy_http: str | None = Field(
-        default=None,
-        description="HTTP proxy URL (optional)"
+        default=None, description="HTTP proxy URL (optional)"
     )
     proxy_https: str | None = Field(
-        default=None,
-        description="HTTPS proxy URL (optional)"
+        default=None, description="HTTPS proxy URL (optional)"
     )
 
     @property
@@ -265,7 +236,7 @@ class DouyinSettings(BaseSettings):
         return {
             "User-Agent": self.user_agent,
             "Referer": self.referer,
-            "Cookie": self.cookie
+            "Cookie": self.cookie,
         }
 
     @property
@@ -276,10 +247,7 @@ class DouyinSettings(BaseSettings):
             Dictionary containing HTTP and HTTPS proxy URLs,
             compatible with common HTTP client libraries.
         """
-        return {
-            "http://": self.proxy_http,
-            "https://": self.proxy_https
-        }
+        return {"http://": self.proxy_http, "https://": self.proxy_https}
 
     model_config = SettingsConfigDict(env_prefix="DOUYIN_")
 
@@ -430,9 +398,7 @@ class Settings(BaseSettings):
         return self.douyin.proxy_https
 
     model_config = SettingsConfigDict(
-        env_file=".env",
-        case_sensitive=True,
-        extra="ignore"
+        env_file=".env", case_sensitive=True, extra="ignore"
     )
 
 
@@ -455,10 +421,10 @@ def get_settings() -> Settings:
         print(f"Running {settings.project_name} v{settings.version}")
     """
     from dotenv import load_dotenv
+
     load_dotenv()
     return Settings()
 
 
 # Global settings instance for convenient access throughout the application
 settings = get_settings()
-
