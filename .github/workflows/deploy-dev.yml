@@ -1,0 +1,115 @@
+name: Deploy to Development
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  INGRESS_HOST: ${{ secrets.DEV_INGRESS_HOST || 'dyvine-dev.example.com' }}
+
+jobs:
+  build:
+    name: Build and Push Image
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      push: true
+      registry: ghcr.io
+      image-name: ${{ github.repository }}
+    permissions:
+      contents: read
+      packages: write
+
+  deploy:
+    name: Deploy to Development Environment
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: github-actions@mmn-ai.iam.gserviceaccount.com
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        install_components: 'gke-gcloud-auth-plugin'
+
+    - name: Configure kubectl
+      run: |
+        gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE --project $PROJECT_ID
+
+    - name: Create namespace if not exists
+      run: |
+        kubectl create namespace dyvine --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create Application Secrets
+      run: |
+        kubectl create secret generic dyvine-secrets \
+          --from-literal=SECURITY_SECRET_KEY="${{ secrets.DEV_SECURITY_SECRET_KEY }}" \
+          --from-literal=SECURITY_API_KEY="${{ secrets.DEV_SECURITY_API_KEY }}" \
+          --from-literal=R2_ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}" \
+          --from-literal=R2_ACCESS_KEY_ID="${{ secrets.R2_ACCESS_KEY_ID }}" \
+          --from-literal=R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
+          --from-literal=DOUYIN_COOKIE="${{ secrets.DOUYIN_COOKIE }}" \
+          --namespace=dyvine \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Deploy to Development
+      run: |
+        # Create temporary kustomization for dev
+        cat > k8s/overlays/dev-deploy.yaml << EOF
+        apiVersion: kustomize.config.k8s.io/v1beta1
+        kind: Kustomization
+        
+        namespace: dyvine
+        
+        resources:
+          - ../base
+        
+        images:
+          - name: ghcr.io/${{ github.repository }}
+            newTag: main-${{ github.sha }}
+        
+        patchesStrategicMerge:
+          - |-
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: dyvine-api
+            spec:
+              replicas: 1
+        
+        configMapGenerator:
+          - name: dyvine-config
+            behavior: merge
+            literals:
+              - API_DEBUG=true
+              - API_ENVIRONMENT=development
+              - R2_BUCKET_NAME=mmn-dev-data
+        EOF
+        
+        kubectl apply -k k8s/overlays/ -f k8s/overlays/dev-deploy.yaml
+        rm k8s/overlays/dev-deploy.yaml
+
+    - name: Verify deployment
+      run: |
+        kubectl rollout status deployment/dyvine-api -n dyvine --timeout=300s
+
+    - name: Get service status
+      run: |
+        echo "Deployment completed to development environment"
+        kubectl get pods -n dyvine -l app.kubernetes.io/name=dyvine
+        kubectl get services -n dyvine

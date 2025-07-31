@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dyvine-config
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: dyvine
+data:
+  API_DEBUG: "false"
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  R2_ENDPOINT: "https://b619b24f5068c8260d6e3782f29e497d.r2.cloudflarestorage.com"
+  R2_BUCKET_NAME: "mmn-dev-data"
+  DOUYIN_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  DOUYIN_REFERER: "https://www.douyin.com/"

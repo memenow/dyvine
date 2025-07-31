@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: dyvine-ingress
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: dyvine
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - INGRESS_HOST
+    secretName: dyvine-tls
+  rules:
+  - host: INGRESS_HOST
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: dyvine-api
+            port:
+              number: 80

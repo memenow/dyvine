@@ -1,0 +1,27 @@
+name: 'Docker Security Scan'
+description: 'Scan Docker images for vulnerabilities'
+inputs:
+  image:
+    description: 'Docker image to scan'
+    required: true
+  severity-threshold:
+    description: 'Minimum severity level to fail the scan'
+    required: false
+    default: 'HIGH'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ inputs.image }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: ${{ inputs.severity-threshold }}
+    
+    - name: Upload Trivy scan results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'

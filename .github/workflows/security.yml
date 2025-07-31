@@ -18,17 +18,24 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v3
       with:
-        python-version: '3.12'
+        version: "latest"
+        enable-cache: true
+
+    - name: Set up Python
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: uv sync
 
     - name: Install safety
-      run: pip install safety
+      run: uv add --dev safety
 
     - name: Run safety check
       run: |
-        pip freeze | safety check --json --output safety-report.json || true
+        uv run pip freeze | uv run safety check --json --output safety-report.json || true
 
     - name: Upload safety results
       uses: actions/upload-artifact@v4
@@ -47,7 +54,7 @@ jobs:
 
     - name: Build Docker image for scanning
       run: |
-        docker build -f deploy/Dockerfile -t scan-target:latest .
+        docker build -t scan-target:latest .
 
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@master

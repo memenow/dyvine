@@ -1,5 +1,3 @@
-"""Unified error handling for Dyvine API."""
-
 import traceback
 from typing import Any
 
