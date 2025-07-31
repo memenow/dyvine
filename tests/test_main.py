@@ -1,13 +1,11 @@
 import sys
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 # Add project root to the path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.dyvine.core.logging import ContextLogger
 from src.dyvine.core.settings import settings
 from src.dyvine.main import app
 
