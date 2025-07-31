@@ -1,0 +1,184 @@
+name: Production Deployment
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to deploy (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  GKE_CLUSTER: ${{ secrets.GKE_CLUSTER }}
+  GKE_ZONE: ${{ secrets.GKE_ZONE }}
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  INGRESS_HOST: ${{ secrets.PROD_INGRESS_HOST || 'api.dyvine.app' }}
+
+jobs:
+  pre-deployment-checks:
+    name: Pre-deployment Validation
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.validate.outputs.tag }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Validate and get tag
+      id: validate
+      run: |
+        if [ "${{ github.event_name }}" = "release" ]; then
+          TAG="${{ github.event.release.tag_name }}"
+        else
+          TAG="${{ github.event.inputs.tag }}"
+        fi
+        
+        # Validate tag format
+        if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+\.[0-9]+)?$ ]]; then
+          echo "Error: Invalid tag format. Expected: v1.0.0 or v1.0.0-rc.1"
+          exit 1
+        fi
+        
+        echo "tag=$TAG" >> $GITHUB_OUTPUT
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Verify image exists
+      run: |
+        IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:${{ steps.validate.outputs.tag }}"
+        docker pull $IMAGE || {
+          echo "Error: Image $IMAGE not found. Please ensure the release workflow has completed."
+          exit 1
+        }
+
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: pre-deployment-checks
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+        service_account: github-actions@mmn-ai.iam.gserviceaccount.com
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        install_components: 'gke-gcloud-auth-plugin'
+
+    - name: Configure kubectl
+      run: |
+        gcloud container clusters get-credentials $GKE_CLUSTER --zone $GKE_ZONE --project $PROJECT_ID
+
+    - name: Create namespace if not exists
+      run: |
+        kubectl create namespace dyvine --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Create Application Secrets
+      run: |
+        kubectl create secret generic dyvine-secrets \
+          --from-literal=SECURITY_SECRET_KEY="${{ secrets.PROD_SECURITY_SECRET_KEY }}" \
+          --from-literal=SECURITY_API_KEY="${{ secrets.PROD_SECURITY_API_KEY }}" \
+          --from-literal=R2_ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}" \
+          --from-literal=R2_ACCESS_KEY_ID="${{ secrets.R2_ACCESS_KEY_ID }}" \
+          --from-literal=R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
+          --from-literal=DOUYIN_COOKIE="${{ secrets.DOUYIN_COOKIE }}" \
+          --namespace=dyvine \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Deploy to Production
+      run: |
+        # Create temporary kustomization for prod
+        cat > k8s/overlays/prod-deploy.yaml << EOF
+        apiVersion: kustomize.config.k8s.io/v1beta1
+        kind: Kustomization
+        
+        namespace: dyvine
+        
+        resources:
+          - ../base
+        
+        images:
+          - name: ghcr.io/${{ github.repository }}
+            newTag: ${{ needs.pre-deployment-checks.outputs.image-tag }}
+        
+        patchesStrategicMerge:
+          - |-
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: dyvine-api
+            spec:
+              replicas: 3
+              template:
+                spec:
+                  resources:
+                    requests:
+                      memory: "256Mi"
+                      cpu: "100m"
+                    limits:
+                      memory: "512Mi"
+                      cpu: "500m"
+        
+        configMapGenerator:
+          - name: dyvine-config
+            behavior: merge
+            literals:
+              - API_DEBUG=false
+              - API_ENVIRONMENT=production
+              - R2_BUCKET_NAME=mmn-prod-data
+              - API_VERSION=${{ needs.pre-deployment-checks.outputs.image-tag }}
+        EOF
+        
+        kubectl apply -k k8s/overlays/ -f k8s/overlays/prod-deploy.yaml
+        rm k8s/overlays/prod-deploy.yaml
+
+    - name: Verify deployment
+      run: |
+        kubectl rollout status deployment/dyvine-api -n dyvine --timeout=600s
+
+    - name: Run production smoke tests
+      run: |
+        # Wait for service to be ready
+        sleep 30
+        
+        # Get service endpoint
+        SERVICE_IP=$(kubectl get service dyvine-api -n dyvine -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        if [ -z "$SERVICE_IP" ]; then
+          echo "Warning: No external IP found, checking ingress..."
+          kubectl get ingress -n dyvine
+        else
+          # Test health endpoint
+          curl -f http://${SERVICE_IP}:8000/health || exit 1
+        fi
+
+    - name: Production deployment summary
+      run: |
+        echo "🚀 Production deployment completed successfully!"
+        echo "Version: ${{ needs.pre-deployment-checks.outputs.image-tag }}"
+        echo "Environment: Production"
+        echo "Namespace: dyvine"
+        echo ""
+        echo "Resources:"
+        kubectl get pods -n dyvine -l app.kubernetes.io/name=dyvine
+        kubectl get services -n dyvine
+        kubectl get ingress -n dyvine

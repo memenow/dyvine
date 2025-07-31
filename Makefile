@@ -11,21 +11,21 @@ help:
 	@echo "  run       Run the application"
 
 install:
-	pip install -e .
+	uv sync
 
 dev:
-	pip install -e ".[dev]"
+	uv sync --all-extras
 
 test:
-	pytest
+	uv run pytest
 
 lint:
-	ruff check .
-	mypy .
+	uv run ruff check .
+	uv run mypy .
 
 format:
-	black .
-	isort .
+	uv run black .
+	uv run isort .
 
 clean:
 	find . -type f -name "*.pyc" -delete
@@ -36,4 +36,4 @@ clean:
 	rm -rf .ruff_cache
 
 run:
-	uvicorn src.dyvine.main:app --reload
+	uv run uvicorn src.dyvine.main:app --reload

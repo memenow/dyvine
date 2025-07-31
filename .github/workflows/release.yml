@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-release:
+    name: Build Release Image
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      push: true
+      registry: ghcr.io
+      image-name: ${{ github.repository }}
+      build-args: |
+        VERSION=${{ github.ref_name }}
+    permissions:
+      contents: read
+      packages: write
+  
+  security-scan:
+    name: Security Scan
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Scan Docker image
+      uses: ./.github/actions/docker-security-scan
+      with:
+        image: ${{ needs.build-release.outputs.image-tag }}
+        severity-threshold: 'CRITICAL'
+  
+  create-release:
+    name: Create GitHub Release
+    needs: [build-release, security-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Generate release notes
+      id: release-notes
+      run: |
+        echo "RELEASE_NOTES<<EOF" >> $GITHUB_ENV
+        echo "## Docker Image" >> $GITHUB_ENV
+        echo "- Image: \`${{ needs.build-release.outputs.image-tag }}\`" >> $GITHUB_ENV
+        echo "- Digest: \`${{ needs.build-release.outputs.image-digest }}\`" >> $GITHUB_ENV
+        echo "" >> $GITHUB_ENV
+        echo "## Changelog" >> $GITHUB_ENV
+        git log --pretty=format:"- %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        body: ${{ env.RELEASE_NOTES }}
+        draft: false
+        prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') || contains(github.ref, '-alpha') }}

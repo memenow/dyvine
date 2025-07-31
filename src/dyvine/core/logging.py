@@ -1,5 +1,3 @@
-"""Logging configuration for Dyvine."""
-
 import json
 import logging
 import logging.handlers

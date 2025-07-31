@@ -54,10 +54,6 @@ Example Usage:
     API documentation:
         Open http://localhost:8000/docs for Swagger UI
         Open http://localhost:8000/redoc for ReDoc documentation
-
-Author: Bill Duke <billduke@memenow.xyz>
-License: Apache 2.0
-Version: 1.0.0
 """
 
 import time

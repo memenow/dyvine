@@ -1,90 +1,86 @@
-# Git
-.git
-.gitignore
-.gitattributes
-
-# GitHub
-.github
+# ==============================================================================
+# Docker Build Optimization
+# ==============================================================================
 
 # Documentation
+README.md
+LICENSE
 *.md
 docs/
+.github/
 
-# Environment files
-.env
-.env.*
-!.env.example
+# Development files
+.git/
+.gitignore
+.dockerignore
 
-# Python
+# Python cache and build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# PyCharm
-.idea/
-
-# VSCode
-.vscode/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# Virtual environments
-venv/
-env/
-ENV/
-
-# Testing
 .pytest_cache/
 .coverage
-htmlcov/
-.tox/
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
 
-# Logs
-*.log
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and runtime data
 logs/
-
-# Runtime data
-pids
+*.log
 *.pid
-*.seed
-*.pid.lock
-data/
 
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+# Database files
+*.db
+*.sqlite3
 
 # Temporary files
-tmp/
-temp/
 *.tmp
 *.temp
+temp_downloads/
+
+# Test files
+tests/
+test/
+
+# Development tools
+Makefile
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Security and credentials
+*.key
+*.pem
+*.cert
+.env*
+config/production.py
+
+# Monitoring data
+prometheus-data/
+grafana-data/
+sessions/
+
+# Kubernetes manifests
+k8s/
+
+# Backup files
+*.bak
+*.backup
+
+# AI assistants
+.claude/
+.serena/

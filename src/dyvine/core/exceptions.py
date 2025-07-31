@@ -1,5 +1,3 @@
-"""Unified exception hierarchy for Dyvine."""
-
 from typing import Any
 
 

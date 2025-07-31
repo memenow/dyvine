@@ -1,4 +1,4 @@
-# 🎵 Dyvine
+# Dyvine
 
 [![Python Version](https://img.shields.io/badge/python-3.12+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com)
@@ -36,8 +36,8 @@ Dyvine provides a comprehensive API for downloading and managing content with pr
 
 ### Prerequisites
 
-- Python 3.12+
-- Git
+- [uv](https://docs.astral.sh/uv/) (recommended) or Python 3.12+
+- Git  
 - 2GB+ free disk space
 - Active internet connection
 - Valid authentication cookie
@@ -50,15 +50,11 @@ Dyvine provides a comprehensive API for downloading and managing content with pr
 git clone https://github.com/memenow/dyvine.git
 cd dyvine
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -e .
+# Setup with uv (recommended)
+uv sync
 
 # Install development dependencies (optional)
-pip install -e ".[dev]"
+uv sync --all-extras
 ```
 
 ### Configuration
@@ -92,10 +88,10 @@ pip install -e ".[dev]"
 
 ```bash
 # Start development server
-uvicorn src.dyvine.main:app --reload
+uv run uvicorn src.dyvine.main:app --reload
 
-# Production server
-uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000
+# Production server  
+uv run uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000
 ```
 
 The API will be available at:
@@ -171,17 +167,17 @@ The project includes a comprehensive test suite with full async support:
 
 ```bash
 # Run all tests
-pytest
+uv run pytest
 
 # Run with coverage
-pytest --cov=src/dyvine
+uv run pytest --cov=src/dyvine
 
 # Run specific test categories
-pytest tests/unit/          # Unit tests
-pytest tests/integration/   # Integration tests
+uv run pytest tests/unit/          # Unit tests
+uv run pytest tests/integration/   # Integration tests
 
 # Run with verbose output
-pytest -v
+uv run pytest -v
 ```
 
 ### Test Structure
@@ -202,23 +198,65 @@ tests/
 
 ### Docker Deployment
 
-1. **Build Image**:
+#### Quick Start with Minimal Configuration
 
-   ```bash
-   docker build -t dyvine:latest -f deploy/Dockerfile .
-   ```
+For the simplest Docker deployment, you only need to set essential environment variables:
 
-2. **Run Container**:
+```bash
+# Build the image
+docker build -t dyvine:latest .
 
-   ```bash
-   docker run -d \
-     --name dyvine \
-     -p 8000:8000 \
-     -v $(pwd)/data:/app/data \
-     -v $(pwd)/logs:/app/logs \
-     --env-file .env \
-     dyvine:latest
-   ```
+# Run with minimal required configuration
+docker run -d \
+  --name dyvine \
+  -p 8000:8000 \
+  -e DOUYIN_COOKIE="your_douyin_cookie_here" \
+  -e SECURITY_SECRET_KEY="your-production-secret-key" \
+  -e SECURITY_API_KEY="your-production-api-key" \
+  dyvine:latest
+```
+
+#### Full Configuration with Storage
+
+For production deployment with cloud storage:
+
+```bash
+docker run -d \
+  --name dyvine \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  -e DOUYIN_COOKIE="your_douyin_cookie_here" \
+  -e SECURITY_SECRET_KEY="your-production-secret-key" \
+  -e SECURITY_API_KEY="your-production-api-key" \
+  -e R2_ACCOUNT_ID="your_r2_account_id" \
+  -e R2_ACCESS_KEY_ID="your_r2_access_key" \
+  -e R2_SECRET_ACCESS_KEY="your_r2_secret_key" \
+  -e R2_BUCKET_NAME="your_r2_bucket_name" \
+  -e R2_ENDPOINT="your_r2_endpoint" \
+  --restart unless-stopped \
+  dyvine:latest
+```
+
+#### Using Environment File
+
+If you prefer using an `.env` file:
+
+```bash
+# Copy and customize environment template
+cp .env.docker .env
+# Edit .env with your configuration
+
+# Run with env file
+docker run -d \
+  --name dyvine \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  --env-file .env \
+  --restart unless-stopped \
+  dyvine:latest
+```
 
 ### Kubernetes Deployment
 
@@ -272,17 +310,17 @@ Response includes:
 
 ```bash
 # Code formatting
-black .
-isort .
+uv run black .
+uv run isort .
 
 # Type checking
-mypy .
+uv run mypy .
 
 # Linting
-ruff check .
+uv run ruff check .
 
 # Run all checks
-pytest && black . && isort . && mypy . && ruff check .
+uv run pytest && uv run black . && uv run isort . && uv run mypy . && uv run ruff check .
 ```
 
 ### CI/CD Pipeline
