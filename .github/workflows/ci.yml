@@ -75,7 +75,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     uses: ./.github/workflows/docker-build.yml
     with:
-      push: false
+      push: true
       image-name: ${{ github.repository }}
     permissions:
       contents: read
