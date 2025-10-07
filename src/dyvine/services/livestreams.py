@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 from urllib.parse import urlparse
 
 from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
@@ -21,6 +21,8 @@ logger = ContextLogger(__name__)
 
 # Alias for backward compatibility
 LivestreamError = ServiceError
+
+__all__ = ["LivestreamService", "LivestreamError", "DownloadError"]
 
 
 class LivestreamService:
@@ -54,7 +56,7 @@ class LivestreamService:
         self.user_service = UserService()
         self.douyin_handler = get_service_container().douyin_handler
         # Disable optional Bark notifications to avoid network noise in service usage.
-        setattr(self.douyin_handler, "enable_bark", False)
+        self.douyin_handler.enable_bark = False
 
     async def _load_live_filter(
         self,
@@ -105,20 +107,20 @@ class LivestreamService:
             return None
 
     @staticmethod
-    def _extract_stream_map(live_filter: Any) -> Dict[str, str]:
+    def _extract_stream_map(live_filter: Any) -> dict[str, str]:
         """Extract HLS stream map from the f2 live filter."""
         if hasattr(live_filter, "m3u8_pull_url"):
-            stream_map = getattr(live_filter, "m3u8_pull_url") or {}
+            stream_map = live_filter.m3u8_pull_url or {}
             if isinstance(stream_map, dict):
                 return stream_map
         if hasattr(live_filter, "hls_pull_url"):
-            stream_map = getattr(live_filter, "hls_pull_url") or {}
+            stream_map = live_filter.hls_pull_url or {}
             if isinstance(stream_map, dict):
                 return stream_map
         return {}
 
     @staticmethod
-    def _select_stream_url(stream_map: Dict[str, str]) -> str | None:
+    def _select_stream_url(stream_map: dict[str, str]) -> str | None:
         """Choose the preferred stream URL from the available variants."""
         preferred_order = ("FULL_HD1", "HD1", "SD1", "SD2")
         for key in preferred_order:
@@ -241,8 +243,14 @@ class LivestreamService:
                 raise ValueError("Unable to resolve livestream metadata")
             room_info = live_filter._to_dict()
             room_info["stream_map"] = self._extract_stream_map(live_filter)
-            room_info["status"] = getattr(live_filter, "live_status", 0)
-            room_info.setdefault("room_id", getattr(live_filter, "room_id", webcast_id))
+            if hasattr(live_filter, "live_status"):
+                room_info["status"] = live_filter.live_status
+            else:
+                room_info["status"] = 0
+            if hasattr(live_filter, "room_id"):
+                room_info.setdefault("room_id", live_filter.room_id)
+            else:
+                room_info.setdefault("room_id", webcast_id)
             room_info.setdefault("webcast_id", webcast_id)
             return room_info
         except Exception as error:
@@ -323,9 +331,7 @@ class LivestreamService:
                         stream_map,
                         status,
                         flv_map,
-                    ) = self._stream_map_from_room_data(
-                        getattr(profile, "room_data", None)
-                    )
+                    ) = self._stream_map_from_room_data(profile.room_data)
                     profile_room_info = {
                         "status": (
                             status if status is not None else (2 if stream_map else 0)
@@ -368,10 +374,10 @@ class LivestreamService:
                 stream_map = profile_room_info["stream_map"]
             if profile_room_info and profile_room_info.get("flv_pull_url"):
                 flv_map = profile_room_info["flv_pull_url"]
-            if not stream_map and live_filter:
-                stream_map = getattr(live_filter, "m3u8_pull_url", {}) or {}
-            if not flv_map and live_filter:
-                flv_map = getattr(live_filter, "flv_pull_url", {}) or {}
+            if not stream_map and live_filter and hasattr(live_filter, "m3u8_pull_url"):
+                stream_map = live_filter.m3u8_pull_url or {}
+            if not flv_map and live_filter and hasattr(live_filter, "flv_pull_url"):
+                flv_map = live_filter.flv_pull_url or {}
             if not stream_map:
                 logger.warning(f"No stream URLs found for webcast ID: {webcast_id}")
                 return "error", "No live stream available for this user"
