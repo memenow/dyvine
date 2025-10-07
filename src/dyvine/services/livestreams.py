@@ -241,18 +241,18 @@ class LivestreamService:
             live_filter = await self._load_live_filter(webcast_id=webcast_id)
             if not live_filter:
                 raise ValueError("Unable to resolve livestream metadata")
-            room_info = live_filter._to_dict()
-            room_info["stream_map"] = self._extract_stream_map(live_filter)
+            room_info_raw = live_filter._to_dict()
+            room_info_raw["stream_map"] = self._extract_stream_map(live_filter)
             if hasattr(live_filter, "live_status"):
-                room_info["status"] = live_filter.live_status
+                room_info_raw["status"] = live_filter.live_status
             else:
-                room_info["status"] = 0
+                room_info_raw["status"] = 0
             if hasattr(live_filter, "room_id"):
-                room_info.setdefault("room_id", live_filter.room_id)
+                room_info_raw.setdefault("room_id", live_filter.room_id)
             else:
-                room_info.setdefault("room_id", webcast_id)
-            room_info.setdefault("webcast_id", webcast_id)
-            return room_info
+                room_info_raw.setdefault("room_id", webcast_id)
+            room_info_raw.setdefault("webcast_id", webcast_id)
+            return dict(room_info_raw)
         except Exception as error:
             logger.error(f"Error getting room info via f2: {error}")
             raise
@@ -368,21 +368,29 @@ class LivestreamService:
                     f"User is not currently streaming (status code: {status_code})"
                 )
 
-            stream_map: dict[str, str] = {}
-            flv_map: dict[str, str] = {}
+            resolved_stream_map: dict[str, str] = {}
+            resolved_flv_map: dict[str, str] = {}
             if profile_room_info and profile_room_info.get("stream_map"):
-                stream_map = profile_room_info["stream_map"]
+                resolved_stream_map = profile_room_info["stream_map"]
             if profile_room_info and profile_room_info.get("flv_pull_url"):
-                flv_map = profile_room_info["flv_pull_url"]
-            if not stream_map and live_filter and hasattr(live_filter, "m3u8_pull_url"):
-                stream_map = live_filter.m3u8_pull_url or {}
-            if not flv_map and live_filter and hasattr(live_filter, "flv_pull_url"):
-                flv_map = live_filter.flv_pull_url or {}
-            if not stream_map:
+                resolved_flv_map = profile_room_info["flv_pull_url"]
+            if (
+                not resolved_stream_map
+                and live_filter
+                and hasattr(live_filter, "m3u8_pull_url")
+            ):
+                resolved_stream_map = dict(live_filter.m3u8_pull_url or {})
+            if (
+                not resolved_flv_map
+                and live_filter
+                and hasattr(live_filter, "flv_pull_url")
+            ):
+                resolved_flv_map = dict(live_filter.flv_pull_url or {})
+            if not resolved_stream_map:
                 logger.warning(f"No stream URLs found for webcast ID: {webcast_id}")
                 return "error", "No live stream available for this user"
 
-            if not self._select_stream_url(stream_map):
+            if not self._select_stream_url(resolved_stream_map):
                 return "error", "No suitable quality stream found"
 
             if output_path:
@@ -400,8 +408,8 @@ class LivestreamService:
                 "nickname": room_info.get("nickname_raw")
                 or room_info.get("nickname")
                 or "",
-                "m3u8_pull_url": stream_map,
-                "flv_pull_url": flv_map or room_info.get("flv_pull_url") or {},
+                "m3u8_pull_url": resolved_stream_map,
+                "flv_pull_url": resolved_flv_map or room_info.get("flv_pull_url") or {},
             }
 
             download_kwargs = {
