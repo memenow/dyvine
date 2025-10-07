@@ -17,7 +17,9 @@ def reset_container_cache() -> None:
     dependencies.get_service_container.cache_clear()
 
 
-def test_service_container_initializes_with_douyin_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_service_container_initializes_with_douyin_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_kwargs: dict[str, object] = {}
 
     def build_handler(kwargs: dict[str, object]) -> DummyHandler:
@@ -35,8 +37,12 @@ def test_service_container_initializes_with_douyin_handler(monkeypatch: pytest.M
     assert captured_kwargs.get("max_tasks") == 3
 
 
-def test_get_service_container_returns_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs))
+def test_get_service_container_returns_singleton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
 
     container_one = dependencies.get_service_container()
     container_two = dependencies.get_service_container()
