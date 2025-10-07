@@ -62,8 +62,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .core.dependencies import get_service_container
 from .core.error_handlers import register_error_handlers
@@ -180,7 +181,7 @@ app = FastAPI(
     version=settings.version,
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url=f"{settings.prefix}/openapi.json",
+    openapi_url=f"{settings.prefix}/openapi.json" if settings.prefix else "/openapi.json",
     lifespan=lifespan,
     # Additional metadata for OpenAPI documentation
     contact={
@@ -269,9 +270,21 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
         }
         ```
     """
-    # Generate unique correlation ID for request tracing
-    correlation_id = str(uuid.uuid4())
+    # Determine correlation ID from header or generate a new UUID
+    client_request_id = request.headers.get("X-Request-ID")
+    correlation_id: str
+    request_id_source = "generated"
+    if client_request_id:
+        try:
+            correlation_id = str(uuid.UUID(client_request_id))
+            request_id_source = "client"
+        except ValueError:
+            correlation_id = str(uuid.uuid4())
+            request_id_source = "regenerated"
+    else:
+        correlation_id = str(uuid.uuid4())
     request.state.correlation_id = correlation_id
+    request.state.request_id_source = request_id_source
 
     # Configure logger with correlation context
     logger = app.state.logger
@@ -290,6 +303,7 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
             "client_ip": request.client.host if request.client else "unknown",
             "user_agent": request.headers.get("user-agent"),
             "content_length": request.headers.get("content-length"),
+            "request_id_source": request_id_source,
         },
     )
 
@@ -307,11 +321,13 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
             "duration_ms": round(duration * 1000, 2),
             "content_length": response.headers.get("content-length"),
             "cache_status": response.headers.get("cache-control"),
+            "request_id_source": request_id_source,
         },
     )
 
     # Add correlation ID to response headers for client tracing
     response.headers["X-Correlation-ID"] = correlation_id
+    logger.correlation_id = None
 
     return response
 
@@ -334,7 +350,7 @@ app.include_router(livestreams.router, prefix=settings.prefix)
     response_description="API metadata and documentation links",
     tags=["System"],
 )
-async def root() -> dict[str, str]:
+async def root() -> dict[str, Any]:
     """API root endpoint providing basic service information and navigation.
 
     This endpoint serves as the entry point for the Dyvine API, providing
@@ -342,11 +358,14 @@ async def root() -> dict[str, str]:
     links to interactive documentation.
 
     Returns:
-        Dict[str, str]: Service metadata including:
+        Dict[str, Any]: Service metadata including:
             - name: Human-readable API name
             - version: Current API version (semantic versioning)
             - docs: URL path to Swagger/OpenAPI documentation
             - redoc: URL path to ReDoc documentation
+            - status: Current operational status string
+            - api_prefix: Configured API prefix
+            - features: List of available feature domains
 
     Example:
         ```bash
@@ -359,7 +378,10 @@ async def root() -> dict[str, str]:
             "name": "Dyvine API",
             "version": "1.0.0",
             "docs": "/docs",
-            "redoc": "/redoc"
+            "redoc": "/redoc",
+            "status": "operational",
+            "api_prefix": "/api/v1",
+            "features": ["users", "posts", "livestreams"]
         }
         ```
 
@@ -374,6 +396,7 @@ async def root() -> dict[str, str]:
         "redoc": "/redoc",
         "status": "operational",
         "api_prefix": settings.prefix,
+        "features": ["users", "posts", "livestreams"],
     }
 
 
@@ -384,7 +407,7 @@ async def root() -> dict[str, str]:
     response_description="Health status with system metrics and uptime information",
     tags=["System"],
 )
-async def health_check() -> dict[str, Any]:
+async def health_check(request: Request) -> JSONResponse:
     """Comprehensive health check endpoint for monitoring and diagnostics.
 
     This endpoint provides detailed health information about the Dyvine API
@@ -408,10 +431,11 @@ async def health_check() -> dict[str, Any]:
             - memory_mb: Current memory usage in MB
             - cpu_percent: Current CPU usage percentage
             - dependencies: Status of external dependencies
+            - correlation_id: Correlated request identifier for tracking
 
     Status Codes:
         - 200: Service is healthy and operational
-        - 503: Service is unhealthy or degraded (if implemented)
+        - 503: Service is degraded or unhealthy
 
     Example:
         ```bash
@@ -430,7 +454,8 @@ async def health_check() -> dict[str, Any]:
             "dependencies": {
                 "douyin_api": "connected",
                 "r2_storage": "available"
-            }
+            },
+            "correlation_id": "550e8400-e29b-41d4-a716-446655440000"
         }
         ```
 
@@ -454,20 +479,26 @@ async def health_check() -> dict[str, Any]:
 
     # Check dependency status (can be expanded for real health checks)
     dependencies = {
-        "douyin_api": "unknown",  # Could implement actual connectivity check
+        "douyin_api": "configured" if settings.douyin.cookie else "missing_credentials",
         "r2_storage": "available" if settings.r2.is_configured else "not_configured",
         "logging_system": "operational",
     }
 
     # Determine overall health status
-    status = "healthy"
-    if uptime_seconds < 30:  # Still starting up
-        status = "starting"
-    elif process.memory_info().rss > 1024 * 1024 * 1024:  # > 1GB RAM
-        status = "degraded"
+    health_status = "healthy"
+    if not settings.douyin.cookie:
+        health_status = "unhealthy"
+    elif not settings.r2.is_configured:
+        health_status = "degraded"
 
-    return {
-        "status": status,
+    if process.memory_info().rss > 1024 * 1024 * 1024:  # > 1GB RAM
+        if health_status != "unhealthy":
+            health_status = "degraded"
+
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+
+    response_body = {
+        "status": health_status,
         "version": settings.version,
         "environment": "development" if settings.debug else "production",
         "uptime_seconds": uptime_seconds,
@@ -477,4 +508,13 @@ async def health_check() -> dict[str, Any]:
         "dependencies": dependencies,
         "timestamp": time.time(),
         "api_prefix": settings.prefix,
+        "correlation_id": correlation_id,
     }
+
+    status_code = (
+        status.HTTP_200_OK
+        if health_status == "healthy"
+        else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
+
+    return JSONResponse(status_code=status_code, content=response_body)

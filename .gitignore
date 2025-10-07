@@ -175,6 +175,8 @@ docs/build/
 # AI assistants
 .claude/
 .serena/
+CLAUDE.md
+AGENTS.md
 
 # Profiling
 *.prof
