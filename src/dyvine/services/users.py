@@ -195,6 +195,9 @@ class UserService:
             if not user_data.nickname:
                 raise UserNotFoundError(f"User {user_id} not found")
 
+            raw_user = user_data._to_raw()
+            room_data = raw_user.get("user", {}).get("room_data")
+
             return UserResponse(
                 user_id=user_id,
                 nickname=user_data.nickname,
@@ -205,6 +208,7 @@ class UserService:
                 total_favorited=int(user_data.total_favorited or 0),  # type: ignore
                 is_living=bool(user_data.room_id),  # type: ignore
                 room_id=int(user_data.room_id) if user_data.room_id else None,  # type: ignore
+                room_data=room_data if isinstance(room_data, str) else None,
             )
         except Exception as e:
             logger.exception("Failed to get user info", extra={"user_id": user_id})
