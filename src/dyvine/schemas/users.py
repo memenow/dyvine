@@ -30,6 +30,9 @@ class UserResponse(BaseModel):
         False, description="Whether user is currently live streaming"
     )
     room_id: int | None = Field(None, description="Live room ID if streaming")
+    room_data: str | None = Field(
+        None, description="Raw room_data payload for active livestreams"
+    )
     model_config = ConfigDict()
 
 

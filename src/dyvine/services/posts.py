@@ -164,9 +164,19 @@ class PostService:
                 logger.warning("No posts found", extra={"sec_user_id": sec_user_id})
                 return []
 
-            posts_data = posts_filter._to_dict()
-            if not posts_data:
-                raise UserNotFoundError(f"User not found: {sec_user_id}")
+            raw_data = posts_filter._to_raw()
+            aweme_list = raw_data.get("aweme_list") or []
+
+            if not aweme_list:
+                logger.warning(
+                    "User posts response empty",
+                    extra={
+                        "sec_user_id": sec_user_id,
+                        "has_more": raw_data.get("has_more"),
+                        "status_msg": raw_data.get("status_msg"),
+                    },
+                )
+                return []
 
             return [
                 PostDetail(
@@ -178,7 +188,7 @@ class PostService:
                     images=self._extract_image_info(post),
                     statistics=post.get("statistics", {}),
                 )
-                for post in posts_data.get("aweme_list", [])
+                for post in aweme_list
             ]
 
         except UserNotFoundError:

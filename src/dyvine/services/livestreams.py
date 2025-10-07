@@ -1,15 +1,19 @@
 import asyncio
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
+from urllib.parse import urlparse
 
-import httpx
 from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
+from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
+from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 
 from ..core.exceptions import (
     DownloadError,
     ServiceError,
 )
 from ..core.logging import ContextLogger
+from ..core.dependencies import get_service_container
 from ..core.settings import settings
 from .users import UserService
 
@@ -40,11 +44,157 @@ class LivestreamService:
         for managing active downloads and download processes.
         """
         self.settings = settings
-        self.config = self._build_douyin_config()
-        self.downloader = DouyinDownloader(self.config)
-        self.active_downloads: set[str] = set()
-        self.download_processes: dict[str, asyncio.subprocess.Process] = {}
+        base_config = self._build_douyin_config()
+        self.downloader_config = {
+            "cookie": self.settings.douyin_cookie,
+            "headers": base_config["headers"],
+            "proxies": base_config["proxies"],
+        }
+        self.download_jobs: dict[str, asyncio.Task[Any]] = {}
         self.user_service = UserService()
+        self.douyin_handler = get_service_container().douyin_handler
+        # Disable optional Bark notifications to avoid network noise in service usage.
+        setattr(self.douyin_handler, "enable_bark", False)
+
+    async def _load_live_filter(
+        self,
+        *,
+        webcast_id: str | None = None,
+    ) -> Any:
+        """Load live metadata via the f2 Douyin handler."""
+        if not webcast_id:
+            raise ValueError("webcast_id is required to resolve livestream metadata")
+
+        # Primary attempt: direct webcast id lookup
+        try:
+            live_filter = await self.douyin_handler.fetch_user_live_videos(webcast_id)
+            if live_filter:
+                return live_filter
+        except Exception as error:
+            logger.debug(
+                "fetch_user_live_videos failed for %s: %s", webcast_id, error
+            )
+
+        # Fallback: convert long room ids to webcast ids via WebCastIdFetcher
+        try:
+            converted_id = await WebCastIdFetcher.get_webcast_id(
+                f"https://live.douyin.com/{webcast_id}"
+            )
+            if converted_id and converted_id != webcast_id:
+                converted_filter = await self.douyin_handler.fetch_user_live_videos(
+                    converted_id
+                )
+                if converted_filter:
+                    return converted_filter
+        except APIResponseError as error:
+            logger.debug(
+                "WebCastIdFetcher could not convert %s: %s", webcast_id, error
+            )
+        except Exception as error:
+            logger.debug(
+                "Unexpected error converting webcast id %s: %s", webcast_id, error
+            )
+
+        # Final fallback: query by room id directly
+        try:
+            return await self.douyin_handler.fetch_user_live_videos_by_room_id(
+                webcast_id
+            )
+        except Exception as error:
+            logger.debug(
+                "fetch_user_live_videos_by_room_id failed for %s: %s",
+                webcast_id,
+                error,
+            )
+            return None
+
+    @staticmethod
+    def _extract_stream_map(live_filter: Any) -> Dict[str, str]:
+        """Extract HLS stream map from the f2 live filter."""
+        if hasattr(live_filter, "m3u8_pull_url"):
+            stream_map = getattr(live_filter, "m3u8_pull_url") or {}
+            if isinstance(stream_map, dict):
+                return stream_map
+        if hasattr(live_filter, "hls_pull_url"):
+            stream_map = getattr(live_filter, "hls_pull_url") or {}
+            if isinstance(stream_map, dict):
+                return stream_map
+        return {}
+
+    @staticmethod
+    def _select_stream_url(stream_map: Dict[str, str]) -> str | None:
+        """Choose the preferred stream URL from the available variants."""
+        preferred_order = ("FULL_HD1", "HD1", "SD1", "SD2")
+        for key in preferred_order:
+            value = stream_map.get(key)
+            if isinstance(value, str) and value:
+                return value
+        for value in stream_map.values():
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    @staticmethod
+    def _stream_map_from_room_data(
+        room_data: str | None,
+    ) -> tuple[dict[str, str], int | None, dict[str, str]]:
+        """Parse room_data JSON into HLS and FLV stream maps plus status."""
+        if not room_data:
+            return {}, None, {}
+
+        try:
+            payload = json.loads(room_data)
+        except json.JSONDecodeError:
+            logger.debug("Invalid room_data payload")
+            return {}, None, {}
+
+        stream_map: dict[str, str] = {}
+        flv_map: dict[str, str] = {}
+        status = payload.get("status")
+        stream_url = payload.get("stream_url") or {}
+
+        live_core = stream_url.get("live_core_sdk_data") or {}
+        pull_data = live_core.get("pull_data") or {}
+        quality_map: dict[str, Any] = {}
+
+        stream_data_raw = pull_data.get("stream_data")
+        if isinstance(stream_data_raw, str):
+            try:
+                stream_data_payload = json.loads(stream_data_raw)
+                quality_map = stream_data_payload.get("data") or {}
+            except json.JSONDecodeError:
+                logger.debug("Invalid stream_data payload in room_data")
+        elif isinstance(pull_data.get("data"), dict):
+            quality_map = pull_data.get("data") or {}
+
+        if isinstance(quality_map, dict):
+            for quality_name, quality_payload in quality_map.items():
+                if not isinstance(quality_payload, dict):
+                    continue
+                main_payload = quality_payload.get("main")
+                if not isinstance(main_payload, dict):
+                    continue
+
+                hls_candidate = (
+                    main_payload.get("hls")
+                    or main_payload.get("ll_hls")
+                    or main_payload.get("http_ts")
+                )
+                if isinstance(hls_candidate, str) and hls_candidate:
+                    stream_map[quality_name.upper()] = hls_candidate
+
+                flv_candidate = main_payload.get("flv")
+                if isinstance(flv_candidate, str) and flv_candidate:
+                    flv_map.setdefault(quality_name.upper(), flv_candidate)
+
+        raw_flv_map = stream_url.get("flv_pull_url") or {}
+        if isinstance(raw_flv_map, dict):
+            for quality_name, candidate_url in raw_flv_map.items():
+                quality_key = quality_name.upper()
+                if isinstance(candidate_url, str) and candidate_url:
+                    flv_map.setdefault(quality_key, candidate_url)
+
+        return stream_map, status, flv_map
 
     def _build_douyin_config(self) -> dict:
         """Build Douyin downloader configuration from settings.
@@ -87,169 +237,21 @@ class LivestreamService:
         }
         return config
 
-    async def get_room_info(
-        self, room_id: str, logger: ContextLogger = logger
-    ) -> dict[str, Any]:
-        """Get room information for a given room ID.
-
-        Args:
-            room_id (str): The room ID to get info for.
-            logger (logging.Logger): Logger instance to use.
-
-        Returns:
-            Dict: Containing room information.
-
-        Raises:
-            ValueError: If room doesn't exist or stream ended.
-        """
+    async def get_room_info(self, webcast_id: str) -> dict[str, Any]:
+        """Resolve livestream metadata via f2 for monitoring and downloads."""
         try:
-            # Use correct Douyin live API endpoint
-            url = "https://webcast.amemv.com/webcast/room/reflow/info/"
-
-            # Correct parameters format
-            params = {
-                "type_id": "0",
-                "live_id": "1",
-                "room_id": room_id,
-                "app_id": "1128",
-            }
-
-            # Set appropriate headers with cookie
-            headers = {
-                "authority": "webcast.amemv.com",
-                "user-agent": (
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 10_3_1 like Mac OS X) "
-                    "AppleWebKit/603.1.30 (KHTML, like Gecko) Version/10.0 "
-                    "Mobile/14E304 Safari/602.1"
-                ),
-                "cookie": (
-                    "_tea_utm_cache_1128={"
-                    "%22utm_source%22:%22copy%22,"
-                    "%22utm_medium%22:%22android%22,"
-                    "%22utm_campaign%22:%22client_share%22}"
-                ),
-            }
-
-            # Only include proxies if they are configured
-            proxies = None
-            if any(self.config["proxies"].values()):
-                proxies = self.config["proxies"]
-
-            async with httpx.AsyncClient(
-                headers=headers,
-                proxies=proxies,
-                timeout=30,
-            ) as client:
-                response = await client.get(url, params=params)
-                logger.info(f"API Response status code: {response.status_code}")
-                logger.info(f"API Response content: {response.text[:500]}...")
-
-                response_data = response.json()
-                logger.info(f"Parsed response data keys: {list(response_data.keys())}")
-
-                if (
-                    not response_data
-                    or "data" not in response_data
-                    or "room" not in response_data["data"]
-                    or not response_data["data"]["room"]
-                ):
-                    raise ValueError("Could not get room info")
-
-                room_data: dict[str, Any] = response_data["data"]["room"]
-
-                # Check if stream is live (status=2 means live)
-                status = room_data.get("status", 0)
-                logger.info(f"Room status: {status}")
-
-                return room_data
-
-        except Exception as e:
-            logger.error(f"Error getting room info: {str(e)}")
+            live_filter = await self._load_live_filter(webcast_id=webcast_id)
+            if not live_filter:
+                raise ValueError("Unable to resolve livestream metadata")
+            room_info = live_filter._to_dict()
+            room_info["stream_map"] = self._extract_stream_map(live_filter)
+            room_info["status"] = getattr(live_filter, "live_status", 0)
+            room_info.setdefault("room_id", getattr(live_filter, "room_id", webcast_id))
+            room_info.setdefault("webcast_id", webcast_id)
+            return room_info
+        except Exception as error:
+            logger.error(f"Error getting room info via f2: {error}")
             raise
-
-    async def merge_ts_files(self, output_dir: Path, room_id: str) -> None:
-        """Merge downloaded ts files into a single mp4 file.
-
-        Args:
-            output_dir (Path): Directory containing ts files.
-            room_id (str): Room ID for filename prefix.
-        """
-        try:
-            # Get list of ts files for this room
-            ts_files = sorted(output_dir.glob(f"{room_id}__*.ts"))
-            if not ts_files:
-                logger.warning(f"No ts files found for room {room_id}")
-                return
-
-            # Create concat file
-            concat_file = output_dir / f"{room_id}_concat.txt"
-            with open(concat_file, "w") as f:
-                for ts_file in ts_files:
-                    f.write(f"file '{ts_file.name}'\n")
-
-            # Merge files using ffmpeg
-            output_file = output_dir / f"{room_id}_merged.mp4"
-            merge_command = (
-                f'ffmpeg -f concat -safe 0 -i "{concat_file}" -c copy "{output_file}"'
-            )
-
-            process = await asyncio.create_subprocess_shell(
-                merge_command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await process.wait()
-
-            # Clean up
-            concat_file.unlink()
-
-            # Delete individual ts files
-            for ts_file in ts_files:
-                ts_file.unlink()
-
-            logger.info(f"Successfully merged ts files for room {room_id}")
-
-        except Exception as e:
-            logger.error(f"Error merging ts files: {str(e)}")
-
-    async def monitor_room_status(self, room_id: str, output_dir: Path) -> None:
-        """Monitor room status and merge ts files when stream ends.
-
-        Args:
-            room_id (str): Room ID to monitor.
-            output_dir (Path): Directory containing ts files.
-        """
-        try:
-            while True:
-                try:
-                    room_info = await self.get_room_info(room_id)
-                    if room_info.get("status") != 2:  # Not live anymore
-                        logger.info(f"Stream ended for room {room_id}")
-                        # Kill ffmpeg process
-                        if room_id in self.download_processes:
-                            process = self.download_processes[room_id]
-                            try:
-                                process.terminate()
-                                await process.wait()
-                            except ProcessLookupError:
-                                pass
-                            del self.download_processes[room_id]
-
-                        # Merge ts files
-                        await self.merge_ts_files(output_dir, room_id)
-                        break
-
-                    await asyncio.sleep(30)  # Check every 30 seconds
-
-                except Exception as e:
-                    logger.error(f"Error checking room status: {str(e)}")
-                    await asyncio.sleep(30)  # Wait before retrying
-
-        except Exception as e:
-            logger.error(f"Error in monitor_room_status: {str(e)}")
-        finally:
-            if room_id in self.active_downloads:
-                self.active_downloads.remove(room_id)
 
     async def download_stream(
         self, url: str, output_path: str | None = None
@@ -267,138 +269,188 @@ class LivestreamService:
             LivestreamError: If download fails.
         """
         try:
-            # Extract room ID from livestream URL
-            room_id = None
+            normalized_url = url.strip()
+            if not normalized_url:
+                return "error", "Livestream URL is required"
 
-            # Handle direct room ID
-            if url.isdigit():
-                room_id = url
-            # Handle livestream URL format: https://live.douyin.com/123456789
-            elif "live.douyin.com/" in url:
-                parts = url.rstrip("/").split("/")
-                if parts and parts[-1].isdigit():
-                    room_id = parts[-1]
-                else:
-                    return (
-                        "error",
-                        "Invalid livestream URL format. Expected: https://live.douyin.com/[room_id]",
-                    )
-            # Handle webcast.amemv.com URL format
-            elif "webcast.amemv.com" in url and "/webcast/reflow/" in url:
-                import re
+            webcast_id: str | None = None
+            room_id: str | None = None
+            profile_room_info: dict[str, Any] | None = None
 
-                match = re.search(r"/webcast/reflow/(\d+)", url)
-                if match:
-                    room_id = match.group(1)
-                else:
-                    return "error", (
-                        "Invalid webcast URL format. Could not extract room ID"
-                    )
-            # Handle user profile URL
-            # - try to get room ID from user info
-            elif "douyin.com/user/" in url:
+            if normalized_url.isdigit():
+                webcast_id = normalized_url
+
+            parsed = urlparse(
+                normalized_url
+                if "://" in normalized_url
+                else f"https://{normalized_url}"
+            )
+            path = parsed.path or ""
+            host = parsed.netloc.lower()
+            last_segment = path.rstrip("/").split("/")[-1] if path else ""
+            last_segment = last_segment.split("?")[0].split("#")[0]
+
+            if not webcast_id and last_segment.isdigit():
+                webcast_id = last_segment
+
+            if not webcast_id:
                 try:
-                    # Extract user ID from URL
-                    user_id = url.split("/")[-1] if "/" in url else url
-                    user_info = await self.user_service.get_user_info(user_id)
-                    if not user_info.is_living or not user_info.room_id:
-                        return "error", (
-                            "User is not currently streaming or room ID not available"
-                        )
-                    room_id = str(user_info.room_id)
-                    logger.info(
-                        f"Extracted room_id {room_id} from user profile {user_id}"
+                    webcast_id = await WebCastIdFetcher.get_webcast_id(
+                        normalized_url
                     )
-                except Exception as e:
-                    return "error", f"Failed to get room ID from user profile: {str(e)}"
-            else:
-                return "error", (
-                    "Invalid URL format. Expected livestream URL "
-                    "(https://live.douyin.com/[room_id]) or user profile URL"
-                )
+                except APIResponseError as error:
+                    logger.debug(
+                        "WebCastIdFetcher could not resolve webcast id: %s", error
+                    )
+                except Exception as error:
+                    logger.debug(
+                        "Unexpected error resolving webcast id from %s: %s",
+                        normalized_url,
+                        error,
+                    )
 
-            if not room_id:
-                return "error", "Could not extract room ID from URL"
+            if (
+                not webcast_id
+                and "douyin.com" in host
+                and path.startswith("/user/")
+            ):
+                try:
+                    user_id = last_segment or (
+                        path.rstrip("/").split("/")[-1] if path else ""
+                    )
+                    if not user_id:
+                        return "error", "User identifier missing in profile URL"
+                    profile = await self.user_service.get_user_info(user_id)
+                    if not profile.is_living or not profile.room_id:
+                        return "error", "User is not currently livestreaming"
+                    webcast_id = str(profile.room_id)
+                    logger.info(
+                        "Derived webcast id %s from user profile %s",
+                        webcast_id,
+                        user_id,
+                    )
+                    (
+                        stream_map,
+                        status,
+                        flv_map,
+                    ) = self._stream_map_from_room_data(
+                        getattr(profile, "room_data", None)
+                    )
+                    profile_room_info = {
+                        "status": status
+                        if status is not None
+                        else (2 if stream_map else 0),
+                        "stream_map": stream_map,
+                        "flv_pull_url": flv_map,
+                        "room_id": str(profile.room_id),
+                        "webcast_id": webcast_id,
+                    }
+                except Exception as error:
+                    return "error", f"Failed to resolve webcast id from profile: {error}"
 
-            # Check if already downloading
-            if room_id in self.active_downloads:
+            if not webcast_id:
+                return "error", "Unable to resolve webcast id from provided URL"
+
+            if webcast_id in self.download_jobs:
                 return "error", "Already downloading this stream"
 
-            # Get room info
-            try:
-                room_info = await self.get_room_info(room_id)
-            except ValueError as e:
-                return "error", str(e)
+            live_filter = await self._load_live_filter(webcast_id=webcast_id)
+            if not live_filter and not profile_room_info:
+                return "error", "Unable to fetch livestream metadata"
 
-            # Check if user is live (status 2 = live)
+            room_info = (
+                live_filter._to_dict() if live_filter else profile_room_info or {}
+            )
+            room_id = str(room_info.get("room_id", webcast_id) or webcast_id)
+
             status_code = room_info.get("status")
             if status_code != 2:
                 return "error", (
                     f"User is not currently streaming (status code: {status_code})"
                 )
 
-            # Get stream URL
-            stream_url = room_info.get("stream_url", {})
-            hls_pull_url_map = stream_url.get("hls_pull_url_map", {})
-            if not hls_pull_url_map:
-                logger.warning(f"No stream URLs found for room ID: {room_id}")
+            stream_map: dict[str, str] = {}
+            flv_map: dict[str, str] = {}
+            if profile_room_info and profile_room_info.get("stream_map"):
+                stream_map = profile_room_info["stream_map"]
+            if profile_room_info and profile_room_info.get("flv_pull_url"):
+                flv_map = profile_room_info["flv_pull_url"]
+            if not stream_map and live_filter:
+                stream_map = getattr(live_filter, "m3u8_pull_url", {}) or {}
+            if not flv_map and live_filter:
+                flv_map = getattr(live_filter, "flv_pull_url", {}) or {}
+            if not stream_map:
+                logger.warning(f"No stream URLs found for webcast ID: {webcast_id}")
                 return "error", "No live stream available for this user"
 
-            # Get highest quality stream URL (FULL_HD1)
-            stream_urls = hls_pull_url_map.get("FULL_HD1")
-            if not stream_urls:
-                # Fallback to HD1 if FULL_HD1 not available
-                stream_urls = hls_pull_url_map.get("HD1")
-                if not stream_urls:
-                    return "error", "No suitable quality stream found"
+            if not self._select_stream_url(stream_map):
+                return "error", "No suitable quality stream found"
 
-            # Set up output directory
             if output_path:
                 output_dir = Path(output_path)
             else:
                 output_dir = Path("data/douyin/downloads/livestreams")
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Add to active downloads
-            self.active_downloads.add(room_id)
+            webcast_payload = {
+                "room_id": room_id,
+                "live_title": room_info.get("live_title_raw")
+                or room_info.get("live_title")
+                or "",
+                "user_id": room_info.get("user_id") or "",
+                "nickname": room_info.get("nickname_raw")
+                or room_info.get("nickname")
+                or "",
+                "m3u8_pull_url": stream_map,
+                "flv_pull_url": flv_map or room_info.get("flv_pull_url") or {},
+            }
 
-            try:
-                # Create output filename
-                output_filename = f"{room_id}"
-                final_output_path = output_dir / output_filename
+            download_kwargs = {
+                **self.downloader_config,
+                "cookie": self.settings.douyin_cookie,
+                "folderize": False,
+                "naming": "{aweme_id}",
+                "mode": "live",
+            }
+            download_kwargs["headers"] = {
+                **download_kwargs["headers"],
+                "cookie": self.settings.douyin_cookie,
+            }
 
-                # Use ffmpeg to download and save as ts files
-                command = (
-                    f'ffmpeg -i "{stream_urls}" -c copy -f segment -segment_time 10 '
-                    f'-segment_format mpegts "{final_output_path}__%03d.ts"'
+            target_file = output_dir / f"{room_id}_live.flv"
+
+            job = asyncio.create_task(
+                self._run_stream_download(
+                    room_id, download_kwargs, webcast_payload, output_dir
                 )
-
-                # Start download process
-                process = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-
-                # Store process for later cleanup
-                self.download_processes[room_id] = process
-
-                # Start monitoring room status
-                asyncio.create_task(self.monitor_room_status(room_id, output_dir))
-
-                # Return pending status with expected output directory
-                return "pending", str(output_dir)
-
-            except Exception as e:
-                logger.error(f"Download task error: {str(e)}")
-                raise DownloadError(f"Failed to start download: {str(e)}") from e
-            finally:
-                if room_id in self.active_downloads:
-                    self.active_downloads.remove(room_id)
+            )
+            self.download_jobs[room_id] = job
+            return "pending", str(target_file)
 
         except Exception as e:
             logger.error(f"Error downloading stream: {str(e)}")
             return "error", str(e)
+
+    async def _run_stream_download(
+        self,
+        job_id: str,
+        download_kwargs: dict[str, Any],
+        webcast_payload: dict[str, Any],
+        output_dir: Path,
+    ) -> None:
+        """Run the f2 livestream downloader in the background."""
+        try:
+            async with DouyinDownloader(download_kwargs) as downloader:
+                await downloader.create_stream_tasks(
+                    download_kwargs, webcast_payload, output_dir
+                )
+        except Exception as error:
+            logger.error(
+                "Livestream download failed",
+                extra={"job_id": job_id, "error": str(error)},
+            )
+        finally:
+            self.download_jobs.pop(job_id, None)
 
     async def get_download_status(self, operation_id: str) -> str:
         """Get the status of a download operation.
@@ -410,20 +462,14 @@ class LivestreamService:
             str: The path to the downloaded file if complete, otherwise a status
                 message.
         """
-        # operation_id is the room_id
         output_dir = Path("data/douyin/downloads/livestreams")
-        output_file = output_dir / f"{operation_id}_merged.mp4"
+        output_file = output_dir / f"{operation_id}_live.flv"
 
         if output_file.exists():
             return str(output_file)
 
-        if operation_id in self.active_downloads:
+        if operation_id in self.download_jobs:
             return "Download in progress."
-
-        # Check for ts files to see if it's merging
-        ts_files = list(output_dir.glob(f"{operation_id}__*.ts"))
-        if ts_files:
-            return "Merging downloaded files."
 
         raise NotImplementedError("Operation not found or status unknown.")
 
