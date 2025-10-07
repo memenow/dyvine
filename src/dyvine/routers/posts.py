@@ -81,7 +81,12 @@ async def get_post(
     post_id: str = Path(
         ...,
         description="Unique Douyin post identifier (aweme_id)",
-        example="7123456789012345678",
+        examples={
+            "default": {
+                "summary": "Sample post identifier",
+                "value": "7123456789012345678",
+            }
+        },
     ),
 ) -> PostDetail:
     """Retrieve detailed information about a specific Douyin post.
@@ -154,7 +159,12 @@ async def list_user_posts(
     user_id: str = Path(
         ...,
         description="Unique Douyin user identifier (sec_user_id)",
-        example="MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
+        examples={
+            "default": {
+                "summary": "Sample sec_user_id",
+                "value": "MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
+            }
+        },
     ),
     max_cursor: int = Query(
         0,
@@ -162,14 +172,20 @@ async def list_user_posts(
             "Pagination cursor for fetching next page. Use 0 for first page, "
             "then use the cursor from previous response"
         ),
-        example=0,
+        examples={
+            "initial": {"summary": "First page", "value": 0},
+            "subsequent": {"summary": "Subsequent page cursor", "value": 1678886400},
+        },
     ),
     count: int = Query(
         20,
         ge=1,
         le=100,
         description="Number of posts to return per page. Must be between 1 and 100",
-        example=20,
+        examples={
+            "default": {"summary": "Default page size", "value": 20},
+            "max": {"summary": "Maximum per request", "value": 100},
+        },
     ),
 ) -> list[PostDetail]:
     """Retrieve a paginated list of posts from a specific Douyin user.
