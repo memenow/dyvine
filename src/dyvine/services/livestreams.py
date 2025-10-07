@@ -71,9 +71,7 @@ class LivestreamService:
             if live_filter:
                 return live_filter
         except Exception as error:
-            logger.debug(
-                "fetch_user_live_videos failed for %s: %s", webcast_id, error
-            )
+            logger.debug("fetch_user_live_videos failed for %s: %s", webcast_id, error)
 
         # Fallback: convert long room ids to webcast ids via WebCastIdFetcher
         try:
@@ -87,9 +85,7 @@ class LivestreamService:
                 if converted_filter:
                     return converted_filter
         except APIResponseError as error:
-            logger.debug(
-                "WebCastIdFetcher could not convert %s: %s", webcast_id, error
-            )
+            logger.debug("WebCastIdFetcher could not convert %s: %s", webcast_id, error)
         except Exception as error:
             logger.debug(
                 "Unexpected error converting webcast id %s: %s", webcast_id, error
@@ -295,9 +291,7 @@ class LivestreamService:
 
             if not webcast_id:
                 try:
-                    webcast_id = await WebCastIdFetcher.get_webcast_id(
-                        normalized_url
-                    )
+                    webcast_id = await WebCastIdFetcher.get_webcast_id(normalized_url)
                 except APIResponseError as error:
                     logger.debug(
                         "WebCastIdFetcher could not resolve webcast id: %s", error
@@ -309,11 +303,7 @@ class LivestreamService:
                         error,
                     )
 
-            if (
-                not webcast_id
-                and "douyin.com" in host
-                and path.startswith("/user/")
-            ):
+            if not webcast_id and "douyin.com" in host and path.startswith("/user/"):
                 try:
                     user_id = last_segment or (
                         path.rstrip("/").split("/")[-1] if path else ""
@@ -337,16 +327,19 @@ class LivestreamService:
                         getattr(profile, "room_data", None)
                     )
                     profile_room_info = {
-                        "status": status
-                        if status is not None
-                        else (2 if stream_map else 0),
+                        "status": (
+                            status if status is not None else (2 if stream_map else 0)
+                        ),
                         "stream_map": stream_map,
                         "flv_pull_url": flv_map,
                         "room_id": str(profile.room_id),
                         "webcast_id": webcast_id,
                     }
                 except Exception as error:
-                    return "error", f"Failed to resolve webcast id from profile: {error}"
+                    return (
+                        "error",
+                        f"Failed to resolve webcast id from profile: {error}",
+                    )
 
             if not webcast_id:
                 return "error", "Unable to resolve webcast id from provided URL"
