@@ -83,3 +83,36 @@ def test_invalid_request_id_is_regenerated():
             uuid.UUID(response.headers["X-Correlation-ID"])
         finally:
             settings.douyin.cookie = original_cookie
+
+
+def test_health_check_degraded_when_r2_missing():
+    with TestClient(app) as client:
+        original_cookie = settings.douyin.cookie
+        original_r2 = {
+            "account_id": settings.r2.account_id,
+            "access_key_id": settings.r2.access_key_id,
+            "secret_access_key": settings.r2.secret_access_key,
+            "bucket_name": settings.r2.bucket_name,
+        }
+
+        try:
+            settings.douyin.cookie = "cookie"
+            settings.r2.account_id = ""
+            settings.r2.access_key_id = ""
+            settings.r2.secret_access_key = ""
+            settings.r2.bucket_name = ""
+
+            response = client.get("/health")
+
+            assert response.status_code == 503
+            data = response.json()
+            assert data["status"] == "degraded"
+            correlation_id = data["correlation_id"]
+            assert correlation_id == response.headers["X-Correlation-ID"]
+            uuid.UUID(correlation_id)
+        finally:
+            settings.douyin.cookie = original_cookie
+            settings.r2.account_id = original_r2["account_id"]
+            settings.r2.access_key_id = original_r2["access_key_id"]
+            settings.r2.secret_access_key = original_r2["secret_access_key"]
+            settings.r2.bucket_name = original_r2["bucket_name"]
