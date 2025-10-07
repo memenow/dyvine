@@ -8,12 +8,12 @@ from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
 from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
 from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 
+from ..core.dependencies import get_service_container
 from ..core.exceptions import (
     DownloadError,
     ServiceError,
 )
 from ..core.logging import ContextLogger
-from ..core.dependencies import get_service_container
 from ..core.settings import settings
 from .users import UserService
 
