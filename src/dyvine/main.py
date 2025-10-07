@@ -181,7 +181,9 @@ app = FastAPI(
     version=settings.version,
     docs_url="/docs",
     redoc_url="/redoc",
-    openapi_url=f"{settings.prefix}/openapi.json" if settings.prefix else "/openapi.json",
+    openapi_url=(
+        f"{settings.prefix}/openapi.json" if settings.prefix else "/openapi.json"
+    ),
     lifespan=lifespan,
     # Additional metadata for OpenAPI documentation
     contact={

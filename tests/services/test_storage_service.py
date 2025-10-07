@@ -25,7 +25,9 @@ def test_generate_ugc_path_includes_expected_segments() -> None:
 
     assert path.startswith("videos/user-123/")
     filename = path.split("/")[-1]
-    match = re.match(r"(?P<prefix>\d{8})_(?P<encoded>[^_]+)_(?P<uuid>[a-f0-9]{8})\.mp4", filename)
+    match = re.match(
+        r"(?P<prefix>\d{8})_(?P<encoded>[^_]+)_(?P<uuid>[a-f0-9]{8})\.mp4", filename
+    )
     assert match is not None
 
     encoded_name = match.group("encoded")
