@@ -465,7 +465,15 @@ class PostService:
         return image_urls
 
     def _extract_video_info(self, post: dict[str, Any]) -> VideoInfo | None:
-        """Extract video information from a Douyin post."""
+        """Extract video information from a Douyin post.
+
+        Args:
+            post: Raw post dict from the Douyin API containing a ``video`` key.
+
+        Returns:
+            A ``VideoInfo`` with play URL and dimensions, or ``None`` if the
+            post has no playable video address.
+        """
         video = post.get("video", {})
         play_addr = video.get("play_addr", {})
         if play_addr and play_addr.get("url_list"):
@@ -479,7 +487,14 @@ class PostService:
         return None
 
     def _extract_image_info(self, post: dict[str, Any]) -> list[ImageInfo] | None:
-        """Extract image information from a Douyin post."""
+        """Extract image information from a Douyin post.
+
+        Args:
+            post: Raw post dict from the Douyin API containing an ``images`` key.
+
+        Returns:
+            A list of ``ImageInfo`` objects, or ``None`` if the post has no images.
+        """
         images = post.get("images", [])
         if not images:
             return None

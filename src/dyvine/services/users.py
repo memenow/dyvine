@@ -294,10 +294,8 @@ class UserService:
         task = self._active_downloads[task_id]
         temp_dir = None
         try:
-            # Update status to running
             task["status"] = "running"
 
-            # Create temporary downloads directory
             temp_dir = Path("temp_downloads")
             temp_dir.mkdir(exist_ok=True)
 

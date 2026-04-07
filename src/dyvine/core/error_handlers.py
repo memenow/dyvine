@@ -23,7 +23,21 @@ class ErrorResponse:
         include_traceback: bool = False,
         exception: Exception | None = None,
     ) -> JSONResponse:
-        """Create standardized error response."""
+        """Create a standardized error JSON response.
+
+        Args:
+            status_code: HTTP status code for the response.
+            message: Human-readable error message.
+            error_code: Machine-readable error code (defaults to ``UNKNOWN_ERROR``).
+            details: Optional extra context about the error.
+            correlation_id: Request correlation ID for tracing.
+            include_traceback: Whether to include the Python traceback.
+            exception: The exception instance (only used when
+                *include_traceback* is True).
+
+        Returns:
+            A ``JSONResponse`` with the error payload and the given status code.
+        """
         content = {
             "error": True,
             "message": message,
@@ -46,7 +60,19 @@ class ErrorResponse:
 
 
 async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONResponse:
-    """Handle all Dyvine-specific errors in a unified way."""
+    """Handle all ``DyvineError`` subclasses in a unified way.
+
+    Maps exception types to HTTP status codes (``NotFoundError`` -> 404,
+    ``ServiceError`` -> 500, others -> 400), logs with the appropriate
+    severity, and returns a structured ``ErrorResponse``.
+
+    Args:
+        request: The incoming FastAPI request (used for correlation ID).
+        exc: The Dyvine-specific exception that was raised.
+
+    Returns:
+        A ``JSONResponse`` with a standardized error payload.
+    """
     correlation_id = getattr(request.state, "correlation_id", None)
 
     # Determine status code based on exception type
@@ -83,7 +109,19 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
 
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle unexpected exceptions."""
+    """Handle unexpected (non-Dyvine) exceptions as 500 Internal Server Error.
+
+    Logs the full traceback at error level.  In debug mode the traceback
+    is included in the response body; in production only a generic message
+    is returned.
+
+    Args:
+        request: The incoming FastAPI request (used for correlation ID).
+        exc: The unhandled exception.
+
+    Returns:
+        A ``JSONResponse`` with status 500 and a standardized error payload.
+    """
     correlation_id = getattr(request.state, "correlation_id", None)
 
     logger.error(
@@ -113,7 +151,11 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 
 def register_error_handlers(app: Any) -> None:
-    """Register all error handlers with the FastAPI app."""
+    """Register Dyvine and generic exception handlers with the FastAPI app.
+
+    Args:
+        app: The FastAPI application instance.
+    """
 
     # Handle all DyvineError subclasses with one handler
     app.add_exception_handler(DyvineError, dyvine_error_handler)

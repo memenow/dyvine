@@ -37,11 +37,15 @@ class UserResponse(BaseModel):
 
 
 class DownloadResponse(BaseModel):
-    """Schema for download operation response."""
+    """Schema for download operation response.
+
+    The ``status`` field transitions through: ``pending`` -> ``running``
+    -> ``completed`` | ``failed``.
+    """
 
     task_id: str = Field(..., description="Unique task identifier")
     status: str = Field(
-        ..., description="Task status (pending/running/completed/failed)"
+        ..., description="Task status: pending | running | completed | failed"
     )
     message: str = Field(..., description="Status message")
     progress: float | None = Field(None, description="Download progress (0-100)")
