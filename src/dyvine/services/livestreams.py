@@ -47,7 +47,8 @@ class LivestreamService:
         self.download_jobs: dict[str, asyncio.Task[Any]] = {}
         self.user_service = UserService()
         self.douyin_handler = get_service_container().douyin_handler
-        # Disable optional Bark notifications to avoid network noise in service usage.
+        # f2's Bark push notifications are meant for interactive CLI use;
+        # in a server context they add latency and unneeded network calls.
         self.douyin_handler.enable_bark = False
 
     async def _load_live_filter(
@@ -239,7 +240,22 @@ class LivestreamService:
         }
 
     async def get_room_info(self, webcast_id: str) -> dict[str, Any]:
-        """Resolve livestream metadata via f2 for monitoring and downloads."""
+        """Resolve livestream metadata via f2 for monitoring and downloads.
+
+        Args:
+            webcast_id: The Douyin webcast (room) identifier.
+
+        Returns:
+            A dict with at least the following keys:
+
+            - ``status`` (int): Live status code (2 = live, 0 = offline).
+            - ``room_id`` (str): The room identifier.
+            - ``webcast_id`` (str): The webcast identifier.
+            - ``stream_map`` (dict[str, str]): Quality-label -> HLS URL mapping.
+
+        Raises:
+            LivestreamError: If the metadata cannot be resolved.
+        """
         try:
             live_filter = await self._load_live_filter(webcast_id=webcast_id)
             if not live_filter:
@@ -358,8 +374,17 @@ class LivestreamService:
     ) -> tuple[dict[str, str], dict[str, str]]:
         """Merge stream maps from profile data and live filter.
 
+        Profile room info takes priority; the live filter is used as a
+        fallback when the profile data lacks stream URLs.
+
+        Args:
+            live_filter: An f2 live filter object (may be ``None``).
+            profile_room_info: Room info dict derived from a user profile
+                (may be ``None``).
+
         Returns:
-            (hls_stream_map, flv_stream_map)
+            A tuple of ``(hls_stream_map, flv_stream_map)`` where each map
+            is ``{quality_label: url}``.
         """
         resolved_stream_map: dict[str, str] = {}
         resolved_flv_map: dict[str, str] = {}
@@ -394,14 +419,18 @@ class LivestreamService:
         """Download a Douyin livestream.
 
         Args:
-            url: The livestream room URL (e.g., https://live.douyin.com/123456789).
-            output_path: Optional path where to save the stream.
+            url: The livestream room URL (e.g., https://live.douyin.com/123456789),
+                a user profile URL, or a bare numeric webcast ID.
+            output_path: Optional directory path where the stream file is saved.
+                Defaults to ``data/douyin/downloads/livestreams``.
 
         Returns:
-            Tuple of (status, message/path).
+            A ``("pending", target_file_path)`` tuple on success.  The actual
+            download runs as a background ``asyncio.Task``.
 
         Raises:
-            LivestreamError: If download fails.
+            LivestreamError: If the URL is empty, the webcast ID cannot be
+                resolved, the user is offline, or no suitable stream is found.
         """
         normalized = url.strip()
         if not normalized:

@@ -53,12 +53,13 @@ class LiveStreamDownloadResponse(BaseModel):
     """Response model for livestream download operations.
 
     Attributes:
-        status: The status of the download operation ('success' or 'error').
-        download_path: The path where the stream was saved (only present on success).
+        status: ``"pending"`` when a background download has been started,
+            ``"success"`` when a status query finds a completed file.
+        download_path: The path where the stream is (or will be) saved.
         error: Error message if the operation failed (only present on error).
     """
 
-    status: str = Field(..., description="Status of the download operation")
+    status: str = Field(..., description="Download status: pending | success | error")
     download_path: str | None = Field(
         None, description="Path where the stream was saved"
     )

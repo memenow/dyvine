@@ -1,3 +1,10 @@
+"""Route-level error handling decorators.
+
+Provides ``handle_errors``, a parameterized decorator that maps Dyvine
+exception types to HTTP status codes so individual route handlers don't
+need repetitive try/except blocks.
+"""
+
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
@@ -19,12 +26,19 @@ def handle_errors(
     error_mapping: dict[type[Exception], int] | None = None,
     logger: ContextLogger | None = None,
 ) -> Callable:
-    """
-    Decorator for handling exceptions in route handlers.
+    """Decorator for handling exceptions in route handlers.
+
+    Wraps an async route function so that ``DyvineError`` subclasses are
+    automatically translated to ``HTTPException`` responses using the
+    appropriate status code, while unexpected exceptions become 500s.
 
     Args:
-        error_mapping: Custom exception to status code mapping
-        logger: Optional logger instance
+        error_mapping: Optional overrides merged into the default
+            exception-to-status-code map.
+        logger: When provided, errors are logged before raising.
+
+    Returns:
+        A decorator that wraps an async route handler.
     """
     default_mapping: dict[type[Exception], int] = {
         NotFoundError: 404,
