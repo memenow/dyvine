@@ -1,25 +1,46 @@
 # Dependency Graph
 
-_Last Updated: 2025-10-07_
+_Last Updated: 2026-04-07_
 
 ## Description
 
-Module dependencies and package relationships in the codebase.
+Module dependencies and package relationships in the codebase, including the livestream service integration with f2.
 
 <!--@auto:diagram:deps:start-->
 
 ```mermaid
 graph LR
-    Main[src/dyvine/main.py] --> Routers[src/dyvine/routers/*]
-    Main --> Core[src/dyvine/core/*]
-    Routers --> Services[src/dyvine/services/*]
-    Services --> Schemas[src/dyvine/schemas/*]
-    Services --> External[Douyin API / R2]
-    Core --> Logging[Logging System]
-    Core --> Settings[Settings]
-    Core --> Exceptions[Exceptions]
-    Schemas --> Pydantic[Pydantic Models]
-    External --> Boto3[Boto3 / HTTPX]
+    Main[main.py] --> RouterU[routers/users]
+    Main --> RouterP[routers/posts]
+    Main --> RouterL[routers/livestreams]
+    Main --> Core[core/*]
+
+    RouterU --> SvcU[services/users]
+    RouterP --> SvcP[services/posts]
+    RouterL --> SvcL[services/livestreams]
+
+    SvcU --> SchU[schemas/users]
+    SvcP --> SchP[schemas/posts]
+    SvcL --> SchL[schemas/livestreams]
+
+    SvcU --> Douyin[Douyin API via f2]
+    SvcP --> Douyin
+    SvcL --> Douyin
+    SvcL --> SvcU
+
+    SvcL --> F2DL[f2 DouyinDownloader]
+    SvcL --> F2Util[f2 WebCastIdFetcher]
+
+    SvcU --> Storage[services/storage]
+    Storage --> R2[Cloudflare R2 via boto3]
+
+    Core --> Settings[core/settings]
+    Core --> Exceptions[core/exceptions]
+    Core --> Logging[core/logging]
+    Core --> Deps[core/dependencies]
+
+    Deps --> SvcU
+    Settings --> PydanticSettings[pydantic-settings]
 ```
 
 <!--@auto:diagram:deps:end-->

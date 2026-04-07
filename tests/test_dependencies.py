@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.dyvine.core import dependencies
+from dyvine.core import dependencies
 
 
 class DummyHandler:

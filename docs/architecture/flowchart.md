@@ -1,10 +1,10 @@
 # Flowchart
 
-_Last Updated: 2025-10-07_
+_Last Updated: 2026-04-07_
 
 ## Description
 
-End-to-end request processing with decisions and data stores.
+End-to-end request processing with decisions and data stores, covering all three feature domains: users, posts, and livestreams.
 
 <!--@auto:diagram:flow:start-->
 
@@ -12,12 +12,31 @@ End-to-end request processing with decisions and data stores.
 flowchart TD
     A[Client Request] --> B[FastAPI Router]
     B --> C{Valid Route?}
-    C -->|Yes| D[Service Layer]
     C -->|No| E[Error Handler]
-    D --> F[Douyin API / R2 Storage]
-    F --> G[Business Logic]
-    G --> H[(Database / Cache)]
-    H --> I[Response Formatter]
+    C -->|Yes| D{Which Domain?}
+
+    D -->|Users| U[UserService]
+    D -->|Posts| P[PostService]
+    D -->|Livestreams| L[LivestreamService]
+
+    U --> F[Douyin API]
+    P --> F
+    L --> F
+
+    F --> G{API Success?}
+    G -->|No| E
+    G -->|Yes| H[Business Logic]
+
+    H --> S{Storage Required?}
+    S -->|Yes| R[Cloudflare R2]
+    S -->|No| I[Response Formatter]
+    R --> I
+
+    L --> LD{Download Requested?}
+    LD -->|Yes| BG[Background Task]
+    LD -->|No| I
+    BG --> I
+
     I --> J[Client Response]
     E --> J
 ```

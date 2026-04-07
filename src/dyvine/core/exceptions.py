@@ -46,6 +46,12 @@ class ServiceError(DyvineError):
     pass
 
 
+class LivestreamError(ServiceError):
+    """Livestream-specific service error."""
+
+    pass
+
+
 class DownloadError(ServiceError):
     """Download operation failed."""
 

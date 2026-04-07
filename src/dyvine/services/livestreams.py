@@ -11,16 +11,13 @@ from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 from ..core.dependencies import get_service_container
 from ..core.exceptions import (
     DownloadError,
-    ServiceError,
+    LivestreamError,
 )
 from ..core.logging import ContextLogger
 from ..core.settings import settings
 from .users import UserService
 
 logger = ContextLogger(__name__)
-
-# Alias for backward compatibility
-LivestreamError = ServiceError
 
 __all__ = ["LivestreamService", "LivestreamError", "DownloadError"]
 
@@ -39,12 +36,7 @@ class LivestreamService:
     """
 
     def __init__(self) -> None:
-        """Initialize the livestream service using global settings.
-
-        Initializes the service with settings from the environment,
-        configures the Douyin downloader, and sets up data structures
-        for managing active downloads and download processes.
-        """
+        """Initialize the livestream service using global settings."""
         self.settings = settings
         base_config = self._build_douyin_config()
         self.downloader_config = {
@@ -105,6 +97,21 @@ class LivestreamService:
                 error,
             )
             return None
+
+    @staticmethod
+    def _live_filter_to_dict(live_filter: Any) -> dict[str, Any]:
+        """Safely convert an f2 live filter to a dict.
+
+        Falls back to an empty dict if the private ``_to_dict`` method is
+        unavailable or raises.
+        """
+        try:
+            return dict(live_filter._to_dict())
+        except Exception:
+            logger.warning(
+                "live_filter._to_dict() unavailable; falling back to empty dict"
+            )
+            return {}
 
     @staticmethod
     def _extract_stream_map(live_filter: Any) -> dict[str, str]:
@@ -194,54 +201,50 @@ class LivestreamService:
 
         return stream_map, status, flv_map
 
-    def _build_douyin_config(self) -> dict:
-        """Build Douyin downloader configuration from settings.
-
-        Returns:
-            Dict: Containing Douyin downloader configuration.
-        """
-        config = {
+    def _build_douyin_config(self) -> dict[str, Any]:
+        """Build Douyin downloader configuration from settings."""
+        headers: dict[str, str] = {
+            "authority": "live.douyin.com",
+            "accept": "application/json, text/plain, */*",
+            "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "cache-control": "no-cache",
             "cookie": self.settings.douyin_cookie,
-            "headers": {
-                "authority": "live.douyin.com",
-                "accept": "application/json, text/plain, */*",
-                "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-                "cache-control": "no-cache",
-                "cookie": self.settings.douyin_cookie,
-                "origin": "https://live.douyin.com",
-                "pragma": "no-cache",
-                "referer": "https://live.douyin.com/",
-                "sec-ch-ua": (
-                    '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"'
-                ),
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"macOS"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-origin",
-                "user-agent": self.settings.douyin_user_agent,
-                "x-secsdk-csrf-token": (
-                    "000100000001d40084dca1e2d5f6e2f8c2e4d7e2d3c2e6e09fab5dcae72468976d4d15139b417e8c4527b6eb2ff0"
-                ),
-                "x-use-ppe": "1",
-            },
+            "origin": "https://live.douyin.com",
+            "pragma": "no-cache",
+            "referer": "https://live.douyin.com/",
+            "sec-ch-ua": self.settings.douyin.live_sec_ch_ua,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": self.settings.douyin_user_agent,
+            "x-use-ppe": "1",
+        }
+
+        csrf_token = self.settings.douyin.live_csrf_token
+        if csrf_token:
+            headers["x-secsdk-csrf-token"] = csrf_token
+
+        return {
+            "cookie": self.settings.douyin_cookie,
+            "headers": headers,
             "proxies": self.settings.douyin_proxies,
             "verify": True,
-            "timeout": 30,  # Default timeout
+            "timeout": 30,
             "naming": "{room_id}_{nickname}",
             "mode": "live",
             "auto_cookie": True,
             "folderize": False,
         }
-        return config
 
     async def get_room_info(self, webcast_id: str) -> dict[str, Any]:
         """Resolve livestream metadata via f2 for monitoring and downloads."""
         try:
             live_filter = await self._load_live_filter(webcast_id=webcast_id)
             if not live_filter:
-                raise ValueError("Unable to resolve livestream metadata")
-            room_info_raw = live_filter._to_dict()
+                raise LivestreamError("Unable to resolve livestream metadata")
+            room_info_raw = self._live_filter_to_dict(live_filter)
             room_info_raw["stream_map"] = self._extract_stream_map(live_filter)
             if hasattr(live_filter, "live_status"):
                 room_info_raw["status"] = live_filter.live_status
@@ -252,10 +255,138 @@ class LivestreamService:
             else:
                 room_info_raw.setdefault("room_id", webcast_id)
             room_info_raw.setdefault("webcast_id", webcast_id)
-            return dict(room_info_raw)
-        except Exception as error:
-            logger.error(f"Error getting room info via f2: {error}")
+            return room_info_raw
+        except LivestreamError:
             raise
+        except Exception as error:
+            logger.error("Error getting room info via f2: %s", error)
+            raise LivestreamError(str(error)) from error
+
+    # ------------------------------------------------------------------
+    # URL resolution helpers (extracted from download_stream)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_url(url: str) -> tuple[str, str, str]:
+        """Normalize a URL and return (host, path, last_segment)."""
+        normalized = url.strip()
+        parsed = urlparse(
+            normalized if "://" in normalized else f"https://{normalized}"
+        )
+        path = parsed.path or ""
+        host = parsed.netloc.lower()
+        last_segment = path.rstrip("/").split("/")[-1] if path else ""
+        last_segment = last_segment.split("?")[0].split("#")[0]
+        return host, path, last_segment
+
+    async def _resolve_webcast_id(
+        self,
+        url: str,
+        host: str,
+        path: str,
+        last_segment: str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Resolve a webcast ID and optional profile room info from a URL.
+
+        Returns:
+            (webcast_id, profile_room_info) — profile_room_info is only
+            populated when the webcast ID was derived from a user profile.
+
+        Raises:
+            LivestreamError: When resolution fails unrecoverably.
+        """
+        normalized = url.strip()
+
+        # Fast path: bare numeric ID
+        if normalized.isdigit():
+            return normalized, None
+
+        webcast_id: str | None = None
+        if last_segment.isdigit():
+            webcast_id = last_segment
+
+        if not webcast_id:
+            try:
+                webcast_id = await WebCastIdFetcher.get_webcast_id(normalized)
+            except APIResponseError as error:
+                logger.debug("WebCastIdFetcher could not resolve webcast id: %s", error)
+            except Exception as error:
+                logger.debug(
+                    "Unexpected error resolving webcast id from %s: %s",
+                    normalized,
+                    error,
+                )
+
+        if not webcast_id and "douyin.com" in host and path.startswith("/user/"):
+            return await self._resolve_from_profile(path, last_segment, webcast_id=None)
+
+        return webcast_id, None
+
+    async def _resolve_from_profile(
+        self,
+        path: str,
+        last_segment: str,
+        *,
+        webcast_id: str | None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Derive webcast ID and stream maps from a user profile URL."""
+        user_id = last_segment or (path.rstrip("/").split("/")[-1] if path else "")
+        if not user_id:
+            raise LivestreamError("User identifier missing in profile URL")
+
+        profile = await self.user_service.get_user_info(user_id)
+        if not profile.is_living or not profile.room_id:
+            raise LivestreamError("User is not currently livestreaming")
+
+        webcast_id = str(profile.room_id)
+        logger.info("Derived webcast id %s from user profile %s", webcast_id, user_id)
+
+        stream_map, status, flv_map = self._stream_map_from_room_data(profile.room_data)
+        profile_room_info = {
+            "status": status if status is not None else (2 if stream_map else 0),
+            "stream_map": stream_map,
+            "flv_pull_url": flv_map,
+            "room_id": str(profile.room_id),
+            "webcast_id": webcast_id,
+        }
+        return webcast_id, profile_room_info
+
+    def _resolve_streams(
+        self,
+        live_filter: Any | None,
+        profile_room_info: dict[str, Any] | None,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Merge stream maps from profile data and live filter.
+
+        Returns:
+            (hls_stream_map, flv_stream_map)
+        """
+        resolved_stream_map: dict[str, str] = {}
+        resolved_flv_map: dict[str, str] = {}
+
+        if profile_room_info and profile_room_info.get("stream_map"):
+            resolved_stream_map = profile_room_info["stream_map"]
+        if profile_room_info and profile_room_info.get("flv_pull_url"):
+            resolved_flv_map = profile_room_info["flv_pull_url"]
+
+        if (
+            not resolved_stream_map
+            and live_filter
+            and hasattr(live_filter, "m3u8_pull_url")
+        ):
+            resolved_stream_map = dict(live_filter.m3u8_pull_url or {})
+        if (
+            not resolved_flv_map
+            and live_filter
+            and hasattr(live_filter, "flv_pull_url")
+        ):
+            resolved_flv_map = dict(live_filter.flv_pull_url or {})
+
+        return resolved_stream_map, resolved_flv_map
+
+    # ------------------------------------------------------------------
+    # Main download orchestrator
+    # ------------------------------------------------------------------
 
     async def download_stream(
         self, url: str, output_path: str | None = None
@@ -263,180 +394,106 @@ class LivestreamService:
         """Download a Douyin livestream.
 
         Args:
-            url (str): The livestream room URL (e.g., https://live.douyin.com/123456789).
-            output_path (Optional[str]): Optional path where to save the stream.
+            url: The livestream room URL (e.g., https://live.douyin.com/123456789).
+            output_path: Optional path where to save the stream.
 
         Returns:
-            Tuple[str, str]: (status: str, message: str).
+            Tuple of (status, message/path).
 
         Raises:
             LivestreamError: If download fails.
         """
+        normalized = url.strip()
+        if not normalized:
+            raise LivestreamError("Livestream URL is required")
+
+        host, path, last_segment = self._parse_url(normalized)
+
         try:
-            normalized_url = url.strip()
-            if not normalized_url:
-                return "error", "Livestream URL is required"
-
-            webcast_id: str | None = None
-            room_id: str | None = None
-            profile_room_info: dict[str, Any] | None = None
-
-            if normalized_url.isdigit():
-                webcast_id = normalized_url
-
-            parsed = urlparse(
-                normalized_url
-                if "://" in normalized_url
-                else f"https://{normalized_url}"
+            webcast_id, profile_room_info = await self._resolve_webcast_id(
+                normalized, host, path, last_segment
             )
-            path = parsed.path or ""
-            host = parsed.netloc.lower()
-            last_segment = path.rstrip("/").split("/")[-1] if path else ""
-            last_segment = last_segment.split("?")[0].split("#")[0]
+        except LivestreamError:
+            raise
+        except Exception as error:
+            raise LivestreamError(
+                f"Failed to resolve webcast id from profile: {error}"
+            ) from error
 
-            if not webcast_id and last_segment.isdigit():
-                webcast_id = last_segment
+        if not webcast_id:
+            raise LivestreamError("Unable to resolve webcast id from provided URL")
 
-            if not webcast_id:
-                try:
-                    webcast_id = await WebCastIdFetcher.get_webcast_id(normalized_url)
-                except APIResponseError as error:
-                    logger.debug(
-                        "WebCastIdFetcher could not resolve webcast id: %s", error
-                    )
-                except Exception as error:
-                    logger.debug(
-                        "Unexpected error resolving webcast id from %s: %s",
-                        normalized_url,
-                        error,
-                    )
+        if webcast_id in self.download_jobs:
+            raise LivestreamError("Already downloading this stream")
 
-            if not webcast_id and "douyin.com" in host and path.startswith("/user/"):
-                try:
-                    user_id = last_segment or (
-                        path.rstrip("/").split("/")[-1] if path else ""
-                    )
-                    if not user_id:
-                        return "error", "User identifier missing in profile URL"
-                    profile = await self.user_service.get_user_info(user_id)
-                    if not profile.is_living or not profile.room_id:
-                        return "error", "User is not currently livestreaming"
-                    webcast_id = str(profile.room_id)
-                    logger.info(
-                        "Derived webcast id %s from user profile %s",
-                        webcast_id,
-                        user_id,
-                    )
-                    (
-                        stream_map,
-                        status,
-                        flv_map,
-                    ) = self._stream_map_from_room_data(profile.room_data)
-                    profile_room_info = {
-                        "status": (
-                            status if status is not None else (2 if stream_map else 0)
-                        ),
-                        "stream_map": stream_map,
-                        "flv_pull_url": flv_map,
-                        "room_id": str(profile.room_id),
-                        "webcast_id": webcast_id,
-                    }
-                except Exception as error:
-                    return (
-                        "error",
-                        f"Failed to resolve webcast id from profile: {error}",
-                    )
+        live_filter = await self._load_live_filter(webcast_id=webcast_id)
+        if not live_filter and not profile_room_info:
+            raise LivestreamError("Unable to fetch livestream metadata")
 
-            if not webcast_id:
-                return "error", "Unable to resolve webcast id from provided URL"
+        room_info = (
+            self._live_filter_to_dict(live_filter)
+            if live_filter
+            else profile_room_info or {}
+        )
+        room_id = str(room_info.get("room_id", webcast_id) or webcast_id)
 
-            if webcast_id in self.download_jobs:
-                return "error", "Already downloading this stream"
-
-            live_filter = await self._load_live_filter(webcast_id=webcast_id)
-            if not live_filter and not profile_room_info:
-                return "error", "Unable to fetch livestream metadata"
-
-            room_info = (
-                live_filter._to_dict() if live_filter else profile_room_info or {}
+        status_code = room_info.get("status")
+        if status_code != 2:
+            raise LivestreamError(
+                f"User is not currently streaming (status code: {status_code})"
             )
-            room_id = str(room_info.get("room_id", webcast_id) or webcast_id)
 
-            status_code = room_info.get("status")
-            if status_code != 2:
-                return "error", (
-                    f"User is not currently streaming (status code: {status_code})"
-                )
+        resolved_stream_map, resolved_flv_map = self._resolve_streams(
+            live_filter, profile_room_info
+        )
 
-            resolved_stream_map: dict[str, str] = {}
-            resolved_flv_map: dict[str, str] = {}
-            if profile_room_info and profile_room_info.get("stream_map"):
-                resolved_stream_map = profile_room_info["stream_map"]
-            if profile_room_info and profile_room_info.get("flv_pull_url"):
-                resolved_flv_map = profile_room_info["flv_pull_url"]
-            if (
-                not resolved_stream_map
-                and live_filter
-                and hasattr(live_filter, "m3u8_pull_url")
-            ):
-                resolved_stream_map = dict(live_filter.m3u8_pull_url or {})
-            if (
-                not resolved_flv_map
-                and live_filter
-                and hasattr(live_filter, "flv_pull_url")
-            ):
-                resolved_flv_map = dict(live_filter.flv_pull_url or {})
-            if not resolved_stream_map:
-                logger.warning(f"No stream URLs found for webcast ID: {webcast_id}")
-                return "error", "No live stream available for this user"
+        if not resolved_stream_map:
+            logger.warning("No stream URLs found for webcast ID: %s", webcast_id)
+            raise LivestreamError("No live stream available for this user")
 
-            if not self._select_stream_url(resolved_stream_map):
-                return "error", "No suitable quality stream found"
+        if not self._select_stream_url(resolved_stream_map):
+            raise LivestreamError("No suitable quality stream found")
 
-            if output_path:
-                output_dir = Path(output_path)
-            else:
-                output_dir = Path("data/douyin/downloads/livestreams")
-            output_dir.mkdir(parents=True, exist_ok=True)
+        if output_path:
+            output_dir = Path(output_path)
+        else:
+            output_dir = Path("data/douyin/downloads/livestreams")
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-            webcast_payload = {
-                "room_id": room_id,
-                "live_title": room_info.get("live_title_raw")
-                or room_info.get("live_title")
-                or "",
-                "user_id": room_info.get("user_id") or "",
-                "nickname": room_info.get("nickname_raw")
-                or room_info.get("nickname")
-                or "",
-                "m3u8_pull_url": resolved_stream_map,
-                "flv_pull_url": resolved_flv_map or room_info.get("flv_pull_url") or {},
-            }
+        webcast_payload = {
+            "room_id": room_id,
+            "live_title": room_info.get("live_title_raw")
+            or room_info.get("live_title")
+            or "",
+            "user_id": room_info.get("user_id") or "",
+            "nickname": room_info.get("nickname_raw")
+            or room_info.get("nickname")
+            or "",
+            "m3u8_pull_url": resolved_stream_map,
+            "flv_pull_url": resolved_flv_map or room_info.get("flv_pull_url") or {},
+        }
 
-            download_kwargs = {
-                **self.downloader_config,
-                "cookie": self.settings.douyin_cookie,
-                "folderize": False,
-                "naming": "{aweme_id}",
-                "mode": "live",
-            }
-            download_kwargs["headers"] = {
-                **download_kwargs["headers"],
-                "cookie": self.settings.douyin_cookie,
-            }
+        download_kwargs = {
+            **self.downloader_config,
+            "cookie": self.settings.douyin_cookie,
+            "folderize": False,
+            "naming": "{aweme_id}",
+            "mode": "live",
+        }
+        download_kwargs["headers"] = {
+            **download_kwargs["headers"],
+            "cookie": self.settings.douyin_cookie,
+        }
 
-            target_file = output_dir / f"{room_id}_live.flv"
+        target_file = output_dir / f"{room_id}_live.flv"
 
-            job = asyncio.create_task(
-                self._run_stream_download(
-                    room_id, download_kwargs, webcast_payload, output_dir
-                )
+        job = asyncio.create_task(
+            self._run_stream_download(
+                room_id, download_kwargs, webcast_payload, output_dir
             )
-            self.download_jobs[room_id] = job
-            return "pending", str(target_file)
-
-        except Exception as e:
-            logger.error(f"Error downloading stream: {str(e)}")
-            return "error", str(e)
+        )
+        self.download_jobs[room_id] = job
+        return "pending", str(target_file)
 
     async def _run_stream_download(
         self,
@@ -463,11 +520,11 @@ class LivestreamService:
         """Get the status of a download operation.
 
         Args:
-            operation_id (str): The operation ID (room_id).
+            operation_id: The operation ID (room_id).
 
         Returns:
-            str: The path to the downloaded file if complete, otherwise a status
-                message.
+            The path to the downloaded file if complete, otherwise a status
+            message.
         """
         output_dir = Path("data/douyin/downloads/livestreams")
         output_file = output_dir / f"{operation_id}_live.flv"
@@ -478,8 +535,4 @@ class LivestreamService:
         if operation_id in self.download_jobs:
             return "Download in progress."
 
-        raise NotImplementedError("Operation not found or status unknown.")
-
-
-# Create service instance after class definition
-livestream_service = LivestreamService()
+        raise DownloadError("Operation not found or status unknown.")

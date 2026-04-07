@@ -13,17 +13,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path
 
-from ..core.exceptions import UserNotFoundError
+from ..core.exceptions import DownloadError, LivestreamError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..schemas.livestreams import (
     LiveStreamDownloadResponse,
     LiveStreamURLDownloadRequest,
 )
-from ..services.livestreams import (
-    DownloadError,
-    LivestreamError,
-    LivestreamService,
-)
+from ..services.livestreams import LivestreamService
 
 router = APIRouter(prefix="/livestreams", tags=["livestreams"])
 logger = ContextLogger(__name__)
@@ -170,14 +166,11 @@ async def get_download_status(
         )
 
         async with logger.track_time("get_download_status"):
-            try:
-                result = await service.get_download_status(operation_id)
-                logger.info("get_download_status completed")
-                return LiveStreamDownloadResponse(
-                    status="success", download_path=result, error=None
-                )
-            except NotImplementedError as e:
-                raise DownloadError("Operation not found") from e
+            result = await service.get_download_status(operation_id)
+            logger.info("get_download_status completed")
+            return LiveStreamDownloadResponse(
+                status="success", download_path=result, error=None
+            )
 
     except DownloadError as e:
         logger.warning("Operation not found", extra={"operation_id": operation_id})

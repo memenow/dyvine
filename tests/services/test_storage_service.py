@@ -5,7 +5,7 @@ import re
 
 import pytest
 
-from src.dyvine.services.storage import ContentType, R2StorageService, StorageError
+from dyvine.services.storage import ContentType, R2StorageService, StorageError
 
 
 def build_service_without_init() -> R2StorageService:

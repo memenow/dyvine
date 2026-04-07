@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from src.dyvine.services.users import DownloadError, DownloadResponse, UserService
+from dyvine.services.users import DownloadError, DownloadResponse, UserService
 
 
 @pytest.fixture(autouse=True)
@@ -28,9 +28,7 @@ async def test_start_download_tracks_task(monkeypatch: pytest.MonkeyPatch) -> No
         scheduled.append(future)
         return future
 
-    monkeypatch.setattr(
-        "src.dyvine.services.users.asyncio.create_task", fake_create_task
-    )
+    monkeypatch.setattr("dyvine.services.users.asyncio.create_task", fake_create_task)
 
     service = UserService()
     response = await service.start_download("user-123")
@@ -52,9 +50,7 @@ async def test_get_download_status_returns_current_state(
         future.set_result(None)
         return future
 
-    monkeypatch.setattr(
-        "src.dyvine.services.users.asyncio.create_task", _resolved_future
-    )
+    monkeypatch.setattr("dyvine.services.users.asyncio.create_task", _resolved_future)
 
     service = UserService()
     start_response = await service.start_download("user-456")

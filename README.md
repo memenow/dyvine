@@ -148,6 +148,12 @@ GET /api/v1/livestreams/operations/{operation_id}
 
 ### Example Usage
 
+**Get User Information**:
+
+```bash
+curl "http://localhost:8000/api/v1/users/USER_ID"
+```
+
 **Download User Posts**:
 
 ```bash
@@ -155,10 +161,26 @@ curl -X POST "http://localhost:8000/api/v1/posts/users/USER_ID/posts:download" \
      -H "Content-Type: application/json"
 ```
 
-**Get User Information**:
+**Download a Livestream by User ID**:
 
 ```bash
-curl "http://localhost:8000/api/v1/users/USER_ID"
+curl -X POST "http://localhost:8000/api/v1/livestreams/users/USER_ID/stream:download" \
+     -H "Content-Type: application/json" \
+     -d '{"output_path": null}'
+```
+
+**Download a Livestream by URL**:
+
+```bash
+curl -X POST "http://localhost:8000/api/v1/livestreams/stream:download" \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://live.douyin.com/123456789"}'
+```
+
+**Check Livestream Download Status**:
+
+```bash
+curl "http://localhost:8000/api/v1/livestreams/operations/ROOM_ID"
 ```
 
 ## Testing
@@ -172,9 +194,8 @@ uv run pytest
 # Run with coverage
 uv run pytest --cov=src/dyvine
 
-# Run specific test categories
-uv run pytest tests/unit/          # Unit tests
-uv run pytest tests/integration/   # Integration tests
+# Run specific test file
+uv run pytest tests/services/test_livestream_service.py
 
 # Run with verbose output
 uv run pytest -v
@@ -184,14 +205,14 @@ uv run pytest -v
 
 ```text
 tests/
-├── unit/                 # Unit tests
-│   ├── core/            # Core functionality
-│   ├── routers/         # API endpoints
-│   ├── schemas/         # Data models
-│   └── services/        # Business logic
-└── integration/         # Integration tests
-    ├── test_api.py      # Full API workflows
-    └── test_douyin.py   # External service integration
+├── conftest.py                        # Shared fixtures and sys.path setup
+├── services/
+│   ├── test_livestream_service.py     # Livestream service unit tests
+│   ├── test_storage_service.py        # R2 storage service tests
+│   └── test_user_service.py           # User service tests
+├── test_dependencies.py               # DI container tests
+├── test_main.py                       # App startup and health check tests
+└── test_utils.py                      # Utility function tests
 ```
 
 ## Deployment
@@ -314,13 +335,13 @@ uv run black .
 uv run isort .
 
 # Type checking
-uv run mypy .
+uv run mypy src/dyvine
 
 # Linting
 uv run ruff check .
 
 # Run all checks
-uv run pytest && uv run black . && uv run isort . && uv run mypy . && uv run ruff check .
+uv run pytest && uv run black . && uv run isort . && uv run mypy src/dyvine && uv run ruff check .
 ```
 
 ### CI/CD Pipeline

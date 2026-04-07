@@ -1,14 +1,9 @@
-import sys
 import uuid
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-# Add project root to the path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from src.dyvine.core.settings import settings
-from src.dyvine.main import app
+from dyvine.core.settings import settings
+from dyvine.main import app
 
 
 def test_read_main():
