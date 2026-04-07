@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.dyvine.services.users import sanitize_filename
+from dyvine.services.users import sanitize_filename
 
 
 def test_sanitize_filename_removes_non_ascii_and_reserved_characters() -> None:

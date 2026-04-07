@@ -21,7 +21,7 @@ test:
 
 lint:
 	uv run ruff check .
-	uv run mypy .
+	uv run mypy src/dyvine
 
 format:
 	uv run black .

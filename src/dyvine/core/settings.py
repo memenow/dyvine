@@ -224,6 +224,20 @@ class DouyinSettings(BaseSettings):
     proxy_https: str | None = Field(
         default=None, description="HTTPS proxy URL (optional)"
     )
+    # Livestream-specific headers sent to live.douyin.com.
+    # Extract the CSRF token from browser DevTools (Network tab ->
+    # x-secsdk-csrf-token header on any live.douyin.com request).
+    # When empty, the header is omitted entirely.
+    live_csrf_token: str = Field(
+        default="",
+        description="x-secsdk-csrf-token for livestream requests (leave empty to omit)",
+    )
+    # sec-ch-ua Client Hints header. Keep the version numbers aligned
+    # with the Chrome version used to obtain DOUYIN_COOKIE.
+    live_sec_ch_ua: str = Field(
+        default='"Not A(Brand";v="99", "Google Chrome";v="131", "Chromium";v="131"',
+        description="sec-ch-ua header value for livestream requests",
+    )
 
     @property
     def headers(self) -> dict[str, str]:
