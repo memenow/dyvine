@@ -26,7 +26,7 @@
   ],
   "audit": {
     "enabled": true,
-    "log_format": "2024-08-02T08:15:42Z [R2-AUDIT] user={user} action={action} object_key={key} metadata_size={size} status={status}",
+    "log_format": "{timestamp} [R2-AUDIT] user={user} action={action} object_key={object_key} metadata_size={metadata_size} status={status}",
     "log_retention_days": 90
   }
 }
