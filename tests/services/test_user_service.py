@@ -106,14 +106,10 @@ async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
-    from dyvine.core.exceptions import ServiceError
+    from dyvine.core.exceptions import UserNotFoundError
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
-    # Empty nickname raises UserNotFoundError internally, but the
-    # service's bare `except Exception` swallows it and re-wraps as
-    # ServiceError — so clients get 500 instead of 404.
-    # TODO: add `except UserNotFoundError: raise` guard in get_user_info.
     mock_user_data.nickname = ""
 
     class FakeHandler:
@@ -125,7 +121,7 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
     service = UserService()
-    with pytest.raises(ServiceError):
+    with pytest.raises(UserNotFoundError):
         await service.get_user_info("missing-user")
 
 

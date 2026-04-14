@@ -47,15 +47,11 @@ async def test_get_post_not_found(mock_post_service: MagicMock) -> None:
     from dyvine.core.exceptions import PostNotFoundError
     from dyvine.routers.posts import get_post
 
-    # Production raises PostNotFoundError, but handle_errors uses exact
-    # type matching — PostNotFoundError is not in the default_mapping,
-    # so it falls through to the 400 default instead of 404.
-    # TODO: fix handle_errors to use isinstance-based MRO matching.
     mock_post_service.get_post_detail.side_effect = PostNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
         await get_post(service=mock_post_service, post_id="bad")
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 404
 
 
 # ── list_user_posts ──────────────────────────────────────────────────────

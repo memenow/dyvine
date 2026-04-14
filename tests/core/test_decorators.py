@@ -102,6 +102,19 @@ async def test_handle_errors_custom_error_mapping() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_errors_resolves_subclass_via_isinstance() -> None:
+    from dyvine.core.exceptions import UserNotFoundError
+
+    @handle_errors()
+    async def fail() -> None:
+        raise UserNotFoundError("gone")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await fail()
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_handle_errors_logs_when_logger_provided() -> None:
     mock_logger = MagicMock()
 
