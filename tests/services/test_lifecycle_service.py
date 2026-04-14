@@ -21,10 +21,10 @@ CONFIG_JSON = json.dumps({
     "audit": {
         "enabled": True,
         "log_format": (
-                "{timestamp} user={user} action={action} "
-                "object_key={object_key} "
-                "metadata_size={metadata_size} status={status}"
-            ),
+            "{timestamp} user={user} action={action} "
+            "object_key={object_key} "
+            "metadata_size={metadata_size} status={status}"
+        ),
         "log_retention_days": 90,
     },
 })
@@ -43,10 +43,10 @@ def _build_manager(
     mgr.audit_config = audit_config or {  # type: ignore[attr-defined]
         "enabled": False,
         "log_format": (
-                "{timestamp} user={user} action={action} "
-                "object_key={object_key} "
-                "metadata_size={metadata_size} status={status}"
-            ),
+            "{timestamp} user={user} action={action} "
+            "object_key={object_key} "
+            "metadata_size={metadata_size} status={status}"
+        ),
         "log_retention_days": 90,
     }
     return mgr
@@ -166,10 +166,10 @@ def test_write_audit_log_format() -> None:
         audit_config={
             "enabled": True,
             "log_format": (
-                "{timestamp} user={user} action={action} "
-                "object_key={object_key} "
-                "metadata_size={metadata_size} status={status}"
-            ),
+            "{timestamp} user={user} action={action} "
+            "object_key={object_key} "
+            "metadata_size={metadata_size} status={status}"
+        ),
             "log_retention_days": 90,
         }
     )
@@ -184,9 +184,6 @@ def test_write_audit_log_format() -> None:
     written = m().write.call_args[0][0]
     assert "delete" in written
     assert "test/obj.mp4" in written
-
-
-# ── _rotate_audit_logs ──────────────────────────────────────────────────
 
 
 # ── _load_config ─────────────────────────────────────────────────────────

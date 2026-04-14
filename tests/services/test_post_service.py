@@ -294,7 +294,7 @@ async def test_get_user_posts_empty() -> None:
 
     async def _iter(*a, **kw):
         return
-        yield  # noqa: RET504 - makes this an async generator
+        yield  # make this an async generator
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)

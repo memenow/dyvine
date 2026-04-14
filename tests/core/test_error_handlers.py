@@ -124,7 +124,6 @@ async def test_generic_exception_handler_traceback_in_debug(
     resp = await generic_exception_handler(req, RuntimeError("dbg"))
     body = resp.body.decode()
     assert "traceback" in body
-    monkeypatch.setattr(settings_mod.settings.api, "debug", False)
 
 
 # ── register_error_handlers ─────────────────────────────────────────────
