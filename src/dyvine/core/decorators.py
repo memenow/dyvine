@@ -57,7 +57,14 @@ def handle_errors(
             try:
                 return await func(*args, **kwargs)
             except DyvineError as e:
-                status_code = default_mapping.get(type(e), 400)
+                status_code = next(
+                    (
+                        code
+                        for exc_type, code in default_mapping.items()
+                        if isinstance(e, exc_type)
+                    ),
+                    400,
+                )
                 if logger:
                     logger.error(
                         f"{type(e).__name__}: {str(e)}",

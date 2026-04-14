@@ -210,6 +210,8 @@ class UserService:
                 room_id=int(user_data.room_id) if user_data.room_id else None,  # type: ignore
                 room_data=room_data if isinstance(room_data, str) else None,
             )
+        except UserNotFoundError:
+            raise
         except Exception as e:
             logger.exception("Failed to get user info", extra={"user_id": user_id})
             raise UserServiceError(f"Failed to get user info: {str(e)}") from e
