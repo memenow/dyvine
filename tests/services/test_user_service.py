@@ -110,7 +110,11 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
-    mock_user_data.nickname = ""  # triggers UserNotFoundError
+    # Empty nickname raises UserNotFoundError internally, but the
+    # service's bare `except Exception` swallows it and re-wraps as
+    # ServiceError — so clients get 500 instead of 404.
+    # TODO: add `except UserNotFoundError: raise` guard in get_user_info.
+    mock_user_data.nickname = ""
 
     class FakeHandler:
         def __init__(self, kwargs: dict) -> None:
@@ -229,8 +233,8 @@ async def test_process_download_no_posts(
     }
 
     await service._process_download(task_id)
-    # Task gets cleaned up by the mocked sleep + pop
-    # Verify it completed (the path with 0 posts completes immediately)
+    # Task is cleaned up after the mocked sleep + pop
+    assert task_id not in service._active_downloads
 
 
 @pytest.mark.asyncio
