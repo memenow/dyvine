@@ -115,6 +115,16 @@ def test_health_check_degraded_when_r2_missing():
 
 def test_metrics_endpoint_exposed() -> None:
     with TestClient(app) as client:
-        response = client.get("/metrics")
+        response = client.get("/metrics/")
         assert response.status_code == 200
         assert "dyvine_http_requests_total" in response.text
+
+
+def test_metrics_uses_bounded_label_for_unmatched_routes() -> None:
+    with TestClient(app) as client:
+        client.get("/definitely-not-a-real-route")
+        response = client.get("/metrics/")
+
+        assert response.status_code == 200
+        assert 'route="unmatched"' in response.text
+        assert "/definitely-not-a-real-route" not in response.text

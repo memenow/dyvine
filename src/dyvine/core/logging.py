@@ -52,6 +52,8 @@ def setup_logging() -> None:
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
+    for handler in root_logger.handlers:
+        handler.close()
     root_logger.handlers.clear()
 
     # File handler with rotation

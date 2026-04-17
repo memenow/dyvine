@@ -332,7 +332,7 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
 
     # Log request completion with performance metrics
     route = request.scope.get("route")
-    route_label = getattr(route, "path", request.url.path)
+    route_label = getattr(route, "path", None) or "unmatched"
     status_code_label = str(response.status_code)
     logger.info(
         "HTTP request completed",
