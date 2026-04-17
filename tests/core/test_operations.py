@@ -52,3 +52,32 @@ def test_operation_store_missing_operation_raises(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
     with pytest.raises(DownloadError):
         store.get_operation("missing")
+
+
+def test_operation_store_marks_incomplete_operations_failed(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    pending = store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-2",
+        status="pending",
+        message="scheduled",
+    )
+    running = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-2",
+        status="running",
+        message="running",
+    )
+    completed = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-3",
+        status="completed",
+        message="done",
+    )
+
+    updated = store.mark_incomplete_operations_failed()
+
+    assert updated == 2
+    assert store.get_operation(pending.operation_id).status == "failed"
+    assert store.get_operation(running.operation_id).status == "failed"
+    assert store.get_operation(completed.operation_id).status == "completed"

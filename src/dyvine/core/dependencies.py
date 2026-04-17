@@ -101,6 +101,7 @@ class ServiceContainer:
 
         # Initialize operation store
         self._services["operation_store"] = OperationStore()
+        self._services["operation_store"].mark_incomplete_operations_failed()
 
         # Initialize user service
         self._services["user_service"] = UserService(

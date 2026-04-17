@@ -5,9 +5,14 @@ access or the f2 runtime, making them fast and deterministic.
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+import dyvine.services.livestreams as livestreams_mod
+from dyvine.core.operations import OperationStore
 from dyvine.services.livestreams import LivestreamService
 
 # ---------------------------------------------------------------------------
@@ -331,3 +336,54 @@ class TestResolveStreams:
         hls, flv = svc._resolve_streams(None, None)
         assert hls == {}
         assert flv == {}
+
+
+@pytest.mark.asyncio
+async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-1",
+        status="pending",
+        message="scheduled",
+        download_path=str(tmp_path / "room-1_live.flv"),
+    )
+    service = object.__new__(LivestreamService)
+    service.operation_store = store
+    service.download_jobs = {"room-1": object()}
+
+    class FakeDownloader:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeDownloader":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def create_stream_tasks(
+            self,
+            download_kwargs: dict[str, Any],
+            webcast_payload: dict[str, Any],
+            output_dir: Path,
+        ) -> None:
+            return None
+
+    original_downloader = livestreams_mod.DouyinDownloader
+    livestreams_mod.DouyinDownloader = FakeDownloader
+    try:
+        await service._run_stream_download(
+            operation.operation_id,
+            "room-1",
+            {},
+            {},
+            tmp_path,
+            tmp_path / "room-1_live.flv",
+        )
+    finally:
+        livestreams_mod.DouyinDownloader = original_downloader
+
+    refreshed = store.get_operation(operation.operation_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error == "Expected livestream artifact was not created"

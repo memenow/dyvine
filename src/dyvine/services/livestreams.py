@@ -572,7 +572,16 @@ class LivestreamService:
                 await downloader.create_stream_tasks(
                     download_kwargs, webcast_payload, output_dir
                 )
-            final_path = str(target_file) if target_file.exists() else str(target_file)
+            if not target_file.exists():
+                self.operation_store.update_operation(
+                    operation_id,
+                    status="failed",
+                    message="Livestream download finished without an artifact",
+                    error="Expected livestream artifact was not created",
+                )
+                return
+
+            final_path = str(target_file)
             self.operation_store.update_operation(
                 operation_id,
                 status="completed",

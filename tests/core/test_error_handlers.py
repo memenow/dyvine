@@ -139,6 +139,21 @@ async def test_http_exception_handler_normalizes_response() -> None:
     assert "HTTP_404" in body
 
 
+@pytest.mark.asyncio
+async def test_http_exception_handler_preserves_headers() -> None:
+    req = _make_request("cid-7")
+    resp = await http_exception_handler(
+        req,
+        HTTPException(
+            status_code=405,
+            detail="method not allowed",
+            headers={"Allow": "GET"},
+        ),
+    )
+    assert resp.status_code == 405
+    assert resp.headers["Allow"] == "GET"
+
+
 # ── register_error_handlers ─────────────────────────────────────────────
 
 

@@ -234,3 +234,32 @@ class OperationStore:
             connection.commit()
 
         return self.get_operation(operation_id)
+
+    def mark_incomplete_operations_failed(self) -> int:
+        """Mark stale pending/running operations as interrupted.
+
+        Returns:
+            Number of operations that were updated.
+        """
+        updated_at = self._now()
+        with self._lock, closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE operations
+                SET status = ?,
+                    message = ?,
+                    error = ?,
+                    updated_at = ?
+                WHERE status IN (?, ?)
+                """,
+                (
+                    "failed",
+                    "Operation interrupted during process restart",
+                    "Operation interrupted during process restart",
+                    updated_at,
+                    "pending",
+                    "running",
+                ),
+            )
+            connection.commit()
+            return int(cursor.rowcount)

@@ -1,4 +1,5 @@
 import traceback
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import HTTPException, Request, status
@@ -20,6 +21,7 @@ class ErrorResponse:
         error_code: str | None = None,
         details: dict[str, Any] | None = None,
         correlation_id: str | None = None,
+        headers: Mapping[str, str] | None = None,
         include_traceback: bool = False,
         exception: Exception | None = None,
     ) -> JSONResponse:
@@ -31,6 +33,7 @@ class ErrorResponse:
             error_code: Machine-readable error code (defaults to ``UNKNOWN_ERROR``).
             details: Optional extra context about the error.
             correlation_id: Request correlation ID for tracing.
+            headers: Optional HTTP headers that must be preserved.
             include_traceback: Whether to include the Python traceback.
             exception: The exception instance (only used when
                 *include_traceback* is True).
@@ -56,7 +59,7 @@ class ErrorResponse:
                 type(exception), exception, exception.__traceback__
             )
 
-        return JSONResponse(status_code=status_code, content=content)
+        return JSONResponse(status_code=status_code, content=content, headers=headers)
 
 
 async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONResponse:
@@ -171,6 +174,7 @@ async def http_exception_handler(
         error_code=error_code,
         details=details if isinstance(details, dict) else None,
         correlation_id=correlation_id,
+        headers=exc.headers,
     )
 
 
