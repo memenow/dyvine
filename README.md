@@ -300,7 +300,7 @@ docker run -d \
 ### Production Considerations
 
 - **Monitoring**: Scrape `/metrics` and aggregate structured logs
-- **High Availability**: Configure multiple replicas and autoscaling
+- **Horizontal Scaling**: Use a shared operation backend before increasing replicas beyond 1
 - **Backup**: Implement persistent volume and log archival strategies
 
 ## Monitoring and Logging
@@ -335,6 +335,11 @@ Response includes:
 - Dyvine currently relies on Douyin session cookies for upstream access.
 - Built-in API authentication and rate limiting are not enforced by the application.
 - If you deploy the API on the public internet, place it behind an API gateway, ingress policy, or service mesh that enforces authentication, authorization, and rate limits.
+
+### Kubernetes Notes
+
+- The bundled Kubernetes manifests run the API as a single replica because the default operation store uses a pod-local SQLite file.
+- Do not increase replicas or enable autoscaling until you replace the SQLite-backed operation store with a shared backend.
 
 ### Development Commands
 

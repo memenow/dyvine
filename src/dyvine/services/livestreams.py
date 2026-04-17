@@ -578,6 +578,7 @@ class LivestreamService:
                     status="failed",
                     message="Livestream download finished without an artifact",
                     error="Expected livestream artifact was not created",
+                    download_path=None,
                 )
                 return
 
@@ -603,6 +604,7 @@ class LivestreamService:
                 status="failed",
                 message="Livestream download failed",
                 error=str(error),
+                download_path=None,
             )
         finally:
             self.download_jobs.pop(room_id, None)

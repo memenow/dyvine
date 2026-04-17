@@ -388,6 +388,7 @@ async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
     refreshed = store.get_operation(operation.operation_id)
     assert refreshed.status == "failed"
     assert refreshed.error == "Expected livestream artifact was not created"
+    assert refreshed.download_path is None
 
 
 @pytest.mark.asyncio
