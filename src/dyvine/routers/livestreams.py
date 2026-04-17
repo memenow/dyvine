@@ -11,8 +11,9 @@ and includes comprehensive error handling and logging.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
 
+from ..core.dependencies import get_livestream_service
 from ..core.exceptions import DownloadError, LivestreamError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..schemas.livestreams import (
@@ -27,6 +28,7 @@ logger = ContextLogger(__name__)
 
 @router.post(
     "/users/{user_id}/stream:download",
+    status_code=status.HTTP_202_ACCEPTED,
     response_model=LiveStreamDownloadResponse,
     responses={
         404: {"description": "User not found or no active livestream"},
@@ -34,7 +36,7 @@ logger = ContextLogger(__name__)
     },
 )
 async def download_livestream(
-    service: Annotated[LivestreamService, Depends(LivestreamService)],
+    service: Annotated[LivestreamService, Depends(get_livestream_service)],
     user_id: str = Path(..., description="The unique identifier of the user"),
     output_path: str | None = Body(None, embed=True),
 ) -> LiveStreamDownloadResponse:
@@ -59,12 +61,8 @@ async def download_livestream(
         )
 
         async with logger.track_time("download_livestream"):
-            status, path = await service.download_stream(
+            return await service.download_stream(
                 url=f"https://www.douyin.com/user/{user_id}", output_path=output_path
-            )
-
-            return LiveStreamDownloadResponse(
-                status=status, download_path=path, error=None
             )
 
     except DownloadError as e:
@@ -88,6 +86,7 @@ async def download_livestream(
 
 @router.post(
     "/stream:download",
+    status_code=status.HTTP_202_ACCEPTED,
     response_model=LiveStreamDownloadResponse,
     responses={
         404: {"description": "Livestream not found"},
@@ -96,7 +95,7 @@ async def download_livestream(
 )
 async def download_livestream_url(
     request: LiveStreamURLDownloadRequest,
-    service: Annotated[LivestreamService, Depends(LivestreamService)],
+    service: Annotated[LivestreamService, Depends(get_livestream_service)],
 ) -> LiveStreamDownloadResponse:
     """Downloads a livestream from a direct URL.
 
@@ -116,12 +115,8 @@ async def download_livestream_url(
         )
 
         async with logger.track_time("download_livestream_url"):
-            status, path = await service.download_stream(
+            return await service.download_stream(
                 url=request.url, output_path=request.output_path
-            )
-
-            return LiveStreamDownloadResponse(
-                status=status, download_path=path, error=None
             )
 
     except DownloadError as e:
@@ -142,7 +137,7 @@ async def download_livestream_url(
 
 @router.get("/operations/{operation_id}", response_model=LiveStreamDownloadResponse)
 async def get_download_status(
-    service: Annotated[LivestreamService, Depends(LivestreamService)],
+    service: Annotated[LivestreamService, Depends(get_livestream_service)],
     operation_id: str = Path(
         ..., description="The unique identifier of the download operation"
     ),
@@ -166,11 +161,7 @@ async def get_download_status(
         )
 
         async with logger.track_time("get_download_status"):
-            result = await service.get_download_status(operation_id)
-            logger.info("get_download_status completed")
-            return LiveStreamDownloadResponse(
-                status="success", download_path=result, error=None
-            )
+            return await service.get_download_status(operation_id)
 
     except DownloadError as e:
         logger.warning("Operation not found", extra={"operation_id": operation_id})

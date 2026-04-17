@@ -1,7 +1,7 @@
 import traceback
 from typing import Any
 
-from fastapi import Request, status
+from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from .exceptions import DyvineError, NotFoundError, ServiceError
@@ -150,6 +150,30 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     )
 
 
+async def http_exception_handler(
+    request: Request, exc: HTTPException
+) -> JSONResponse:
+    """Normalize ``HTTPException`` responses into the standard error envelope."""
+    correlation_id = getattr(request.state, "correlation_id", None)
+    detail = exc.detail
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("error") or exc.detail)
+        error_code = str(detail.get("error_code") or f"HTTP_{exc.status_code}")
+        details = detail.get("details")
+    else:
+        message = str(detail)
+        error_code = f"HTTP_{exc.status_code}"
+        details = None
+
+    return ErrorResponse.create_response(
+        status_code=exc.status_code,
+        message=message,
+        error_code=error_code,
+        details=details if isinstance(details, dict) else None,
+        correlation_id=correlation_id,
+    )
+
+
 def register_error_handlers(app: Any) -> None:
     """Register Dyvine and generic exception handlers with the FastAPI app.
 
@@ -159,6 +183,8 @@ def register_error_handlers(app: Any) -> None:
 
     # Handle all DyvineError subclasses with one handler
     app.add_exception_handler(DyvineError, dyvine_error_handler)
+
+    app.add_exception_handler(HTTPException, http_exception_handler)
 
     # Handle unexpected exceptions
     app.add_exception_handler(Exception, generic_exception_handler)

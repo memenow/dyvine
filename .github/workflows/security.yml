@@ -28,20 +28,16 @@ jobs:
       run: uv python install 3.12
 
     - name: Install dependencies
-      run: uv sync
+      run: uv sync --frozen
 
-    - name: Install safety
-      run: uv add --dev safety
-
-    - name: Run safety check
-      run: |
-        uv run pip freeze | uv run safety check --json --output safety-report.json || true
+    - name: Run dependency audit
+      run: uv run --with pip-audit pip-audit . --locked --strict --format=json --output pip-audit-report.json
 
     - name: Upload safety results
       uses: actions/upload-artifact@v4
       with:
-        name: safety-report
-        path: safety-report.json
+        name: pip-audit-report
+        path: pip-audit-report.json
 
   container-scan:
     name: Container Security Scan
@@ -57,11 +53,13 @@ jobs:
         docker build -t scan-target:latest .
 
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
+      uses: aquasecurity/trivy-action@v0.35.0
       with:
         image-ref: 'scan-target:latest'
         format: 'sarif'
         output: 'trivy-results.sarif'
+        exit-code: '1'
+        severity: 'HIGH,CRITICAL'
 
     - name: Upload Trivy scan results
       uses: github/codeql-action/upload-sarif@v3

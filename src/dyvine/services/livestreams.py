@@ -5,16 +5,18 @@ from typing import Any
 from urllib.parse import urlparse
 
 from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
+from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
 from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 
-from ..core.dependencies import get_service_container
 from ..core.exceptions import (
     DownloadError,
     LivestreamError,
 )
 from ..core.logging import ContextLogger
+from ..core.operations import OperationStore
 from ..core.settings import settings
+from ..schemas.livestreams import LiveStreamDownloadResponse
 from .users import UserService
 
 logger = ContextLogger(__name__)
@@ -35,8 +37,14 @@ class LivestreamService:
     the necessary operations.
     """
 
-    def __init__(self) -> None:
-        """Initialize the livestream service using global settings."""
+    def __init__(
+        self,
+        *,
+        douyin_handler: DouyinHandler,
+        user_service: UserService,
+        operation_store: OperationStore,
+    ) -> None:
+        """Initialize the livestream service using injected dependencies."""
         self.settings = settings
         base_config = self._build_douyin_config()
         self.downloader_config = {
@@ -45,8 +53,9 @@ class LivestreamService:
             "proxies": base_config["proxies"],
         }
         self.download_jobs: dict[str, asyncio.Task[Any]] = {}
-        self.user_service = UserService()
-        self.douyin_handler = get_service_container().douyin_handler
+        self.user_service = user_service
+        self.operation_store = operation_store
+        self.douyin_handler = douyin_handler
         # f2's Bark push notifications are meant for interactive CLI use;
         # in a server context they add latency and unneeded network calls.
         self.douyin_handler.enable_bark = False
@@ -415,7 +424,7 @@ class LivestreamService:
 
     async def download_stream(
         self, url: str, output_path: str | None = None
-    ) -> tuple[str, str]:
+    ) -> LiveStreamDownloadResponse:
         """Download a Douyin livestream.
 
         Args:
@@ -425,8 +434,8 @@ class LivestreamService:
                 Defaults to ``data/douyin/downloads/livestreams``.
 
         Returns:
-            A ``("pending", target_file_path)`` tuple on success.  The actual
-            download runs as a background ``asyncio.Task``.
+            A persisted operation response. The actual download runs as a
+            background ``asyncio.Task``.
 
         Raises:
             LivestreamError: If the URL is empty, the webcast ID cannot be
@@ -515,53 +524,90 @@ class LivestreamService:
         }
 
         target_file = output_dir / f"{room_id}_live.flv"
+        operation = self.operation_store.create_operation(
+            operation_type="livestream_download",
+            subject_id=room_id,
+            status="pending",
+            message="Livestream download scheduled",
+            progress=0.0,
+            download_path=str(target_file),
+            metadata={
+                "source_url": normalized,
+                "webcast_id": webcast_id,
+                "room_id": room_id,
+            },
+        )
 
         job = asyncio.create_task(
             self._run_stream_download(
-                room_id, download_kwargs, webcast_payload, output_dir
+                operation.operation_id,
+                room_id,
+                download_kwargs,
+                webcast_payload,
+                output_dir,
+                target_file,
             )
         )
         self.download_jobs[room_id] = job
-        return "pending", str(target_file)
+        return LiveStreamDownloadResponse(**operation.to_response())
 
     async def _run_stream_download(
         self,
-        job_id: str,
+        operation_id: str,
+        room_id: str,
         download_kwargs: dict[str, Any],
         webcast_payload: dict[str, Any],
         output_dir: Path,
+        target_file: Path,
     ) -> None:
         """Run the f2 livestream downloader in the background."""
         try:
+            self.operation_store.update_operation(
+                operation_id,
+                status="running",
+                message="Livestream download in progress",
+                progress=0.0,
+            )
             async with DouyinDownloader(download_kwargs) as downloader:
                 await downloader.create_stream_tasks(
                     download_kwargs, webcast_payload, output_dir
                 )
+            final_path = str(target_file) if target_file.exists() else str(target_file)
+            self.operation_store.update_operation(
+                operation_id,
+                status="completed",
+                message="Livestream download completed",
+                progress=100.0,
+                download_path=final_path,
+            )
         except Exception as error:
             logger.error(
                 "Livestream download failed",
-                extra={"job_id": job_id, "error": str(error)},
+                extra={
+                    "operation_id": operation_id,
+                    "room_id": room_id,
+                    "error": str(error),
+                },
+            )
+            self.operation_store.update_operation(
+                operation_id,
+                status="failed",
+                message="Livestream download failed",
+                error=str(error),
             )
         finally:
-            self.download_jobs.pop(job_id, None)
+            self.download_jobs.pop(room_id, None)
 
-    async def get_download_status(self, operation_id: str) -> str:
+    async def get_download_status(
+        self, operation_id: str
+    ) -> LiveStreamDownloadResponse:
         """Get the status of a download operation.
 
         Args:
             operation_id: The operation ID (room_id).
 
         Returns:
-            The path to the downloaded file if complete, otherwise a status
-            message.
+            The current persisted operation response.
         """
-        output_dir = Path("data/douyin/downloads/livestreams")
-        output_file = output_dir / f"{operation_id}_live.flv"
-
-        if output_file.exists():
-            return str(output_file)
-
-        if operation_id in self.download_jobs:
-            return "Download in progress."
-
-        raise DownloadError("Operation not found or status unknown.")
+        operation = self.operation_store.get_operation(operation_id)
+        return LiveStreamDownloadResponse(**operation.to_response())

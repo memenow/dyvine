@@ -61,21 +61,33 @@ def test_user_response_optional_fields_none() -> None:
 
 def test_download_response_all_fields() -> None:
     resp = DownloadResponse(
-        task_id="t1",
+        operation_id="t1",
+        operation_type="user_content_download",
+        subject_id="u1",
         status="running",
         message="msg",
         progress=50.0,
         total_items=100,
-        downloaded_items=50,
+        completed_items=50,
         error=None,
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:01+00:00",
     )
     assert resp.task_id == "t1"
     assert resp.progress == 50.0
 
 
 def test_download_response_optional_fields_none() -> None:
-    resp = DownloadResponse(task_id="t2", status="pending", message="m")
+    resp = DownloadResponse(
+        operation_id="t2",
+        operation_type="user_content_download",
+        subject_id="u2",
+        status="pending",
+        message="m",
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+    )
     assert resp.progress is None
     assert resp.total_items is None
-    assert resp.downloaded_items is None
+    assert resp.completed_items is None
     assert resp.error is None

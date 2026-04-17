@@ -1,23 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from dyvine.services.users import DownloadError, DownloadResponse, UserService
 
 
-@pytest.fixture(autouse=True)
-def reset_user_service_singleton() -> None:
-    UserService._instance = None  # type: ignore[attr-defined]
-    UserService._active_downloads = {}  # type: ignore[attr-defined]
-    yield
-    UserService._instance = None  # type: ignore[attr-defined]
-    UserService._active_downloads = {}  # type: ignore[attr-defined]
-
-
 @pytest.mark.asyncio
-async def test_start_download_tracks_task(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_start_download_tracks_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     scheduled: list[asyncio.Future[None]] = []
 
     def fake_create_task(coro: object) -> asyncio.Future[None]:
@@ -31,32 +25,36 @@ async def test_start_download_tracks_task(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("dyvine.services.users.asyncio.create_task", fake_create_task)
 
     service = UserService()
+    monkeypatch.setattr(service, "get_user_info", AsyncMock(return_value=MagicMock()))
+
     response = await service.start_download("user-123")
 
     assert isinstance(response, DownloadResponse)
     assert response.status == "pending"
-    assert response.task_id in service._active_downloads  # type: ignore[attr-defined]
+    assert response.operation_id
+    assert response.task_id == response.operation_id
     assert scheduled, "Expected background task to be scheduled"
 
 
 @pytest.mark.asyncio
-async def test_get_download_status_returns_current_state(
+async def test_get_download_status_returns_persisted_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _resolved_future(coro: object) -> asyncio.Future[None]:
+    def resolved_future(coro: object) -> asyncio.Future[None]:
         if hasattr(coro, "close"):
             coro.close()
         future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
         future.set_result(None)
         return future
 
-    monkeypatch.setattr("dyvine.services.users.asyncio.create_task", _resolved_future)
-
     service = UserService()
-    start_response = await service.start_download("user-456")
-    status_response = await service.get_download_status(start_response.task_id)
+    monkeypatch.setattr(service, "get_user_info", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr("dyvine.services.users.asyncio.create_task", resolved_future)
 
-    assert status_response.task_id == start_response.task_id
+    start_response = await service.start_download("user-456")
+    status_response = await service.get_download_status(start_response.operation_id)
+
+    assert status_response.operation_id == start_response.operation_id
     assert status_response.status == "pending"
     assert status_response.progress == 0.0
 
@@ -68,13 +66,8 @@ async def test_get_download_status_raises_for_unknown_task() -> None:
         await service.get_download_status("missing-task")
 
 
-# ── get_user_info (mocked handler) ──────────────────────────────────────
-
-
 @pytest.mark.asyncio
 async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
@@ -104,8 +97,6 @@ async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
     from dyvine.core.exceptions import UserNotFoundError
     from dyvine.services import users as users_mod
 
@@ -127,8 +118,6 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
@@ -139,9 +128,7 @@ async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> 
     mock_user_data.follower_count = 10
     mock_user_data.total_favorited = 50
     mock_user_data.room_id = 42
-    mock_user_data._to_raw.return_value = {
-        "user": {"room_data": '{"status":2}'}
-    }
+    mock_user_data._to_raw.return_value = {"user": {"room_data": '{"status":2}'}}
 
     class FakeHandler:
         def __init__(self, kwargs: dict) -> None:
@@ -158,47 +145,8 @@ async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> 
     assert result.room_data == '{"status":2}'
 
 
-# ── start_download with options ─────────────────────────────────────────
-
-
 @pytest.mark.asyncio
-async def test_start_download_with_options(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    scheduled: list[object] = []
-
-    def fake_create_task(coro: object) -> asyncio.Future[None]:
-        if hasattr(coro, "close"):
-            coro.close()
-        future: asyncio.Future[None] = asyncio.Future()
-        future.set_result(None)
-        scheduled.append(future)
-        return future
-
-    monkeypatch.setattr(
-        "dyvine.services.users.asyncio.create_task", fake_create_task
-    )
-
-    service = UserService()
-    response = await service.start_download(
-        "user-x", include_posts=False, include_likes=True, max_items=50
-    )
-    assert response.status == "pending"
-    task_info = service._active_downloads[response.task_id]
-    assert task_info["include_posts"] is False
-    assert task_info["include_likes"] is True
-    assert task_info["max_items"] == 50
-
-
-# ── _process_download error handling ────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_process_download_no_posts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from unittest.mock import AsyncMock, MagicMock
-
+async def test_process_download_no_posts(monkeypatch: pytest.MonkeyPatch) -> None:
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
@@ -212,36 +160,33 @@ async def test_process_download_no_posts(
         fetch_user_profile = AsyncMock(return_value=mock_user_data)
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
-    monkeypatch.setattr(
-        "dyvine.services.users.asyncio.sleep", AsyncMock()
-    )
 
     service = UserService()
-    task_id = "test-no-posts"
-    service._active_downloads[task_id] = {
-        "user_id": "empty-user",
-        "status": "pending",
-        "progress": 0.0,
-        "start_time": None,
-        "include_posts": True,
-        "include_likes": False,
-        "max_items": None,
-    }
+    operation = service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="empty-user",
+        status="pending",
+        message="scheduled",
+    )
 
-    await service._process_download(task_id)
-    # Task is cleaned up after the mocked sleep + pop
-    assert task_id not in service._active_downloads
+    await service._process_download(
+        operation.operation_id,
+        user_id="empty-user",
+        include_likes=False,
+        max_items=None,
+    )
+
+    refreshed = await service.get_download_status(operation.operation_id)
+    assert refreshed.status == "completed"
+    assert refreshed.progress == 100.0
 
 
 @pytest.mark.asyncio
 async def test_process_download_sets_failed_on_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from unittest.mock import AsyncMock
-
     from dyvine.services import users as users_mod
 
-    # Make DouyinHandler raise on profile fetch
     class FakeHandler:
         def __init__(self, kwargs: dict) -> None:
             pass
@@ -249,26 +194,22 @@ async def test_process_download_sets_failed_on_error(
         fetch_user_profile = AsyncMock(side_effect=RuntimeError("api error"))
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
-    # Prevent the 1-hour sleep at the end
-    monkeypatch.setattr(
-        "dyvine.services.users.asyncio.sleep", AsyncMock()
-    )
 
     service = UserService()
-    task_id = "test-task-fail"
-    service._active_downloads[task_id] = {
-        "user_id": "bad-user",
-        "status": "pending",
-        "progress": 0.0,
-        "start_time": None,
-        "include_posts": True,
-        "include_likes": False,
-        "max_items": None,
-    }
+    operation = service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="bad-user",
+        status="pending",
+        message="scheduled",
+    )
 
-    await service._process_download(task_id)
+    await service._process_download(
+        operation.operation_id,
+        user_id="bad-user",
+        include_likes=False,
+        max_items=None,
+    )
 
-    # Task should not exist anymore (cleaned up after sleep)
-    # But the status should have been set to failed before cleanup
-    # Since asyncio.sleep is mocked, the task is cleaned up immediately
-    assert task_id not in service._active_downloads
+    refreshed = await service.get_download_status(operation.operation_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error == "api error"

@@ -1,3 +1,4 @@
+import contextvars
 import json
 import logging
 import logging.handlers
@@ -80,15 +81,35 @@ class ContextLogger:
 
     def __init__(self, name: str) -> None:
         self.logger = logging.getLogger(name)
-        self.correlation_id: str | None = None
-        self.context: dict[str, Any] = {}
+        self.correlation_id_var: contextvars.ContextVar[
+            str | None
+        ] = contextvars.ContextVar(f"{name}_correlation_id", default=None)
+        self.context_var: contextvars.ContextVar[
+            dict[str, Any] | None
+        ] = contextvars.ContextVar(f"{name}_context", default=None)
 
-    def set_correlation_id(self, correlation_id: str) -> None:
-        self.correlation_id = correlation_id
+    @property
+    def correlation_id(self) -> str | None:
+        """Expose the current request-scoped correlation ID."""
+        return self.correlation_id_var.get()
+
+    @property
+    def context(self) -> dict[str, Any]:
+        """Expose the current request-scoped logging context."""
+        return dict(self.context_var.get() or {})
+
+    def set_correlation_id(self, correlation_id: str | None) -> None:
+        self.correlation_id_var.set(correlation_id)
 
     def add_context(self, **kwargs: Any) -> "ContextLogger":
-        self.context.update(kwargs)
+        context = dict(self.context_var.get() or {})
+        context.update(kwargs)
+        self.context_var.set(context)
         return self
+
+    def clear_context(self) -> None:
+        """Reset request-scoped logging context."""
+        self.context_var.set({})
 
     @asynccontextmanager
     async def track_time(self, operation: str) -> AsyncGenerator[None, None]:
@@ -128,10 +149,12 @@ class ContextLogger:
         **kwargs: Any,
     ) -> None:
         extra = kwargs.pop("extra", {})
-        if self.correlation_id:
-            extra["correlation_id"] = self.correlation_id
-        if self.context:
-            extra.update(self.context)
+        correlation_id = self.correlation_id_var.get()
+        context = self.context_var.get()
+        if correlation_id:
+            extra["correlation_id"] = correlation_id
+        if context:
+            extra.update(context)
         self.logger.log(level, msg, *args, exc_info=exc_info, extra=extra, **kwargs)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:

@@ -64,14 +64,13 @@ Performance Considerations:
 
 import asyncio
 import re
-import uuid
-from datetime import datetime
 from pathlib import Path
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
+from ..core.operations import OperationStore
 from ..core.settings import settings
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
@@ -135,6 +134,7 @@ logger = ContextLogger(__name__)
 
 # Alias for backward compatibility
 UserServiceError = ServiceError
+UserDownloadError = DownloadError
 
 
 class UserService:
@@ -142,26 +142,12 @@ class UserService:
 
     This class encapsulates the business logic for various user-related
     operations in the Douyin application, such as retrieving user information,
-    initiating content downloads, and tracking download progress. It follows the
-    Singleton pattern to ensure a single instance throughout the application.
+    initiating content downloads, and tracking download progress.
     """
 
-    _instance = None
-    _active_downloads: dict[str, dict] = {}
-
-    def __new__(cls) -> "UserService":
-        """Ensure a single instance of the UserService class (Singleton pattern)."""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def __init__(self) -> None:
-        """Initialize the UserService instance (only once)."""
-        # Skip initialization if already initialized
-        if hasattr(self, "_initialized"):
-            return
-
-        self._initialized = True
+    def __init__(self, operation_store: OperationStore | None = None) -> None:
+        """Initialize the user service."""
+        self.operation_store = operation_store or OperationStore()
         self.storage = R2StorageService()
 
     async def get_user_info(self, user_id: str) -> UserResponse:
@@ -235,31 +221,29 @@ class UserService:
             DownloadResponse: Object containing details about the initiated download
                 task.
         """
-        task_id = str(uuid.uuid4())
+        await self.get_user_info(user_id)
 
-        # Initialize download task
-        self._active_downloads[task_id] = {
-            "user_id": user_id,
-            "status": "pending",
-            "progress": 0.0,
-            "start_time": datetime.now(),
-            "include_posts": include_posts,
-            "include_likes": include_likes,
-            "max_items": max_items,
-        }
-
-        # Start download task
-        asyncio.create_task(self._process_download(task_id))
-
-        return DownloadResponse(
-            task_id=task_id,
+        operation = self.operation_store.create_operation(
+            operation_type="user_content_download",
+            subject_id=user_id,
             status="pending",
-            message="Download started",
+            message="Download scheduled",
             progress=0.0,
-            total_items=None,
-            downloaded_items=None,
-            error=None,
+            metadata={
+                "include_posts": include_posts,
+                "include_likes": include_likes,
+                "max_items": max_items,
+            },
         )
+        asyncio.create_task(
+            self._process_download(
+                operation.operation_id,
+                user_id=user_id,
+                include_likes=include_likes,
+                max_items=max_items,
+            )
+        )
+        return DownloadResponse(**operation.to_response())
 
     async def get_download_status(self, task_id: str) -> DownloadResponse:
         """Get the status of a download task.
@@ -273,37 +257,39 @@ class UserService:
         Raises:
             DownloadError: If the specified download task is not found.
         """
-        if task_id not in self._active_downloads:
-            raise DownloadError(f"Download task {task_id} not found")
+        operation = self.operation_store.get_operation(task_id)
+        return DownloadResponse(**operation.to_response())
 
-        task = self._active_downloads[task_id]
-        return DownloadResponse(
-            task_id=task_id,
-            status=task["status"],
-            message=f"Download {task['status']}",
-            progress=task["progress"],
-            total_items=task.get("total_items"),
-            downloaded_items=task.get("downloaded_items"),
-            error=task.get("error"),
-        )
-
-    async def _process_download(self, task_id: str) -> None:
+    async def _process_download(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        include_likes: bool,
+        max_items: int | None,
+    ) -> None:
         """Process a download task asynchronously.
 
         Args:
             task_id (str): The unique identifier of the download task.
         """
-        task = self._active_downloads[task_id]
         temp_dir = None
         try:
-            task["status"] = "running"
+            self.operation_store.update_operation(
+                task_id,
+                status="running",
+                message="Download in progress",
+                progress=0.0,
+                completed_items=0,
+                error=None,
+            )
 
             temp_dir = Path("temp_downloads")
             temp_dir.mkdir(exist_ok=True)
 
             # Initialize f2 handler with temporary directory
             handler_kwargs = {
-                "url": f"https://www.douyin.com/user/{task['user_id']}",
+                "url": f"https://www.douyin.com/user/{user_id}",
                 "cookie": settings.douyin_cookie,
                 "headers": {
                     "User-Agent": settings.douyin_user_agent,
@@ -311,8 +297,8 @@ class UserService:
                 },
                 "proxy": settings.douyin_proxy_http,
                 "download_path": str(temp_dir),
-                "max_counts": task["max_items"],
-                "download_favorite": task["include_likes"],
+                "max_counts": max_items,
+                "download_favorite": include_likes,
                 "timeout": 5,
                 "folderize": True,
                 "mode": "post",
@@ -322,25 +308,33 @@ class UserService:
             }
 
             handler = DouyinHandler(handler_kwargs)
-            task["total_items"] = 0
-            task["downloaded_items"] = 0
 
             # Get user profile to create user directory and verify post count
-            user_data = await handler.fetch_user_profile(task["user_id"])
+            user_data = await handler.fetch_user_profile(user_id)
             if not user_data.nickname:
-                raise UserNotFoundError(f"User {task['user_id']} not found")
+                raise UserNotFoundError(f"User {user_id} not found")
 
             # Get total posts count from profile
             aweme_count = user_data.aweme_count
             total_posts = int(aweme_count) if isinstance(aweme_count, int) else 0
             if total_posts == 0:
-                logger.info(f"User {task['user_id']} has no posts")
-                task["status"] = "completed"
-                task["progress"] = 100.0
+                logger.info("User %s has no posts", user_id)
+                self.operation_store.update_operation(
+                    task_id,
+                    status="completed",
+                    message="Download completed",
+                    progress=100.0,
+                    total_items=0,
+                    completed_items=0,
+                )
                 return
 
-            logger.info(f"User {user_data.nickname} has {total_posts} posts")
-            task["total_items"] = total_posts
+            logger.info("User %s has %s posts", user_data.nickname, total_posts)
+            self.operation_store.update_operation(
+                task_id,
+                total_items=total_posts,
+                message="Download in progress",
+            )
 
             # Create user directory in temp
             user_dir = temp_dir / user_data.nickname
@@ -351,15 +345,13 @@ class UserService:
             has_more = True
             downloaded_count = 0
 
-            while has_more and (
-                task["max_items"] is None or downloaded_count < task["max_items"]
-            ):
+            while has_more and (max_items is None or downloaded_count < max_items):
                 async for aweme_data in handler.fetch_user_post_videos(
-                    task["user_id"],
+                    user_id,
                     min_cursor=0,
                     max_cursor=max_cursor,
                     page_counts=100,  # Increased page size
-                    max_counts=task["max_items"],
+                    max_counts=max_items,
                 ):
                     if not aweme_data.has_aweme:
                         has_more = False
@@ -367,15 +359,24 @@ class UserService:
 
                     current_batch_size = len(aweme_data.aweme_id)
                     downloaded_count += current_batch_size
-                    task["downloaded_items"] = downloaded_count
                     if total_posts > 0:
-                        task["progress"] = (downloaded_count / total_posts) * 100
+                        progress = (downloaded_count / total_posts) * 100
                     else:
-                        task["progress"] = 100.0
+                        progress = 100.0
+
+                    self.operation_store.update_operation(
+                        task_id,
+                        progress=progress,
+                        completed_items=downloaded_count,
+                        total_items=total_posts,
+                        message="Download in progress",
+                    )
 
                     logger.info(
-                        f"Downloaded {downloaded_count}/{total_posts} posts "
-                        f"({task['progress']:.1f}%)"
+                        "Downloaded %s/%s posts (%.1f%%)",
+                        downloaded_count,
+                        total_posts,
+                        progress,
                     )
 
                     # Download files to temp directory
@@ -398,12 +399,12 @@ class UserService:
                                         "image/" + file_path.suffix.lower().lstrip(".")
                                     )
                                     r2_path = self.storage.generate_ugc_path(
-                                        task["user_id"], file_path.name, content_type
+                                        user_id, file_path.name, content_type
                                     )
                                 else:
                                     content_type = "video/mp4"
                                     r2_path = self.storage.generate_ugc_path(
-                                        task["user_id"], file_path.name, content_type
+                                        user_id, file_path.name, content_type
                                     )
 
                                 # Generate metadata
@@ -445,15 +446,12 @@ class UserService:
                             has_more = False
 
                     # If max_items is set and we've reached it, stop
-                    if (
-                        task["max_items"]
-                        and task["downloaded_items"] >= task["max_items"]
-                    ):
+                    if max_items and downloaded_count >= max_items:
                         has_more = False
                         break
 
                     # Add delay between pages
-                    await asyncio.sleep(handler_kwargs.get("timeout", 5))
+                    await asyncio.sleep(5.0)
             # Verify download completion
             if total_posts > 0:
                 completion_percentage = (downloaded_count / total_posts) * 100
@@ -463,44 +461,62 @@ class UserService:
             if completion_percentage >= 100:
                 # Consider anything >= 100% as complete success
                 logger.info(
-                    f"Successfully downloaded {downloaded_count} posts "
-                    f"(100% complete)"
+                    "Successfully downloaded %s posts (100%% complete)",
+                    downloaded_count,
                 )
-                task["status"] = "completed"
-                task["progress"] = 100.0
+                self.operation_store.update_operation(
+                    task_id,
+                    status="completed",
+                    message="Download completed",
+                    progress=100.0,
+                    completed_items=downloaded_count,
+                    total_items=total_posts,
+                )
             else:
                 # Less than 100% means we missed some posts
                 logger.warning(
-                    f"Only downloaded {downloaded_count}/{total_posts} posts "
-                    f"({completion_percentage:.1f}%). Some posts may have been missed."
+                    (
+                        "Only downloaded %s/%s posts (%.1f%%). "
+                        "Some posts may have been missed."
+                    ),
+                    downloaded_count,
+                    total_posts,
+                    completion_percentage,
                 )
-                task["status"] = "partial"
-                task["error"] = (
-                    f"Only downloaded {downloaded_count} out of {total_posts} posts"
+                self.operation_store.update_operation(
+                    task_id,
+                    status="partial",
+                    message="Download completed with missing items",
+                    error=(
+                        f"Only downloaded {downloaded_count} "
+                        f"out of {total_posts} posts"
+                    ),
+                    progress=completion_percentage,
+                    completed_items=downloaded_count,
+                    total_items=total_posts,
                 )
-                task["progress"] = completion_percentage
 
         except Exception as e:
             logger.exception(
                 "Download failed",
-                extra={"task_id": task_id, "user_id": task["user_id"]},
+                extra={"task_id": task_id, "user_id": user_id},
             )
-            task["status"] = "failed"
-            task["error"] = str(e)
+            self.operation_store.update_operation(
+                task_id,
+                status="failed",
+                message="Download failed",
+                error=str(e),
+            )
 
         finally:
-            # Clean up temp directory and task
             try:
                 if temp_dir and temp_dir.exists():
-                    for file in temp_dir.glob("**/*"):
+                    for file in sorted(temp_dir.glob("**/*"), reverse=True):
                         if file.is_file():
                             file.unlink()
-                    for dir in temp_dir.glob("**/*"):
+                    for dir in sorted(temp_dir.glob("**/*"), reverse=True):
                         if dir.is_dir():
                             dir.rmdir()
                     temp_dir.rmdir()
             except Exception as e:
                 logger.error(f"Failed to clean up temp directory: {str(e)}")
-
-            await asyncio.sleep(3600)  # Keep task info for 1 hour
-            self._active_downloads.pop(task_id, None)

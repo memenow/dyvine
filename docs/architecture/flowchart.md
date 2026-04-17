@@ -1,6 +1,6 @@
 # Flowchart
 
-_Last Updated: 2026-04-07_
+_Last Updated: 2026-04-17_
 
 ## Description
 
@@ -33,9 +33,11 @@ flowchart TD
     R --> I
 
     L --> LD{Download Requested?}
-    LD -->|Yes| BG[Background Task]
+    LD -->|Yes| OP[Operation Store]
+    OP --> BG[Background Task]
+    BG --> OP
+    OP --> I
     LD -->|No| I
-    BG --> I
 
     I --> J[Client Response]
     E --> J

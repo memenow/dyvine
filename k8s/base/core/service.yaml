@@ -9,6 +9,7 @@ metadata:
     app.kubernetes.io/part-of: dyvine
 spec:
   type: ClusterIP
+  sessionAffinity: ClientIP
   selector:
     app.kubernetes.io/name: dyvine
     app.kubernetes.io/component: api

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from unittest.mock import MagicMock, patch
@@ -147,3 +148,19 @@ def test_context_logger_exception_sets_exc_info() -> None:
         cl.exception("fail")
         _, kwargs = mock_log.call_args
         assert kwargs["exc_info"] is True
+
+
+@pytest.mark.asyncio
+async def test_context_logger_uses_task_local_context() -> None:
+    cl = ContextLogger("test.contextvars")
+
+    async def emit(correlation_id: str) -> str | None:
+        cl.set_correlation_id(correlation_id)
+        await asyncio.sleep(0)
+        return cl.correlation_id
+
+    correlation_one, correlation_two = await asyncio.gather(
+        emit("cid-1"), emit("cid-2")
+    )
+    assert correlation_one == "cid-1"
+    assert correlation_two == "cid-2"

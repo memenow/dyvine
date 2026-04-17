@@ -65,12 +65,24 @@ from typing import Any
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from prometheus_client import Counter, Histogram, make_asgi_app
 
 from .core.dependencies import get_service_container
 from .core.error_handlers import register_error_handlers
 from .core.logging import ContextLogger, setup_logging
 from .core.settings import settings
 from .routers import livestreams, posts, users
+
+http_requests_total = Counter(
+    "dyvine_http_requests_total",
+    "Total HTTP requests handled by Dyvine",
+    ["method", "route", "status_code"],
+)
+http_request_duration_seconds = Histogram(
+    "dyvine_http_request_duration_seconds",
+    "HTTP request duration for Dyvine",
+    ["method", "route", "status_code"],
+)
 
 
 @asynccontextmanager
@@ -126,6 +138,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     container = get_service_container()
     container.initialize()
     app.state.container = container
+    app.state.startup_complete = True
 
     # Log successful startup with environment context
     app.state.logger.info(
@@ -155,6 +168,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "shutdown_initiated_at": shutdown_start,
         },
     )
+    app.state.startup_complete = False
 
 
 # Create FastAPI application instance with comprehensive configuration
@@ -173,10 +187,10 @@ app = FastAPI(
     Authentication:
     Configure DOUYIN_COOKIE environment variable with valid session data.
 
-    Rate Limits:
-    • General endpoints: 10 requests/second
-    • Download operations: 2 concurrent per user
-    • Content listing: 100 items per request maximum
+    Notes:
+    • Asynchronous downloads return persistent operation records.
+    • Built-in API authentication and rate limiting are not enforced.
+    • Prometheus metrics are exposed at /metrics.
     """,
     version=settings.version,
     docs_url="/docs",
@@ -200,10 +214,11 @@ app = FastAPI(
 
 
 # Configure CORS middleware for cross-origin request handling
+allow_all_origins = settings.cors_origins == ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,  # Configurable via CORS_ORIGINS env var
-    allow_credentials=True,  # Allow cookies and auth headers
+    allow_credentials=not allow_all_origins,
     allow_methods=["*"],  # Allow all HTTP methods
     allow_headers=["*"],  # Allow all headers
     expose_headers=["X-Correlation-ID"],  # Expose correlation ID to clients
@@ -316,6 +331,9 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
     duration = time.time() - start_time
 
     # Log request completion with performance metrics
+    route = request.scope.get("route")
+    route_label = getattr(route, "path", request.url.path)
+    status_code_label = str(response.status_code)
     logger.info(
         "HTTP request completed",
         extra={
@@ -326,10 +344,21 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
             "request_id_source": request_id_source,
         },
     )
+    http_requests_total.labels(
+        method=request.method,
+        route=route_label,
+        status_code=status_code_label,
+    ).inc()
+    http_request_duration_seconds.labels(
+        method=request.method,
+        route=route_label,
+        status_code=status_code_label,
+    ).observe(duration)
 
     # Add correlation ID to response headers for client tracing
     response.headers["X-Correlation-ID"] = correlation_id
-    logger.correlation_id = None
+    logger.set_correlation_id(None)
+    logger.clear_context()
 
     return response
 
@@ -343,6 +372,9 @@ app.include_router(posts.router, prefix=settings.prefix)
 app.include_router(users.router, prefix=settings.prefix)
 
 app.include_router(livestreams.router, prefix=settings.prefix)
+
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 
 @app.get(
@@ -403,8 +435,86 @@ async def root() -> dict[str, Any]:
 
 
 @app.get(
+    "/livez",
+    summary="Liveness probe",
+    description="Returns a process-level liveness signal for container orchestration",
+    response_description="Liveness status",
+    tags=["System"],
+)
+async def liveness_probe(request: Request) -> JSONResponse:
+    """Return a liveness signal that only reflects process health."""
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={
+            "status": "live",
+            "version": settings.version,
+            "correlation_id": correlation_id,
+        },
+    )
+
+
+@app.get(
+    "/readyz",
+    summary="Readiness probe",
+    description="Returns a readiness signal based on required dependencies only",
+    response_description="Readiness status",
+    tags=["System"],
+)
+async def readiness_probe(request: Request) -> JSONResponse:
+    """Return readiness based on required runtime dependencies."""
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    ready = bool(settings.douyin.cookie and hasattr(app.state, "container"))
+    readiness_status_code = (
+        status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
+    return JSONResponse(
+        status_code=readiness_status_code,
+        content={
+            "status": "ready" if ready else "not_ready",
+            "dependencies": {
+                "douyin_api": (
+                    "configured"
+                    if settings.douyin.cookie
+                    else "missing_credentials"
+                ),
+                "service_container": (
+                    "initialized"
+                    if hasattr(app.state, "container")
+                    else "missing"
+                ),
+            },
+            "correlation_id": correlation_id,
+        },
+    )
+
+
+@app.get(
+    "/startupz",
+    summary="Startup probe",
+    description="Returns startup completion status for container orchestration",
+    response_description="Startup status",
+    tags=["System"],
+)
+async def startup_probe(request: Request) -> JSONResponse:
+    """Return whether the application startup sequence completed."""
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    started = bool(getattr(app.state, "startup_complete", False))
+    startup_status_code = (
+        status.HTTP_200_OK if started else status.HTTP_503_SERVICE_UNAVAILABLE
+    )
+    return JSONResponse(
+        status_code=startup_status_code,
+        content={
+            "status": "started" if started else "starting",
+            "correlation_id": correlation_id,
+        },
+    )
+
+
+@app.get(
     "/health",
-    summary="Application health check",
+    summary="Application health summary",
     description="Returns detailed health and performance metrics for monitoring",
     response_description="Health status with system metrics and uptime information",
     tags=["System"],
@@ -514,9 +624,9 @@ async def health_check(request: Request) -> JSONResponse:
     }
 
     status_code = (
-        status.HTTP_200_OK
-        if health_status == "healthy"
-        else status.HTTP_503_SERVICE_UNAVAILABLE
+        status.HTTP_503_SERVICE_UNAVAILABLE
+        if health_status == "unhealthy"
+        else status.HTTP_200_OK
     )
 
     return JSONResponse(status_code=status_code, content=response_body)

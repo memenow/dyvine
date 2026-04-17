@@ -5,6 +5,8 @@ This module defines Pydantic models for user data validation and serialization.
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .operations import OperationResponse
+
 
 class UserDownloadRequest(BaseModel):
     """Schema for user download request."""
@@ -36,20 +38,5 @@ class UserResponse(BaseModel):
     model_config = ConfigDict()
 
 
-class DownloadResponse(BaseModel):
-    """Schema for download operation response.
-
-    The ``status`` field transitions through: ``pending`` -> ``running``
-    -> ``completed`` | ``failed``.
-    """
-
-    task_id: str = Field(..., description="Unique task identifier")
-    status: str = Field(
-        ..., description="Task status: pending | running | completed | failed"
-    )
-    message: str = Field(..., description="Status message")
-    progress: float | None = Field(None, description="Download progress (0-100)")
-    total_items: int | None = Field(None, description="Total items to download")
-    downloaded_items: int | None = Field(None, description="Number of items downloaded")
-    error: str | None = Field(None, description="Error message if failed")
-    model_config = ConfigDict()
+class DownloadResponse(OperationResponse):
+    """Backward-compatible alias for user download operations."""

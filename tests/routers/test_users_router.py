@@ -30,7 +30,15 @@ def _user_response() -> UserResponse:
 
 
 def _download_response() -> DownloadResponse:
-    return DownloadResponse(task_id="t1", status="pending", message="ok")
+    return DownloadResponse(
+        operation_id="t1",
+        operation_type="user_content_download",
+        subject_id="u1",
+        status="pending",
+        message="ok",
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+    )
 
 
 # ── get_user ─────────────────────────────────────────────────────────────
@@ -80,7 +88,7 @@ async def test_download_user_content_success(
     result = await download_user_content(
         user_id="u1", service=mock_user_service
     )
-    assert result.task_id == "t1"
+    assert result.operation_id == "t1"
 
 
 @pytest.mark.asyncio

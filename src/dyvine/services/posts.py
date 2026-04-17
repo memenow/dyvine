@@ -163,6 +163,10 @@ class PostService:
             except StopAsyncIteration:
                 logger.warning("No posts found", extra={"sec_user_id": sec_user_id})
                 return []
+            finally:
+                aclose = getattr(posts_iterator, "aclose", None)
+                if callable(aclose):
+                    await aclose()
 
             raw_data = posts_filter._to_raw()
             aweme_list = raw_data.get("aweme_list") or []
@@ -336,6 +340,10 @@ class PostService:
                 extra={"sec_user_id": sec_user_id, "cursor": cursor, "error": str(e)},
             )
             return {}
+        finally:
+            aclose = getattr(posts_iterator, "aclose", None)
+            if callable(aclose):
+                await aclose()
 
     async def _process_posts_batch(
         self,
