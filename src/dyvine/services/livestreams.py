@@ -618,5 +618,11 @@ class LivestreamService:
         Returns:
             The current persisted operation response.
         """
-        operation = self.operation_store.get_operation(operation_id)
+        try:
+            operation = self.operation_store.get_operation(operation_id)
+        except DownloadError:
+            operation = self.operation_store.get_latest_operation_for_subject(
+                operation_id,
+                operation_type="livestream_download",
+            )
         return LiveStreamDownloadResponse(**operation.to_response())

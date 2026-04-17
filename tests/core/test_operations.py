@@ -81,3 +81,27 @@ def test_operation_store_marks_incomplete_operations_failed(tmp_path) -> None:
     assert store.get_operation(pending.operation_id).status == "failed"
     assert store.get_operation(running.operation_id).status == "failed"
     assert store.get_operation(completed.operation_id).status == "completed"
+
+
+def test_operation_store_get_latest_operation_for_subject(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    first = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-4",
+        status="pending",
+        message="scheduled",
+    )
+    second = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-4",
+        status="completed",
+        message="done",
+    )
+
+    latest = store.get_latest_operation_for_subject(
+        "room-4",
+        operation_type="livestream_download",
+    )
+
+    assert latest.operation_id == second.operation_id
+    assert latest.operation_id != first.operation_id

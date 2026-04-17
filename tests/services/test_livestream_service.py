@@ -419,3 +419,23 @@ async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
 
     with pytest.raises(LivestreamError, match="Already downloading this stream"):
         await service.download_stream("https://live.douyin.com/abc")
+
+
+@pytest.mark.asyncio
+async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-99",
+        status="completed",
+        message="done",
+        download_path=str(tmp_path / "room-99_live.flv"),
+    )
+    service = object.__new__(LivestreamService)
+    service.operation_store = store
+
+    response = await service.get_download_status("room-99")
+
+    assert response.operation_id == operation.operation_id
+    assert response.subject_id == "room-99"
+    assert response.status == "completed"

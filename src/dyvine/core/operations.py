@@ -198,6 +198,38 @@ class OperationStore:
             raise DownloadError(f"Operation {operation_id} not found")
         return operation
 
+    def get_latest_operation_for_subject(
+        self, subject_id: str, *, operation_type: str | None = None
+    ) -> OperationRecord:
+        """Fetch the most recently updated operation for a subject.
+
+        Args:
+            subject_id: Domain identifier associated with the operation.
+            operation_type: Optional logical operation type filter.
+
+        Returns:
+            The latest matching operation.
+
+        Raises:
+            DownloadError: If no operation matches the subject identifier.
+        """
+        query = """
+            SELECT * FROM operations
+            WHERE subject_id = ?
+        """
+        params: list[str] = [subject_id]
+        if operation_type is not None:
+            query += " AND operation_type = ?"
+            params.append(operation_type)
+        query += " ORDER BY updated_at DESC, created_at DESC LIMIT 1"
+
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(query, params).fetchone()
+        operation = self._from_row(row)
+        if operation is None:
+            raise DownloadError(f"Operation {subject_id} not found")
+        return operation
+
     def update_operation(self, operation_id: str, **fields: Any) -> OperationRecord:
         """Update selected fields on an operation and return the new state."""
         current = self.get_operation(operation_id)
