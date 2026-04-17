@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 import dyvine.services.livestreams as livestreams_mod
+from dyvine.core.exceptions import LivestreamError
 from dyvine.core.operations import OperationStore
 from dyvine.services.livestreams import LivestreamService
 
@@ -387,3 +388,34 @@ async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
     refreshed = store.get_operation(operation.operation_id)
     assert refreshed.status == "failed"
     assert refreshed.error == "Expected livestream artifact was not created"
+
+
+@pytest.mark.asyncio
+async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    service = object.__new__(LivestreamService)
+    service.settings = SimpleNamespace(douyin_cookie="cookie")
+    service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
+    service.download_jobs = {"room-42": object()}
+    service.user_service = None
+    service.operation_store = store
+    service.douyin_handler = None
+
+    service._parse_url = lambda url: ("live.douyin.com", "/abc", "abc")  # type: ignore[method-assign]
+
+    async def resolve_webcast_id(*args, **kwargs):
+        return "webcast-1", {"room_id": "room-42", "status": 2}
+
+    async def load_live_filter(*args, **kwargs):
+        return None
+
+    service._resolve_webcast_id = resolve_webcast_id  # type: ignore[method-assign]
+    service._load_live_filter = load_live_filter  # type: ignore[method-assign]
+    service._resolve_streams = lambda live_filter, profile: (  # type: ignore[method-assign]
+        {"HD1": "https://stream"},
+        {},
+    )
+    service._select_stream_url = lambda stream_map: "https://stream"  # type: ignore[method-assign]
+
+    with pytest.raises(LivestreamError, match="Already downloading this stream"):
+        await service.download_stream("https://live.douyin.com/abc")

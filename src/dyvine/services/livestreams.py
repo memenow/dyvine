@@ -461,9 +461,6 @@ class LivestreamService:
         if not webcast_id:
             raise LivestreamError("Unable to resolve webcast id from provided URL")
 
-        if webcast_id in self.download_jobs:
-            raise LivestreamError("Already downloading this stream")
-
         live_filter = await self._load_live_filter(webcast_id=webcast_id)
         if not live_filter and not profile_room_info:
             raise LivestreamError("Unable to fetch livestream metadata")
@@ -474,6 +471,9 @@ class LivestreamService:
             else profile_room_info or {}
         )
         room_id = str(room_info.get("room_id", webcast_id) or webcast_id)
+
+        if room_id in self.download_jobs:
+            raise LivestreamError("Already downloading this stream")
 
         status_code = room_info.get("status")
         if status_code != 2:
