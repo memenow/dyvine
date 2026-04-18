@@ -65,6 +65,10 @@ class APISettings(BaseSettings):
     cors_origins: list[str] = Field(
         default=["*"], description="List of allowed CORS origins"
     )
+    operation_db_path: str = Field(
+        default="data/douyin/state/operations.db",
+        description="Path to the SQLite database used for operation state",
+    )
 
     model_config = SettingsConfigDict(env_prefix="API_")
 
@@ -329,6 +333,11 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         """Get CORS allowed origins from API settings."""
         return self.api.cors_origins
+
+    @property
+    def operation_db_path(self) -> str:
+        """Get the operation state database path from API settings."""
+        return self.api.operation_db_path
 
     # Backward compatibility properties for legacy code
     @property

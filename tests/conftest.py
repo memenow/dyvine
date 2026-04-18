@@ -21,18 +21,21 @@ if str(SRC_DIR) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
-def reset_singletons() -> None:
-    """Reset all singleton / cached state between tests."""
+def reset_singletons(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reset cached state and isolate operation storage between tests."""
     from dyvine.core.dependencies import get_service_container
-    from dyvine.services.users import UserService
+    from dyvine.core.settings import settings
 
+    monkeypatch.setattr(
+        settings.api,
+        "operation_db_path",
+        str(tmp_path / "operations.db"),
+    )
     get_service_container.cache_clear()
-    UserService._instance = None  # type: ignore[attr-defined]
-    UserService._active_downloads = {}  # type: ignore[attr-defined]
     yield
     get_service_container.cache_clear()
-    UserService._instance = None  # type: ignore[attr-defined]
-    UserService._active_downloads = {}  # type: ignore[attr-defined]
 
 
 @pytest.fixture

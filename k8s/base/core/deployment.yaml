@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dyvine
@@ -38,6 +38,9 @@ spec:
             name: dyvine-config
         - secretRef:
             name: dyvine-secrets
+        env:
+        - name: API_OPERATION_DB_PATH
+          value: /app/data/douyin/state/operations.db
         resources:
           requests:
             memory: "256Mi"
@@ -47,7 +50,7 @@ spec:
             cpu: "500m"
         livenessProbe:
           httpGet:
-            path: /health
+            path: /livez
             port: http
           initialDelaySeconds: 30
           periodSeconds: 30
@@ -55,12 +58,26 @@ spec:
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: http
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 3
           failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /startupz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
+        volumeMounts:
+        - name: runtime-data
+          mountPath: /app/data
+        - name: runtime-logs
+          mountPath: /app/logs
+        - name: runtime-temp
+          mountPath: /app/temp_downloads
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -69,3 +86,10 @@ spec:
           capabilities:
             drop:
             - ALL
+      volumes:
+      - name: runtime-data
+        emptyDir: {}
+      - name: runtime-logs
+        emptyDir: {}
+      - name: runtime-temp
+        emptyDir: {}

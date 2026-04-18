@@ -1,6 +1,6 @@
 # Dependency Graph
 
-_Last Updated: 2026-04-07_
+_Last Updated: 2026-04-17_
 
 ## Description
 
@@ -38,9 +38,12 @@ graph LR
     Core --> Exceptions[core/exceptions]
     Core --> Logging[core/logging]
     Core --> Deps[core/dependencies]
+    Core --> Ops[core/operations]
 
     Deps --> SvcU
+    Deps --> SvcL
     Settings --> PydanticSettings[pydantic-settings]
+    Ops --> SQLite[sqlite3]
 ```
 
 <!--@auto:diagram:deps:end-->

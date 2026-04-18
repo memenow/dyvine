@@ -34,7 +34,9 @@ from typing import Any
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
+from ..services.livestreams import LivestreamService
 from ..services.users import UserService
+from .operations import OperationStore
 from .settings import settings
 
 
@@ -82,6 +84,7 @@ class ServiceContainer:
 
         Services initialized:
             - DouyinHandler: Configured with headers, proxies, and download settings
+            - OperationStore: Persistent state for asynchronous work
             - UserService: Basic user management service
 
         Note:
@@ -96,8 +99,21 @@ class ServiceContainer:
         douyin_config = self._create_douyin_config()
         self._services["douyin_handler"] = DouyinHandler(douyin_config)
 
+        # Initialize operation store
+        self._services["operation_store"] = OperationStore()
+        self._services["operation_store"].mark_incomplete_operations_failed()
+
         # Initialize user service
-        self._services["user_service"] = UserService()
+        self._services["user_service"] = UserService(
+            operation_store=self._services["operation_store"]
+        )
+
+        # Initialize livestream service
+        self._services["livestream_service"] = LivestreamService(
+            douyin_handler=self._services["douyin_handler"],
+            user_service=self._services["user_service"],
+            operation_store=self._services["operation_store"],
+        )
 
         self._initialized = True
 
@@ -173,6 +189,22 @@ class ServiceContainer:
             raise TypeError("user_service is not a UserService instance")
         return service
 
+    @property
+    def operation_store(self) -> OperationStore:
+        """Get the persistent operation store."""
+        service = self.get_service("operation_store")
+        if not isinstance(service, OperationStore):
+            raise TypeError("operation_store is not an OperationStore instance")
+        return service
+
+    @property
+    def livestream_service(self) -> LivestreamService:
+        """Get the livestream management service."""
+        service = self.get_service("livestream_service")
+        if not isinstance(service, LivestreamService):
+            raise TypeError("livestream_service is not a LivestreamService instance")
+        return service
+
 
 @lru_cache
 def get_service_container() -> ServiceContainer:
@@ -237,3 +269,8 @@ def get_user_service() -> UserService:
             return await service.get_user(user_id)
     """
     return get_service_container().user_service
+
+
+def get_livestream_service() -> LivestreamService:
+    """FastAPI dependency provider for livestream service."""
+    return get_service_container().livestream_service

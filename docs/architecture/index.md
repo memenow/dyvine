@@ -1,6 +1,6 @@
 # Architecture Diagrams Overview
 
-_Last Updated: 2026-04-07_
+_Last Updated: 2026-04-17_
 
 ## Summary
 
@@ -12,14 +12,14 @@ This directory contains five key architecture diagrams visualizing different asp
 4. **[Dependency Graph](./dependency-graph.md)**: Module and package dependencies
 5. **[Call Graph](./call-graph.md)**: Function and method call relationships
 
-These diagrams are automatically generated and updated after merges/commits to maintain traceability and single source of truth.
+These diagrams describe the current production architecture and must be updated when the implementation changes.
 
 ## Key Findings
 
-- Layered architecture with clear separation of concerns (Presentation, Business Logic, Data Access)
-- Async/await pattern throughout for high concurrency
-- External dependencies on Douyin API and Cloudflare R2 storage
-- Comprehensive error handling and correlation tracking
-- Kubernetes-ready deployment with multi-environment support
+- Layered architecture with explicit operation tracking for asynchronous downloads
+- Async/await request handling with persistent operation state
+- Dedicated liveness, readiness, and startup probes
+- Prometheus metrics exposed through an ASGI application
+- Structured error handling and request-scoped correlation tracking
 
 For detailed implementation, refer to project memories in `.serena/memories/`.

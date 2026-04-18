@@ -3,11 +3,13 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from dyvine.core.error_handlers import (
     ErrorResponse,
     dyvine_error_handler,
     generic_exception_handler,
+    http_exception_handler,
     register_error_handlers,
 )
 from dyvine.core.exceptions import (
@@ -126,10 +128,36 @@ async def test_generic_exception_handler_traceback_in_debug(
     assert "traceback" in body
 
 
+@pytest.mark.asyncio
+async def test_http_exception_handler_normalizes_response() -> None:
+    req = _make_request("cid-6")
+    resp = await http_exception_handler(
+        req, HTTPException(status_code=404, detail="nf")
+    )
+    assert resp.status_code == 404
+    body = resp.body.decode()
+    assert "HTTP_404" in body
+
+
+@pytest.mark.asyncio
+async def test_http_exception_handler_preserves_headers() -> None:
+    req = _make_request("cid-7")
+    resp = await http_exception_handler(
+        req,
+        HTTPException(
+            status_code=405,
+            detail="method not allowed",
+            headers={"Allow": "GET"},
+        ),
+    )
+    assert resp.status_code == 405
+    assert resp.headers["Allow"] == "GET"
+
+
 # ── register_error_handlers ─────────────────────────────────────────────
 
 
 def test_register_error_handlers_adds_handlers() -> None:
     app = MagicMock()
     register_error_handlers(app)
-    assert app.add_exception_handler.call_count == 2
+    assert app.add_exception_handler.call_count == 3

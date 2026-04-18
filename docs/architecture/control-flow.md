@@ -1,6 +1,6 @@
 # Control Flow Graph
 
-_Last Updated: 2026-04-07_
+_Last Updated: 2026-04-17_
 
 ## Description
 
@@ -43,8 +43,9 @@ graph TD
     HasHLS -->|Yes| SelectQuality[_select_stream_url]
 
     SelectQuality -->|No match| LiveErr
-    SelectQuality -->|Found| StartTask[create background task]
-    StartTask --> ReturnPending[Return 'pending']
+    SelectQuality -->|Found| CreateOp[Persist operation]
+    CreateOp --> StartTask[create background task]
+    StartTask --> ReturnPending[Return operation status]
 
     Process --> CallExternal[Call External API]
     CallExternal -->|Success| Store[Store Data]

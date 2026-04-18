@@ -23,6 +23,7 @@ def test_api_settings_defaults() -> None:
     assert s.debug is False
     assert s.host == "0.0.0.0"
     assert s.port == 8000
+    assert s.operation_db_path == "data/douyin/state/operations.db"
 
 
 def test_api_settings_port_too_low() -> None:
@@ -115,6 +116,7 @@ def test_settings_convenience_properties() -> None:
     assert s.version == s.api.version
     assert s.prefix == s.api.prefix
     assert s.project_name == s.api.project_name
+    assert s.operation_db_path == s.api.operation_db_path
 
 
 def test_settings_backward_compat_properties() -> None:

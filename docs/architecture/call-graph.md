@@ -1,6 +1,6 @@
 # Call Graph
 
-_Last Updated: 2026-04-07_
+_Last Updated: 2026-04-17_
 
 ## Description
 
@@ -18,6 +18,7 @@ graph TD
     RouterL --> GRI[LivestreamService.get_room_info]
     RouterL --> GDS[LivestreamService.get_download_status]
 
+    DL --> OPCreate[OperationStore.create_operation]
     DL --> PU[_parse_url]
     DL --> RWI[_resolve_webcast_id]
     DL --> LLF[_load_live_filter]
@@ -39,12 +40,14 @@ graph TD
     GRI --> ESM[_extract_stream_map]
 
     RSD --> DDL[DouyinDownloader.create_stream_tasks]
+    RSD --> OPUpdate[OperationStore.update_operation]
 
     RouterP --> SvcP[PostService]
     SvcP --> SchP[schemas.posts]
     SvcP --> ExtAPI[httpx / Douyin API]
 
     RouterU --> SvcU[UserService]
+    SvcU --> OPStore[OperationStore]
     SvcU --> Storage[R2StorageService]
     Storage --> Boto3[boto3.client]
 

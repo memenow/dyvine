@@ -13,7 +13,7 @@
 
 **Dyvine** is a production-ready, high-performance REST API designed for content management. It provides comprehensive content download, user management, live streaming, and cloud storage integration capabilities.
 
-**🎯 Core Features** • **⚡ Async Processing** • **🔄 Batch Operations** • **☁️ Cloud Integration** • **📊 Real-time Monitoring** • **🔐 Security**
+**🎯 Core Features** • **⚡ Async Processing** • **🔄 Batch Operations** • **☁️ Cloud Integration** • **📊 Observability**
 
 ## Overview
 
@@ -24,6 +24,7 @@ Dyvine provides a comprehensive API for downloading and managing content with pr
 - **📥 Content Management**: Download videos, images, and live streams
 - **👥 User Operations**: Retrieve user profiles and content analytics
 - **⚡ Batch Processing**: Efficient bulk content download operations
+- **📌 Operation Tracking**: Persistent operation records for asynchronous downloads
 - **🏗️ Architecture**: Async operations with connection pooling
 - **☁️ Cloud Storage**: Direct integration with object storage
 - **🔧 Developer Experience**:
@@ -72,16 +73,15 @@ uv sync --all-extras
    ```bash
    # Essential settings
    DOUYIN_COOKIE=your_cookie_here
-   
-   # Security (change in production)
-   SECURITY_SECRET_KEY=your-production-secret-key
-   SECURITY_API_KEY=your-production-api-key
-   
+
    # Optional: Object storage integration
    R2_ACCOUNT_ID=your_account_id
    R2_ACCESS_KEY_ID=your_access_key
    R2_SECRET_ACCESS_KEY=your_secret_key
    R2_BUCKET_NAME=your_bucket_name
+
+   # Optional: local operation state database
+   API_OPERATION_DB_PATH=data/douyin/state/operations.db
    ```
 
 ### Running the Application
@@ -142,7 +142,7 @@ POST /api/v1/livestreams/users/{user_id}/stream:download
 # Download from URL
 POST /api/v1/livestreams/stream:download
 
-# Check download status
+# Check asynchronous operation status
 GET /api/v1/livestreams/operations/{operation_id}
 ```
 
@@ -177,10 +177,10 @@ curl -X POST "http://localhost:8000/api/v1/livestreams/stream:download" \
      -d '{"url": "https://live.douyin.com/123456789"}'
 ```
 
-**Check Livestream Download Status**:
+**Check Asynchronous Operation Status**:
 
 ```bash
-curl "http://localhost:8000/api/v1/livestreams/operations/ROOM_ID"
+curl "http://localhost:8000/api/v1/livestreams/operations/OPERATION_ID"
 ```
 
 ## Testing
@@ -299,9 +299,8 @@ docker run -d \
 
 ### Production Considerations
 
-- **Security**: Use proper secrets management (HashiCorp Vault)
-- **Monitoring**: Set up Prometheus metrics and logging aggregation
-- **High Availability**: Configure multiple replicas and autoscaling
+- **Monitoring**: Scrape `/metrics` and aggregate structured logs
+- **Horizontal Scaling**: Use a shared operation backend before increasing replicas beyond 1
 - **Backup**: Implement persistent volume and log archival strategies
 
 ## Monitoring and Logging
@@ -309,23 +308,38 @@ docker run -d \
 ### Health Monitoring
 
 ```http
+GET /livez
+GET /readyz
+GET /startupz
 GET /health
+GET /metrics
 ```
 
 Response includes:
 
-- Application status and version
-- System uptime and resource usage
-- Request statistics
+- Liveness, readiness, and startup signals
+- Application status, version, and uptime
 - Memory and CPU metrics
+- Prometheus-compatible metrics at `/metrics`
 
 ### Logging Features
 
 - Structured JSON logging for machine readability
 - Request correlation tracking
-- Automatic log rotation and archival
+- Async-safe request context propagation
 - Development/production formatting modes
 - Performance metrics collection
+
+### Security Notes
+
+- Dyvine currently relies on Douyin session cookies for upstream access.
+- Built-in API authentication and rate limiting are not enforced by the application.
+- If you deploy the API on the public internet, place it behind an API gateway, ingress policy, or service mesh that enforces authentication, authorization, and rate limits.
+
+### Kubernetes Notes
+
+- The bundled Kubernetes manifests run the API as a single replica because the default operation store uses a pod-local SQLite file.
+- Do not increase replicas or enable autoscaling until you replace the SQLite-backed operation store with a shared backend.
 
 ### Development Commands
 

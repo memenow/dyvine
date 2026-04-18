@@ -6,7 +6,10 @@ import pytest
 from fastapi import HTTPException
 
 from dyvine.core.exceptions import UserNotFoundError
-from dyvine.schemas.livestreams import LiveStreamURLDownloadRequest
+from dyvine.schemas.livestreams import (
+    LiveStreamDownloadResponse,
+    LiveStreamURLDownloadRequest,
+)
 from dyvine.services.livestreams import DownloadError, LivestreamError
 
 
@@ -27,12 +30,21 @@ async def test_download_livestream_success(
 ) -> None:
     from dyvine.routers.livestreams import download_livestream
 
-    mock_livestream_service.download_stream.return_value = ("success", "/path")
+    mock_livestream_service.download_stream.return_value = LiveStreamDownloadResponse(
+        operation_id="op1",
+        operation_type="livestream_download",
+        subject_id="room-1",
+        status="pending",
+        message="scheduled",
+        download_path="/path",
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+    )
 
     result = await download_livestream(
         service=mock_livestream_service, user_id="u1"
     )
-    assert result.status == "success"
+    assert result.status == "pending"
     assert result.download_path == "/path"
 
 
@@ -105,13 +117,22 @@ async def test_download_livestream_url_success(
 ) -> None:
     from dyvine.routers.livestreams import download_livestream_url
 
-    mock_livestream_service.download_stream.return_value = ("success", "/p")
+    mock_livestream_service.download_stream.return_value = LiveStreamDownloadResponse(
+        operation_id="op2",
+        operation_type="livestream_download",
+        subject_id="room-2",
+        status="pending",
+        message="scheduled",
+        download_path="/p",
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:00+00:00",
+    )
     request = LiveStreamURLDownloadRequest(url="https://live.douyin.com/123")
 
     result = await download_livestream_url(
         request=request, service=mock_livestream_service
     )
-    assert result.status == "success"
+    assert result.status == "pending"
 
 
 @pytest.mark.asyncio
@@ -139,12 +160,24 @@ async def test_get_download_status_success(
 ) -> None:
     from dyvine.routers.livestreams import get_download_status
 
-    mock_livestream_service.get_download_status.return_value = "/path/file.flv"
+    mock_livestream_service.get_download_status.return_value = (
+        LiveStreamDownloadResponse(
+            operation_id="op1",
+            operation_type="livestream_download",
+            subject_id="room-1",
+            status="completed",
+            message="done",
+            download_path="/path/file.flv",
+            progress=100.0,
+            created_at="2026-04-17T00:00:00+00:00",
+            updated_at="2026-04-17T00:00:01+00:00",
+        )
+    )
 
     result = await get_download_status(
         service=mock_livestream_service, operation_id="op1"
     )
-    assert result.status == "success"
+    assert result.status == "completed"
 
 
 @pytest.mark.asyncio

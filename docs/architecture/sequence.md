@@ -1,6 +1,6 @@
 # Sequence Diagram
 
-_Last Updated: 2026-04-07_
+_Last Updated: 2026-04-17_
 
 ## Description
 
@@ -14,6 +14,7 @@ sequenceDiagram
     participant R as FastAPI Router
     participant LS as LivestreamService
     participant US as UserService
+    participant OP as OperationStore
     participant F2 as f2 / Douyin API
     participant DL as DouyinDownloader
 
@@ -35,13 +36,15 @@ sequenceDiagram
     F2-->>LS: live_filter
     LS->>LS: _resolve_streams()
     LS->>LS: _select_stream_url()
+    LS->>OP: create operation
     LS->>DL: create_task(_run_stream_download)
-    LS-->>R: ("pending", target_path)
-    R-->>C: 200 {status: "pending", download_path: "..."}
+    LS-->>R: OperationResponse
+    R-->>C: 202 {operation_id: "...", status: "pending"}
 
     Note over DL: Background download runs asynchronously
     DL->>F2: create_stream_tasks()
     F2-->>DL: stream segments
+    DL->>OP: update status / progress / result
 ```
 
 <!--@auto:diagram:seq:end-->

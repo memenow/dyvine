@@ -39,10 +39,28 @@ def test_livestream_url_download_request_optional_output_path() -> None:
 
 
 def test_livestream_download_response_fields() -> None:
-    resp = LiveStreamDownloadResponse(status="success", download_path="/p")
-    assert resp.status == "success"
+    resp = LiveStreamDownloadResponse(
+        operation_id="op1",
+        operation_type="livestream_download",
+        subject_id="room-1",
+        status="completed",
+        message="done",
+        download_path="/p",
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:01+00:00",
+    )
+    assert resp.status == "completed"
     assert resp.error is None
 
-    resp2 = LiveStreamDownloadResponse(status="error", error="fail")
+    resp2 = LiveStreamDownloadResponse(
+        operation_id="op2",
+        operation_type="livestream_download",
+        subject_id="room-2",
+        status="failed",
+        message="fail",
+        error="fail",
+        created_at="2026-04-17T00:00:00+00:00",
+        updated_at="2026-04-17T00:00:01+00:00",
+    )
     assert resp2.download_path is None
     assert resp2.error == "fail"

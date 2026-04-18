@@ -48,3 +48,31 @@ def test_get_service_container_returns_singleton(
     container_two = dependencies.get_service_container()
 
     assert container_one is container_two
+
+
+def test_service_container_reconciles_incomplete_operations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
+    monkeypatch.setattr(
+        dependencies.settings.api,
+        "operation_db_path",
+        str(tmp_path / "operations.db"),
+    )
+
+    preexisting = dependencies.OperationStore(str(tmp_path / "operations.db"))
+    operation = preexisting.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="running",
+        message="running",
+    )
+
+    container = dependencies.ServiceContainer()
+    container.initialize()
+
+    refreshed = container.operation_store.get_operation(operation.operation_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error == "Operation interrupted during process restart"

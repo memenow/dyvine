@@ -5,9 +5,15 @@ access or the f2 runtime, making them fast and deterministic.
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+import dyvine.services.livestreams as livestreams_mod
+from dyvine.core.exceptions import LivestreamError
+from dyvine.core.operations import OperationStore
 from dyvine.services.livestreams import LivestreamService
 
 # ---------------------------------------------------------------------------
@@ -331,3 +337,122 @@ class TestResolveStreams:
         hls, flv = svc._resolve_streams(None, None)
         assert hls == {}
         assert flv == {}
+
+
+@pytest.mark.asyncio
+async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-1",
+        status="pending",
+        message="scheduled",
+        download_path=str(tmp_path / "room-1_live.flv"),
+    )
+    service = object.__new__(LivestreamService)
+    service.operation_store = store
+    service.download_jobs = {"room-1": object()}
+
+    class FakeDownloader:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeDownloader":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def create_stream_tasks(
+            self,
+            download_kwargs: dict[str, Any],
+            webcast_payload: dict[str, Any],
+            output_dir: Path,
+        ) -> None:
+            return None
+
+    original_downloader = livestreams_mod.DouyinDownloader
+    livestreams_mod.DouyinDownloader = FakeDownloader
+    try:
+        await service._run_stream_download(
+            operation.operation_id,
+            "room-1",
+            {},
+            {},
+            tmp_path,
+            tmp_path / "room-1_live.flv",
+        )
+    finally:
+        livestreams_mod.DouyinDownloader = original_downloader
+
+    refreshed = store.get_operation(operation.operation_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error == "Expected livestream artifact was not created"
+    assert refreshed.download_path is None
+
+
+@pytest.mark.asyncio
+async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    service = object.__new__(LivestreamService)
+    service.settings = SimpleNamespace(douyin_cookie="cookie")
+    service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
+    service.download_jobs = {"room-42": object()}
+    service.user_service = None
+    service.operation_store = store
+    service.douyin_handler = None
+
+    service._parse_url = lambda url: ("live.douyin.com", "/abc", "abc")  # type: ignore[method-assign]
+
+    async def resolve_webcast_id(*args, **kwargs):
+        return "webcast-1", {"room_id": "room-42", "status": 2}
+
+    async def load_live_filter(*args, **kwargs):
+        return None
+
+    service._resolve_webcast_id = resolve_webcast_id  # type: ignore[method-assign]
+    service._load_live_filter = load_live_filter  # type: ignore[method-assign]
+    service._resolve_streams = lambda live_filter, profile: (  # type: ignore[method-assign]
+        {"HD1": "https://stream"},
+        {},
+    )
+    service._select_stream_url = lambda stream_map: "https://stream"  # type: ignore[method-assign]
+
+    with pytest.raises(LivestreamError, match="Already downloading this stream"):
+        await service.download_stream("https://live.douyin.com/abc")
+
+
+@pytest.mark.asyncio
+async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-99",
+        status="completed",
+        message="done",
+        download_path=str(tmp_path / "room-99_live.flv"),
+    )
+    service = object.__new__(LivestreamService)
+    service.operation_store = store
+
+    response = await service.get_download_status("room-99")
+
+    assert response.operation_id == operation.operation_id
+    assert response.subject_id == "room-99"
+    assert response.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_get_download_status_rejects_non_livestream_operation(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="pending",
+        message="scheduled",
+    )
+    service = object.__new__(LivestreamService)
+    service.operation_store = store
+
+    with pytest.raises(livestreams_mod.DownloadError):
+        await service.get_download_status(operation.operation_id)

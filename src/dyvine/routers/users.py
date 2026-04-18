@@ -56,9 +56,10 @@ Dependencies:
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from ..core.dependencies import get_user_service
+from ..core.exceptions import DownloadError
 from ..core.logging import ContextLogger
 from ..schemas.users import DownloadResponse, UserResponse
-from ..services.users import DownloadError, UserNotFoundError, UserService
+from ..services.users import UserNotFoundError, UserService
 
 # Create router with comprehensive error response documentation
 router = APIRouter(
@@ -153,6 +154,7 @@ async def get_user(
 
 @router.post(
     "/{user_id}/content:download",
+    status_code=202,
     response_model=DownloadResponse,
     summary="Download user content",
     description="Initiates a download task for a user's content with specified options",
