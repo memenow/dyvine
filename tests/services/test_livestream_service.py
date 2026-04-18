@@ -440,3 +440,19 @@ async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
     assert response.operation_id == operation.operation_id
     assert response.subject_id == "room-99"
     assert response.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_get_download_status_rejects_non_livestream_operation(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="pending",
+        message="scheduled",
+    )
+    service = object.__new__(LivestreamService)
+    service.operation_store = store
+
+    with pytest.raises(livestreams_mod.DownloadError):
+        await service.get_download_status(operation.operation_id)

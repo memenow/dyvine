@@ -258,6 +258,8 @@ class UserService:
             DownloadError: If the specified download task is not found.
         """
         operation = self.operation_store.get_operation(task_id)
+        if operation.operation_type != "user_content_download":
+            raise DownloadError(f"Download task {task_id} not found")
         return DownloadResponse(**operation.to_response())
 
     async def _process_download(

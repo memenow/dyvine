@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from dyvine.core.operations import OperationStore
 from dyvine.services.users import DownloadError, DownloadResponse, UserService
 
 
@@ -64,6 +65,21 @@ async def test_get_download_status_raises_for_unknown_task() -> None:
     service = UserService()
     with pytest.raises(DownloadError):
         await service.get_download_status("missing-task")
+
+
+@pytest.mark.asyncio
+async def test_get_download_status_rejects_non_user_operation(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-1",
+        status="pending",
+        message="scheduled",
+    )
+    service = UserService(operation_store=store)
+
+    with pytest.raises(DownloadError):
+        await service.get_download_status(operation.operation_id)
 
 
 @pytest.mark.asyncio
