@@ -336,6 +336,88 @@ async def test_process_download_runs_when_only_likes_requested(
 
 
 @pytest.mark.asyncio
+async def test_process_download_breaks_when_page_count_exceeds_cap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unbounded cursor bump must not spin the outer loop forever.
+
+    Simulate an upstream that returns a non-empty page with a sticky
+    ``max_cursor`` and ``has_more=True`` on every call. Without the
+    ``max_pages`` guard the outer ``while`` loop relies on
+    ``downloaded_count >= total_posts`` to stop, which never fires when
+    uploads are slower than the fetch rate or when the upstream lies
+    about its total. The guard must terminate the loop deterministically
+    after ``max_items // 100 + 20`` iterations.
+    """
+    from dyvine.services import users as users_mod
+
+    mock_user_data = MagicMock()
+    mock_user_data.nickname = "sticky-cursor-user"
+    mock_user_data.aweme_count = 100
+
+    fetch_profile = AsyncMock(return_value=mock_user_data)
+
+    sticky_batch = MagicMock()
+    sticky_batch.has_aweme = True
+    sticky_batch.aweme_id = ["aw"]
+    sticky_batch.has_more = True
+    sticky_batch.max_cursor = 0
+    sticky_batch._to_list = MagicMock(return_value=[])
+
+    call_count = 0
+
+    async def fake_fetch_posts(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal call_count
+        call_count += 1
+        yield sticky_batch
+
+    class FakeDownloader:
+        create_download_tasks = AsyncMock()
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        fetch_user_profile = fetch_profile
+        fetch_user_post_videos = staticmethod(fake_fetch_posts)
+        downloader = FakeDownloader()
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    # The production loop sleeps five seconds between pages. Skip that so
+    # the test terminates in milliseconds.
+    monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
+    monkeypatch.chdir(tmp_path)
+
+    service = UserService()
+    operation = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="sticky-cursor-user",
+        status="pending",
+        message="scheduled",
+    )
+
+    await service._process_download(
+        operation.operation_id,
+        user_id="sticky-cursor-user",
+        include_posts=True,
+        include_likes=False,
+        max_items=50,  # max_pages = 50 // 100 + 20 = 20
+    )
+
+    # The fetcher must have been invoked, but not more than ``max_pages``
+    # times. The outer loop breaks once ``page_count > max_pages``.
+    assert (
+        1 <= call_count <= 21
+    ), f"Expected the outer loop to break near max_pages=20, got {call_count} calls"
+    refreshed = await service.get_download_status(operation.operation_id)
+    # The loop terminated after exhausting ``max_pages`` without reaching
+    # ``total_posts``, so the completion branch records ``partial`` with
+    # the 20 items that did download.
+    assert refreshed.status == "partial"
+    assert refreshed.completed_items == 20
+
+
+@pytest.mark.asyncio
 async def test_process_download_likes_reports_progress_as_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

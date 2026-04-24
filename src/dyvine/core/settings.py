@@ -123,7 +123,7 @@ class SecuritySettings(BaseSettings):
 
         if (
             v == "change-me-in-production"
-            and os.getenv("API_DEBUG", "true").lower() != "true"
+            and os.getenv("API_DEBUG", "false").lower() != "true"
         ):
             raise ValueError(f"{info.field_name} must be changed in production")
         return v

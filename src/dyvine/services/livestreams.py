@@ -9,6 +9,7 @@ from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
 from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 
+from ..core.background import BackgroundTaskRegistry
 from ..core.exceptions import (
     DownloadError,
     LivestreamError,
@@ -37,14 +38,27 @@ class LivestreamService:
     the necessary operations.
     """
 
+    # Class-level default so tests that instantiate via ``object.__new__``
+    # (bypassing ``__init__``) still see a ``None`` registry and fall through
+    # to the bare-``create_task`` branch rather than raising ``AttributeError``.
+    _task_registry: BackgroundTaskRegistry | None = None
+
     def __init__(
         self,
         *,
         douyin_handler: DouyinHandler,
         user_service: UserService,
         operation_store: OperationStore,
+        task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
-        """Initialize the livestream service using injected dependencies."""
+        """Initialize the livestream service using injected dependencies.
+
+        Args:
+            task_registry: Optional registry that owns long-lived stream
+                downloads. When omitted the service falls back to
+                ``asyncio.create_task`` so unit tests need not build the
+                full service container.
+        """
         self.settings = settings
         base_config = self._build_douyin_config()
         self.downloader_config = {
@@ -58,6 +72,7 @@ class LivestreamService:
         # metadata await in ``download_stream``.
         self._dedupe_lock: asyncio.Lock | None = None
         self.user_service = user_service
+        self._task_registry = task_registry
         self.operation_store = operation_store
         self.douyin_handler = douyin_handler
         # f2's Bark push notifications are meant for interactive CLI use;
@@ -561,16 +576,24 @@ class LivestreamService:
                 },
             )
 
-            job = asyncio.create_task(
-                self._run_stream_download(
-                    operation.operation_id,
-                    room_id,
-                    download_kwargs,
-                    webcast_payload,
-                    output_dir,
-                    target_file,
-                )
+            coro = self._run_stream_download(
+                operation.operation_id,
+                room_id,
+                download_kwargs,
+                webcast_payload,
+                output_dir,
+                target_file,
             )
+            # Route through the shared registry so the FastAPI lifespan can
+            # drain in-flight recordings before the R2 / audit executors
+            # are reaped. Fall back to ``create_task`` for isolated unit
+            # tests that bypass the container.
+            if self._task_registry is not None:
+                job = self._task_registry.spawn(
+                    coro, name=f"livestream-download-{room_id}"
+                )
+            else:
+                job = asyncio.create_task(coro)
             self.download_jobs[room_id] = job
 
         return LiveStreamDownloadResponse(**operation.to_response())

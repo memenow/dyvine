@@ -11,7 +11,12 @@ data:
   API_DEBUG: "false"
   API_HOST: "0.0.0.0"
   API_PORT: "8000"
-  R2_ENDPOINT: "https://b619b24f5068c8260d6e3782f29e497d.r2.cloudflarestorage.com"
+  # R2_ENDPOINT is a template. ``{account_id}`` is interpolated at runtime
+  # by ``R2StorageService.__init__`` with ``settings.r2_account_id`` (sourced
+  # from the ``dyvine-secrets`` Secret). Keeping the account id out of the
+  # ConfigMap avoids leaking the Cloudflare account identifier in a public
+  # repository.
+  R2_ENDPOINT: "https://{account_id}.r2.cloudflarestorage.com"
   R2_BUCKET_NAME: "mmn-dev-data"
   DOUYIN_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
   DOUYIN_REFERER: "https://www.douyin.com/"

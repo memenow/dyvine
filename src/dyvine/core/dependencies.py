@@ -37,6 +37,7 @@ from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..services.livestreams import LivestreamService
 from ..services.users import UserService
+from .background import BackgroundTaskRegistry
 from .operations import OperationStore
 from .settings import settings
 
@@ -89,6 +90,11 @@ class ServiceContainer:
         self._r2_executor: ThreadPoolExecutor | None = None
         self._sqlite_executor: ThreadPoolExecutor | None = None
         self._audit_executor: ThreadPoolExecutor | None = None
+        # Shared registry for long-lived background downloads. Services
+        # retrieve this via dependency injection and call ``spawn`` instead
+        # of bare ``asyncio.create_task`` so the lifespan can drain them
+        # before the executor pools are reaped.
+        self._background_tasks = BackgroundTaskRegistry()
 
     async def initialize(self) -> None:
         """Initialize all registered services with their configurations.
@@ -147,7 +153,10 @@ class ServiceContainer:
         await operation_store.mark_incomplete_operations_failed()
 
         # Initialize user service and wire its R2 client to the R2 executor.
-        user_service = UserService(operation_store=operation_store)
+        user_service = UserService(
+            operation_store=operation_store,
+            task_registry=self._background_tasks,
+        )
         user_service.storage.set_executor(self._r2_executor)
         self._services["user_service"] = user_service
 
@@ -156,6 +165,7 @@ class ServiceContainer:
             douyin_handler=self._services["douyin_handler"],
             user_service=user_service,
             operation_store=operation_store,
+            task_registry=self._background_tasks,
         )
 
         self._initialized = True
@@ -175,6 +185,12 @@ class ServiceContainer:
         """
         if not self._initialized:
             return
+
+        # Drain fire-and-forget downloads before tearing down the executor
+        # pools they dispatch onto. Any task still running after the
+        # registry's drain timeout is cancelled so the shutdown cannot hang
+        # on a stuck upstream request.
+        await self._background_tasks.drain()
 
         # Let the operation store close its per-thread reader connections
         # before we reap the sqlite executor that owns those worker threads.

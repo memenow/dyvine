@@ -15,7 +15,12 @@ from dyvine.core.settings import (
 # ── APISettings ──────────────────────────────────────────────────────────
 
 
-def test_api_settings_defaults() -> None:
+def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The shared test conftest sets ``API_DEBUG=true`` so the
+    # production-only validator in ``SecuritySettings`` does not fire on the
+    # sentinel defaults. Drop it here so we are asserting the true
+    # out-of-the-box defaults rather than our test-runtime override.
+    monkeypatch.delenv("API_DEBUG", raising=False)
     s = APISettings()
     assert s.version == "1.0.0"
     assert s.prefix == "/api/v1"
@@ -51,6 +56,18 @@ def test_security_settings_rejects_defaults_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("API_DEBUG", "false")
+    with pytest.raises(ValidationError):
+        SecuritySettings()
+
+
+def test_security_settings_rejects_defaults_when_api_debug_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unset ``API_DEBUG`` must be treated as "not debug", matching the
+    # production default. Earlier versions defaulted the unset case to
+    # ``"true"``, which silently bypassed the ``change-me-in-production``
+    # validator whenever operators forgot to set the variable explicitly.
+    monkeypatch.delenv("API_DEBUG", raising=False)
     with pytest.raises(ValidationError):
         SecuritySettings()
 
