@@ -9,6 +9,12 @@ metadata:
     app.kubernetes.io/part-of: dyvine
 spec:
   replicas: 1
+  # Recreate is required because ``runtime-data`` is backed by a
+  # ReadWriteOnce PVC. A rolling update would spin up a surge Pod that
+  # cannot attach the volume (on multi-node clusters) or would briefly
+  # contend for the same SQLite writer (on single-node clusters).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: dyvine
