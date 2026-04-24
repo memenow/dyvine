@@ -88,6 +88,20 @@ jobs:
         # forks cannot access production secrets.
         docker build -t scan-target:${{ github.sha }} .
 
+    - name: Print vulnerability table for log visibility
+      # Runs first, non-fatal, so the GitHub Actions log always shows the
+      # CVE list even when the SARIF upload step fails or the gate below
+      # exits with code 1. Without this, a gate failure leaves no
+      # actionable output in stdout because the SARIF step writes to a
+      # file only.
+      uses: aquasecurity/trivy-action@v0.35.0
+      with:
+        image-ref: 'scan-target:${{ github.sha }}'
+        format: 'table'
+        exit-code: '0'
+        severity: 'HIGH,CRITICAL'
+        ignore-unfixed: true
+
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@v0.35.0
       with:
