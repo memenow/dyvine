@@ -462,9 +462,45 @@ async def liveness_probe(request: Request) -> JSONResponse:
     tags=["System"],
 )
 async def readiness_probe(request: Request) -> JSONResponse:
-    """Return readiness based on required runtime dependencies."""
+    """Return readiness based on required runtime dependencies.
+
+    The probe inspects every dependency required to serve a real request
+    and fails fast (HTTP 503) if any of them are missing or unreachable.
+    The checks are intentionally conservative: a Pod that cannot accept
+    work must not be routed traffic by the orchestrator.
+    """
     correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
-    ready = bool(settings.douyin.cookie and hasattr(app.state, "container"))
+
+    # Douyin API authentication cookie must be configured to reach upstream.
+    douyin_ok = bool(settings.douyin.cookie)
+    douyin_status = "configured" if douyin_ok else "missing_credentials"
+
+    # Service container must be wired before any request handler runs.
+    container = getattr(app.state, "container", None)
+    container_ok = container is not None
+    container_status = "initialized" if container_ok else "missing"
+
+    # Operation store backs asynchronous workflows; a broken SQLite path
+    # makes content downloads fail at the first write.
+    operation_store_ok = False
+    operation_store_status = "missing"
+    if container is not None:
+        try:
+            container.operation_store.healthcheck()
+            operation_store_ok = True
+            operation_store_status = "available"
+        except Exception:
+            operation_store_ok = False
+            operation_store_status = "unavailable"
+
+    # R2 storage credentials, bucket, and endpoint are all required to
+    # persist downloaded content. Delegate to ``R2Settings.is_configured``
+    # so ``/readyz`` and ``R2StorageService`` stay in lockstep on the
+    # exact fields a real upload needs.
+    r2_ok = settings.r2.is_configured
+    r2_status = "configured" if r2_ok else "missing_credentials"
+
+    ready = douyin_ok and container_ok and operation_store_ok and r2_ok
     readiness_status_code = (
         status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE
     )
@@ -473,16 +509,10 @@ async def readiness_probe(request: Request) -> JSONResponse:
         content={
             "status": "ready" if ready else "not_ready",
             "dependencies": {
-                "douyin_api": (
-                    "configured"
-                    if settings.douyin.cookie
-                    else "missing_credentials"
-                ),
-                "service_container": (
-                    "initialized"
-                    if hasattr(app.state, "container")
-                    else "missing"
-                ),
+                "douyin_api": douyin_status,
+                "service_container": container_status,
+                "operation_store": operation_store_status,
+                "r2_storage": r2_status,
             },
             "correlation_id": correlation_id,
         },

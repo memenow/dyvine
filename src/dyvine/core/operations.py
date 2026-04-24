@@ -70,11 +70,25 @@ class OperationStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, check_same_thread=False)
-        connection.row_factory = sqlite3.Row
+        try:
+            connection.row_factory = sqlite3.Row
+            # synchronous is a per-connection PRAGMA, so reapply on every connect.
+            connection.execute("PRAGMA synchronous=NORMAL;")
+            connection.execute("PRAGMA busy_timeout=5000;")
+        except Exception:
+            # A post-open configuration failure (e.g. attempting to set
+            # synchronous on a read-only WAL database) must not leak the
+            # already-opened handle, or Python 3.13 will flag it as an
+            # unclosed database on garbage collection.
+            connection.close()
+            raise
         return connection
 
     def _initialize(self) -> None:
         with self._lock, closing(self._connect()) as connection:
+            # WAL is a database-level mode that persists across connections
+            # and enables concurrent readers while a writer is active.
+            connection.execute("PRAGMA journal_mode=WAL;")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS operations (
@@ -94,7 +108,36 @@ class OperationStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_operations_subject_type_updated
+                ON operations (subject_id, operation_type, updated_at DESC)
+                """
+            )
             connection.commit()
+
+    def healthcheck(self) -> None:
+        """Verify the backing store is reachable and writable.
+
+        Raises:
+            Exception: Propagates any sqlite3.Error / OSError from opening
+                the connection or executing a trivial write-capable probe,
+                so callers can treat failure as "not ready".
+        """
+        # BEGIN IMMEDIATE acquires a RESERVED lock, which proves the database
+        # file is writable without mutating any rows. The rollback lives in
+        # ``finally`` so a failed BEGIN never leaves a pending transaction
+        # on the connection -- Python 3.13 turns that into a ResourceWarning
+        # at close time, which becomes an error under ``-W error``.
+        with closing(self._connect()) as connection:
+            try:
+                connection.execute("SELECT 1").fetchone()
+                connection.execute("BEGIN IMMEDIATE")
+            finally:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
 
     @staticmethod
     def _now() -> str:
@@ -119,8 +162,10 @@ class OperationStore:
                 if row["completed_items"] is not None
                 else None
             ),
-            download_path=str(row["download_path"]) if row["download_path"] else None,
-            error=str(row["error"]) if row["error"] else None,
+            download_path=(
+                str(row["download_path"]) if row["download_path"] is not None else None
+            ),
+            error=str(row["error"]) if row["error"] is not None else None,
             metadata=json.loads(str(row["metadata"])) if row["metadata"] else {},
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),

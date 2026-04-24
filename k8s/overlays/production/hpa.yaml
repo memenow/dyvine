@@ -1,3 +1,6 @@
+# HPA intentionally pinned to a single replica because the operation store
+# uses a RWO PVC with a pod-local SQLite writer. Restore dynamic scaling
+# after migrating to a shared operation backend.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

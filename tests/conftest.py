@@ -21,9 +21,7 @@ if str(SRC_DIR) not in sys.path:
 
 
 @pytest.fixture(autouse=True)
-def reset_singletons(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def reset_singletons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reset cached state and isolate operation storage between tests."""
     from dyvine.core.dependencies import get_service_container
     from dyvine.core.settings import settings

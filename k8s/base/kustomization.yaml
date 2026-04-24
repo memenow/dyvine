@@ -10,6 +10,7 @@ resources:
   - core/secret.yaml
   - core/deployment.yaml
   - core/service.yaml
+  - core/pvc.yaml
 
 commonLabels:
   app.kubernetes.io/managed-by: kustomize

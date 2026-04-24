@@ -33,9 +33,7 @@ def mock_post_service() -> MagicMock:
 async def test_get_post_success(mock_post_service: MagicMock) -> None:
     from dyvine.routers.posts import get_post
 
-    detail = PostDetail(
-        aweme_id="123", create_time=0, post_type=PostType.VIDEO
-    )
+    detail = PostDetail(aweme_id="123", create_time=0, post_type=PostType.VIDEO)
     mock_post_service.get_post_detail.return_value = detail
 
     result = await get_post(service=mock_post_service, post_id="123")
@@ -146,7 +144,5 @@ async def test_download_user_posts_download_error(
     mock_post_service.download_all_user_posts.side_effect = DownloadError("fail")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_user_posts(
-            service=mock_post_service, user_id="u1", max_cursor=0
-        )
+        await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
     assert exc_info.value.status_code == 500

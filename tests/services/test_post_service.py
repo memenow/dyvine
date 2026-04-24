@@ -361,9 +361,7 @@ async def test_download_post_content_success() -> None:
     from pathlib import Path
 
     svc = _build_service(handler)
-    await svc._download_post_content(
-        {"aweme_id": "123"}, PostType.VIDEO, Path("/tmp")
-    )
+    await svc._download_post_content({"aweme_id": "123"}, PostType.VIDEO, Path("/tmp"))
     handler.downloader.create_download_tasks.assert_awaited_once()
 
 

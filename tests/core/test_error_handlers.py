@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,17 +43,13 @@ def test_error_response_basic() -> None:
 
 
 def test_error_response_includes_details() -> None:
-    resp = ErrorResponse.create_response(
-        400, "bad", details={"field": "name"}
-    )
+    resp = ErrorResponse.create_response(400, "bad", details={"field": "name"})
     body = resp.body.decode()
     assert "name" in body
 
 
 def test_error_response_includes_correlation_id() -> None:
-    resp = ErrorResponse.create_response(
-        400, "bad", correlation_id="abc-123"
-    )
+    resp = ErrorResponse.create_response(400, "bad", correlation_id="abc-123")
     body = resp.body.decode()
     assert "abc-123" in body
 
@@ -152,6 +149,20 @@ async def test_http_exception_handler_preserves_headers() -> None:
     )
     assert resp.status_code == 405
     assert resp.headers["Allow"] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_http_exception_handler_handles_none_detail() -> None:
+    req = _make_request("cid-8")
+    exc = HTTPException(status_code=500, detail=None)
+    # Starlette substitutes a default HTTP phrase when ``detail`` is ``None``;
+    # override it to exercise the genuine ``None`` branch in the handler.
+    exc.detail = None
+    resp = await http_exception_handler(req, exc)
+    assert resp.status_code == 500
+    payload = json.loads(resp.body)
+    assert payload["message"] == ""
+    assert payload["error_code"] == "HTTP_500"
 
 
 # ── register_error_handlers ─────────────────────────────────────────────

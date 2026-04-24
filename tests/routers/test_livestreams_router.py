@@ -41,9 +41,7 @@ async def test_download_livestream_success(
         updated_at="2026-04-17T00:00:00+00:00",
     )
 
-    result = await download_livestream(
-        service=mock_livestream_service, user_id="u1"
-    )
+    result = await download_livestream(service=mock_livestream_service, user_id="u1")
     assert result.status == "pending"
     assert result.download_path == "/path"
 
@@ -57,9 +55,7 @@ async def test_download_livestream_user_not_found(
     mock_livestream_service.download_stream.side_effect = UserNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream(
-            service=mock_livestream_service, user_id="bad"
-        )
+        await download_livestream(service=mock_livestream_service, user_id="bad")
     assert exc_info.value.status_code == 404
 
 
@@ -72,9 +68,7 @@ async def test_download_livestream_download_error(
     mock_livestream_service.download_stream.side_effect = DownloadError("fail")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream(
-            service=mock_livestream_service, user_id="u1"
-        )
+        await download_livestream(service=mock_livestream_service, user_id="u1")
     assert exc_info.value.status_code == 500
 
 
@@ -87,9 +81,7 @@ async def test_download_livestream_livestream_error(
     mock_livestream_service.download_stream.side_effect = LivestreamError("no stream")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream(
-            service=mock_livestream_service, user_id="u1"
-        )
+        await download_livestream(service=mock_livestream_service, user_id="u1")
     assert exc_info.value.status_code == 404
 
 
@@ -102,9 +94,7 @@ async def test_download_livestream_unexpected_error(
     mock_livestream_service.download_stream.side_effect = RuntimeError("boom")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream(
-            service=mock_livestream_service, user_id="u1"
-        )
+        await download_livestream(service=mock_livestream_service, user_id="u1")
     assert exc_info.value.status_code == 500
 
 
@@ -145,9 +135,7 @@ async def test_download_livestream_url_livestream_error(
     request = LiveStreamURLDownloadRequest(url="https://live.douyin.com/123")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream_url(
-            request=request, service=mock_livestream_service
-        )
+        await download_livestream_url(request=request, service=mock_livestream_service)
     assert exc_info.value.status_code == 404
 
 
@@ -189,7 +177,5 @@ async def test_get_download_status_not_found(
     mock_livestream_service.get_download_status.side_effect = DownloadError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_download_status(
-            service=mock_livestream_service, operation_id="bad"
-        )
+        await get_download_status(service=mock_livestream_service, operation_id="bad")
     assert exc_info.value.status_code == 404

@@ -13,9 +13,7 @@ from dyvine.services.storage import (
 )
 
 
-def _build_service(
-    *, with_client: bool = False
-) -> R2StorageService:
+def _build_service(*, with_client: bool = False) -> R2StorageService:
     """Create R2StorageService without boto3 initialization."""
     svc = object.__new__(R2StorageService)
     if with_client:
@@ -49,8 +47,10 @@ def test_generate_livestream_path_varying_inputs() -> None:
 def test_generate_metadata_default_language_and_version() -> None:
     svc = _build_service()
     md = svc.generate_metadata(
-        author="a", category=ContentType.POSTS,
-        content_type="video/mp4", source="test",
+        author="a",
+        category=ContentType.POSTS,
+        content_type="video/mp4",
+        source="test",
     )
     assert md["language"] == "zh-CN"
     assert md["version"] == "1.0.0"
@@ -59,9 +59,12 @@ def test_generate_metadata_default_language_and_version() -> None:
 def test_generate_metadata_custom_language_and_version() -> None:
     svc = _build_service()
     md = svc.generate_metadata(
-        author="a", category=ContentType.LIVESTREAM,
-        content_type="video/mp4", source="test",
-        language="ja-JP", version="2.0.0",
+        author="a",
+        category=ContentType.LIVESTREAM,
+        content_type="video/mp4",
+        source="test",
+        language="ja-JP",
+        version="2.0.0",
     )
     assert md["language"] == "ja-JP"
     assert md["version"] == "2.0.0"
@@ -70,8 +73,10 @@ def test_generate_metadata_custom_language_and_version() -> None:
 def test_generate_metadata_file_format_from_content_type() -> None:
     svc = _build_service()
     md = svc.generate_metadata(
-        author="a", category=ContentType.POSTS,
-        content_type="image/png", source="test",
+        author="a",
+        category=ContentType.POSTS,
+        content_type="image/png",
+        source="test",
     )
     assert md["file-format"] == "png"
 
@@ -128,8 +133,10 @@ async def test_upload_file_success(tmp_path: Path) -> None:
     svc.client.generate_presigned_url.return_value = "https://signed.url"  # type: ignore[union-attr]
 
     result = await svc.upload_file(
-        f, "videos/u/test.mp4",
-        {"category": "posts"}, "video/mp4",
+        f,
+        "videos/u/test.mp4",
+        {"category": "posts"},
+        "video/mp4",
     )
     assert result["storage_path"] == "videos/u/test.mp4"
     assert result["presigned_url"] == "https://signed.url"
@@ -211,7 +218,5 @@ async def test_upload_file_guesses_content_type(tmp_path: Path) -> None:
 
     svc.client.generate_presigned_url.return_value = "https://url"  # type: ignore[union-attr]
 
-    result = await svc.upload_file(
-        f, "images/u/image.jpg", {"category": "posts"}
-    )
+    result = await svc.upload_file(f, "images/u/image.jpg", {"category": "posts"})
     assert "image" in result["content_type"]

@@ -85,9 +85,7 @@ async def test_download_user_content_success(
     from dyvine.routers.users import download_user_content
 
     mock_user_service.start_download.return_value = _download_response()
-    result = await download_user_content(
-        user_id="u1", service=mock_user_service
-    )
+    result = await download_user_content(user_id="u1", service=mock_user_service)
     assert result.operation_id == "t1"
 
 
@@ -100,9 +98,7 @@ async def test_download_user_content_not_found(
     mock_user_service.start_download.side_effect = UserNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_user_content(
-            user_id="bad", service=mock_user_service
-        )
+        await download_user_content(user_id="bad", service=mock_user_service)
     assert exc_info.value.status_code == 404
 
 
@@ -114,9 +110,7 @@ async def test_get_operation_success(mock_user_service: MagicMock) -> None:
     from dyvine.routers.users import get_operation
 
     mock_user_service.get_download_status.return_value = _download_response()
-    result = await get_operation(
-        operation_id="op1", service=mock_user_service
-    )
+    result = await get_operation(operation_id="op1", service=mock_user_service)
     assert result.status == "pending"
 
 
@@ -127,7 +121,5 @@ async def test_get_operation_not_found(mock_user_service: MagicMock) -> None:
     mock_user_service.get_download_status.side_effect = DownloadError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_operation(
-            operation_id="bad", service=mock_user_service
-        )
+        await get_operation(operation_id="bad", service=mock_user_service)
     assert exc_info.value.status_code == 404

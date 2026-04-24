@@ -153,9 +153,7 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     )
 
 
-async def http_exception_handler(
-    request: Request, exc: HTTPException
-) -> JSONResponse:
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """Normalize ``HTTPException`` responses into the standard error envelope."""
     correlation_id = getattr(request.state, "correlation_id", None)
     detail = exc.detail
@@ -164,7 +162,7 @@ async def http_exception_handler(
         error_code = str(detail.get("error_code") or f"HTTP_{exc.status_code}")
         details = detail.get("details")
     else:
-        message = str(detail)
+        message = str(detail) if detail is not None else ""
         error_code = f"HTTP_{exc.status_code}"
         details = None
 

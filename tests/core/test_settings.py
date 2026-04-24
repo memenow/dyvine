@@ -64,6 +64,7 @@ def test_r2_settings_is_configured_true() -> None:
         access_key_id="key",
         secret_access_key="secret",
         bucket_name="bucket",
+        endpoint="https://example.r2.cloudflarestorage.com",
     )
     assert s.is_configured is True
 
@@ -74,6 +75,18 @@ def test_r2_settings_is_configured_false_missing_field() -> None:
         access_key_id="",
         secret_access_key="secret",
         bucket_name="bucket",
+        endpoint="https://example.r2.cloudflarestorage.com",
+    )
+    assert s.is_configured is False
+
+
+def test_r2_settings_is_configured_false_missing_endpoint() -> None:
+    s = R2Settings(
+        account_id="acc",
+        access_key_id="key",
+        secret_access_key="secret",
+        bucket_name="bucket",
+        endpoint="",
     )
     assert s.is_configured is False
 
