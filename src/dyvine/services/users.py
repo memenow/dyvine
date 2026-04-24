@@ -69,6 +69,7 @@ from typing import Any
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
+from ..core.background import BackgroundTaskRegistry
 from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
@@ -146,10 +147,26 @@ class UserService:
     initiating content downloads, and tracking download progress.
     """
 
-    def __init__(self, operation_store: OperationStore | None = None) -> None:
-        """Initialize the user service."""
+    def __init__(
+        self,
+        operation_store: OperationStore | None = None,
+        *,
+        task_registry: BackgroundTaskRegistry | None = None,
+    ) -> None:
+        """Initialize the user service.
+
+        Args:
+            operation_store: Persistent operation record store. A private
+                ``OperationStore`` is created when not provided, which is the
+                path unit tests take.
+            task_registry: Optional registry that owns long-lived
+                background downloads. When omitted (e.g. in tests) the
+                service falls back to ``asyncio.create_task`` so the public
+                API remains testable without a full service container.
+        """
         self.operation_store = operation_store or OperationStore()
         self.storage = R2StorageService()
+        self._task_registry = task_registry
 
     async def get_user_info(self, user_id: str) -> UserResponse:
         """Retrieve user information from Douyin.
@@ -236,15 +253,24 @@ class UserService:
                 "max_items": max_items,
             },
         )
-        asyncio.create_task(
-            self._process_download(
-                operation.operation_id,
-                user_id=user_id,
-                include_posts=include_posts,
-                include_likes=include_likes,
-                max_items=max_items,
-            )
+        coro = self._process_download(
+            operation.operation_id,
+            user_id=user_id,
+            include_posts=include_posts,
+            include_likes=include_likes,
+            max_items=max_items,
         )
+        # Track the task through the shared registry when the container
+        # provided one so the lifespan can drain it on graceful shutdown.
+        # Fall back to a bare ``create_task`` for unit tests that
+        # instantiate ``UserService`` directly without going through the
+        # container.
+        if self._task_registry is not None:
+            self._task_registry.spawn(
+                coro, name=f"user-download-{operation.operation_id}"
+            )
+        else:
+            asyncio.create_task(coro)
         return DownloadResponse(**operation.to_response())
 
     async def get_download_status(self, task_id: str) -> DownloadResponse:
@@ -397,6 +423,23 @@ class UserService:
             has_more = True
             downloaded_count = 0
 
+            # Guard against an unbounded outer loop. ``max_cursor += 1`` in
+            # the "cursor stuck" branch below can spin indefinitely if the
+            # upstream API returns a sticky cursor or if every page's
+            # uploads fail, because ``downloaded_count`` never catches up
+            # to ``total_posts``. ``page_counts=100`` is the request size
+            # below, so the expected page count is ``total_posts / 100``;
+            # we double that and add slack for API quirks. Likes-only runs
+            # don't report a total, so use a generous ceiling tied to
+            # ``max_items`` when available, otherwise a conservative cap.
+            if max_items is not None:
+                max_pages = (max_items // 100) + 20
+            elif total_posts > 0:
+                max_pages = (total_posts // 100) * 2 + 20
+            else:
+                max_pages = 500
+            page_count = 0
+
             # ``fetch_user_like_videos`` has no ``min_cursor`` parameter,
             # so only include it for the posts fetcher.
             if downloading_likes_only:
@@ -407,6 +450,19 @@ class UserService:
                 fetcher_extra = {"min_cursor": 0}
 
             while has_more and (max_items is None or downloaded_count < max_items):
+                page_count += 1
+                if page_count > max_pages:
+                    logger.warning(
+                        "Download loop exceeded max_pages; stopping",
+                        extra={
+                            "task_id": task_id,
+                            "user_id": user_id,
+                            "max_pages": max_pages,
+                            "downloaded_count": downloaded_count,
+                            "total_posts": total_posts,
+                        },
+                    )
+                    break
                 iterated = False
                 async for aweme_data in fetcher(
                     user_id,
