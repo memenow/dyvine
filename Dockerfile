@@ -17,7 +17,20 @@ COPY src/ ./src/
 
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir uv==0.11.6 && \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev && \
+    # ``f2`` (the upstream Douyin SDK) lists ``black`` as a runtime
+    # dependency even though it never imports the formatter. ``uv sync
+    # --no-dev`` therefore still pulls the Black wheel, and the binary
+    # ends up in the production image with historical CVEs that Trivy
+    # flags. Purge the dist-info, the packaged library, and both CLI
+    # entry points so nothing of Black ships downstream. Keep this in
+    # the Dockerfile (not in ``pyproject.toml`` as an override) so the
+    # developer venv can still rely on black for local formatting.
+    rm -rf /app/.venv/bin/black /app/.venv/bin/blackd \
+        /app/.venv/lib/python*/site-packages/black \
+        /app/.venv/lib/python*/site-packages/blackd \
+        /app/.venv/lib/python*/site-packages/black-*.dist-info \
+        /app/.venv/lib/python*/site-packages/blackd-*.dist-info
 
 # Production stage
 FROM python:3.12-slim-bookworm AS production

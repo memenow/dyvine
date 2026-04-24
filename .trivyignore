@@ -14,12 +14,3 @@ CVE-2026-26007
 CVE-2025-4565
 CVE-2026-0994
 
-# ``uv sync --frozen --no-dev`` under uv 0.11.6 still materializes
-# black's dist-info in the runtime image even after we dropped the
-# ``[project.optional-dependencies]`` duplicate. The black binary is
-# never invoked in production and CVE-2026-32274 requires running
-# black against attacker-controlled paths, so there is no reachable
-# exploit. Remove this entry after auditing the uv behavior and either
-# moving to ``uv export`` + ``pip install`` in the Dockerfile or
-# upgrading to a uv release that drops dev metadata under --no-dev.
-CVE-2026-32274
