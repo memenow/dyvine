@@ -224,7 +224,7 @@ class UserService:
         """
         await self.get_user_info(user_id)
 
-        operation = self.operation_store.create_operation(
+        operation = await self.operation_store.create_operation(
             operation_type="user_content_download",
             subject_id=user_id,
             status="pending",
@@ -259,7 +259,7 @@ class UserService:
         Raises:
             DownloadError: If the specified download task is not found.
         """
-        operation = self.operation_store.get_operation(task_id)
+        operation = await self.operation_store.get_operation(task_id)
         if operation.operation_type != "user_content_download":
             raise DownloadError(f"Download task {task_id} not found")
         return DownloadResponse(**operation.to_response())
@@ -287,7 +287,7 @@ class UserService:
             # Nothing was requested; record an immediate completion so the
             # operation record still reflects the resolved state instead of
             # leaving a pending row behind.
-            self.operation_store.update_operation(
+            await self.operation_store.update_operation(
                 task_id,
                 status="completed",
                 message="Download skipped (nothing requested)",
@@ -308,7 +308,7 @@ class UserService:
 
         temp_dir = None
         try:
-            self.operation_store.update_operation(
+            await self.operation_store.update_operation(
                 task_id,
                 status="running",
                 message="Download in progress",
@@ -364,7 +364,7 @@ class UserService:
                 total_posts = int(aweme_count) if isinstance(aweme_count, int) else 0
                 if total_posts == 0:
                     logger.info("User %s has no posts", user_id)
-                    self.operation_store.update_operation(
+                    await self.operation_store.update_operation(
                         task_id,
                         status="completed",
                         message="Download completed",
@@ -376,13 +376,13 @@ class UserService:
 
             if downloading_likes_only:
                 logger.info("User %s requested likes-only download", user_data.nickname)
-                self.operation_store.update_operation(
+                await self.operation_store.update_operation(
                     task_id,
                     message="Downloading liked items",
                 )
             else:
                 logger.info("User %s has %s posts", user_data.nickname, total_posts)
-                self.operation_store.update_operation(
+                await self.operation_store.update_operation(
                     task_id,
                     total_items=total_posts,
                     message="Download in progress",
@@ -441,7 +441,9 @@ class UserService:
                     }
                     if progress is not None:
                         update_fields["progress"] = progress
-                    self.operation_store.update_operation(task_id, **update_fields)
+                    await self.operation_store.update_operation(
+                        task_id, **update_fields
+                    )
 
                     if progress is None:
                         logger.info(
@@ -549,7 +551,7 @@ class UserService:
                     "Successfully downloaded %s posts (100%% complete)",
                     downloaded_count,
                 )
-                self.operation_store.update_operation(
+                await self.operation_store.update_operation(
                     task_id,
                     status="completed",
                     message="Download completed",
@@ -568,7 +570,7 @@ class UserService:
                     total_posts,
                     completion_percentage,
                 )
-                self.operation_store.update_operation(
+                await self.operation_store.update_operation(
                     task_id,
                     status="partial",
                     message="Download completed with missing items",
@@ -586,7 +588,7 @@ class UserService:
                 "Download failed",
                 extra={"task_id": task_id, "user_id": user_id},
             )
-            self.operation_store.update_operation(
+            await self.operation_store.update_operation(
                 task_id,
                 status="failed",
                 message="Download failed",
