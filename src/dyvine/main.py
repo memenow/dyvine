@@ -484,7 +484,7 @@ async def readiness_probe(request: Request) -> JSONResponse:
     # makes content downloads fail at the first write.
     operation_store_ok = False
     operation_store_status = "missing"
-    if container_ok:
+    if container is not None:
         try:
             container.operation_store.healthcheck()
             operation_store_ok = True
