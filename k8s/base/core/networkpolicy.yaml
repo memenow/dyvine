@@ -1,0 +1,108 @@
+---
+# Ingress policy for the dyvine-api Pods.
+#
+# Allows traffic on the container's HTTP port (8000) from:
+#   * Pods in the ``ingress-nginx`` namespace so the ingress controller can
+#     proxy external requests to the API. Selection is based on the
+#     ``kubernetes.io/metadata.name`` label that the kubelet sets
+#     automatically on every namespace from Kubernetes 1.22 onward.
+#   * Pods in the ``kube-system`` namespace so kubelet/apiserver-side
+#     probes (liveness, readiness, startup) keep working on clusters that
+#     route probes through a namespace-scoped identity rather than the
+#     node IP.
+#
+# All other ingress traffic is implicitly denied because declaring an
+# ingress rule on a NetworkPolicy switches the pod into allowlist mode
+# for ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dyvine-api-ingress
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: dyvine
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dyvine
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# Egress policy for the dyvine-api Pods.
+#
+# Allows only the outbound traffic the service actually needs:
+#   * DNS (UDP/TCP 53) to the ``kube-system`` namespace so CoreDNS can
+#     resolve both in-cluster Services and the external hosts listed
+#     below.
+#   * HTTPS (TCP 443) to every destination outside the cluster so the
+#     API can reach the Cloudflare R2 endpoint and the public Douyin
+#     APIs. The ``except`` block removes the RFC1918/carrier-grade NAT
+#     ranges that are used by the cluster CNI; this keeps the rule from
+#     accidentally granting in-cluster east-west access beyond the DNS
+#     exception above.
+#
+# The service does not currently connect to a PostgreSQL (or other
+# database) server: runtime state is persisted in a SQLite file stored
+# on the ``dyvine-operation-state`` PVC (see
+# ``API_OPERATION_DB_PATH=/app/data/douyin/state/operations.db`` in the
+# Deployment), so no database egress rule is required.
+#
+# All other egress traffic is implicitly denied because declaring an
+# egress rule on a NetworkPolicy switches the pod into allowlist mode
+# for egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dyvine-api-egress
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: dyvine
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dyvine
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Egress
+  egress:
+    # Cluster DNS (CoreDNS in kube-system).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Outbound HTTPS to the public internet for Cloudflare R2 and
+    # Douyin SDK calls. Private RFC1918/CG-NAT ranges are excluded so
+    # this rule does not become a back door into other cluster
+    # workloads.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 443
