@@ -1,0 +1,16 @@
+# Trivy ignore list for known transitive CVEs we cannot fix in this repo.
+# Each entry explains the constraint source and removal criteria. Delete
+# entries as soon as the upstream pin is relaxed and the dependency is
+# picked up through uv.lock.
+
+# cryptography is pinned by f2 (Douyin SDK) at 44.0.0. Fixed in 46.0.5.
+# Remove once f2 publishes a release that allows cryptography >= 46.0.5
+# or we replace the transitive dependency.
+CVE-2026-26007
+
+# protobuf is pinned by f2 at 5.28.3. Fixed in 5.29.5 / 5.29.6 / 6.31.1.
+# Remove once f2 relaxes the constraint or a compatible release lands in
+# uv.lock.
+CVE-2025-4565
+CVE-2026-0994
+

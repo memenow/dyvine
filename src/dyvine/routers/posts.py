@@ -261,7 +261,7 @@ async def list_user_posts(
         logger.exception(
             "Error processing list_user_posts request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post(
@@ -308,4 +308,4 @@ async def download_user_posts(
         logger.exception(
             "Error processing download_user_posts request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e

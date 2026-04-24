@@ -81,7 +81,7 @@ async def download_livestream(
         logger.exception(
             "Error processing download_livestream request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post(
@@ -132,7 +132,7 @@ async def download_livestream_url(
             "Error processing download_livestream_url request",
             extra={"url": request.url},
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.get("/operations/{operation_id}", response_model=LiveStreamDownloadResponse)
@@ -172,4 +172,4 @@ async def get_download_status(
             "Error processing get_download_status request",
             extra={"operation_id": operation_id},
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e

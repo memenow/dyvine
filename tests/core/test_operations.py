@@ -146,6 +146,9 @@ def test_operation_store_healthcheck_succeeds(tmp_path) -> None:
 
 
 def test_operation_store_healthcheck_fails_when_path_unwritable(tmp_path) -> None:
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("chmod-based permission enforcement has no effect as root")
+
     readonly_dir = tmp_path / "readonly"
     readonly_dir.mkdir()
     store = OperationStore(str(readonly_dir / "operations.db"))

@@ -22,7 +22,7 @@ jobs:
     - name: Set up uv
       uses: astral-sh/setup-uv@v3
       with:
-        version: "latest"
+        version: "0.11.6"
         enable-cache: true
 
     - name: Set up Python ${{ matrix.python-version }}
@@ -48,7 +48,7 @@ jobs:
     - name: Set up uv
       uses: astral-sh/setup-uv@v3
       with:
-        version: "latest"
+        version: "0.11.6"
         enable-cache: true
 
     - name: Set up Python
@@ -68,6 +68,70 @@ jobs:
 
     - name: Type check with MyPy
       run: uv run mypy src/
+
+  container-scan:
+    name: Container Vulnerability Scan
+    needs: [quality]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build Docker image for scanning
+      run: |
+        # Build the image locally (no push) so we can scan the exact
+        # artifact produced by this PR/commit. We intentionally do not
+        # authenticate to any registry here so PR-triggered runs from
+        # forks cannot access production secrets.
+        docker build -t scan-target:${{ github.sha }} .
+
+    - name: Assert no dev tooling in runtime image
+      run: |
+        # The builder stage deletes the f2-injected ``black`` binary, its
+        # dist-info, and the package directory explicitly. If that ``rm``
+        # ever fails silently (glob mismatch, path relocation in a future
+        # f2 / uv release, etc.), catch the regression here instead of
+        # shipping the binary to production.
+        docker run --rm --entrypoint /bin/sh scan-target:${{ github.sha }} \
+          -c '! test -x /app/.venv/bin/black'
+
+    - name: Scan image and enforce vulnerability budget
+      # Table output is the pass/fail gate because ``aquasecurity/trivy-action``
+      # v0.35.0 drops ``.trivyignore`` when the format is SARIF, which
+      # would otherwise re-include already-accepted findings and break
+      # the build. Keep the table format here (with ``exit-code: 1``)
+      # and treat the subsequent SARIF pass as observability only.
+      uses: aquasecurity/trivy-action@v0.35.0
+      with:
+        image-ref: 'scan-target:${{ github.sha }}'
+        format: 'table'
+        exit-code: '1'
+        severity: 'HIGH,CRITICAL'
+        ignore-unfixed: true
+        trivyignores: '.trivyignore'
+
+    - name: Produce SARIF for Code Scanning
+      if: always()
+      uses: aquasecurity/trivy-action@v0.35.0
+      with:
+        image-ref: 'scan-target:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        exit-code: '0'
+        severity: 'HIGH,CRITICAL'
+        ignore-unfixed: true
+        trivyignores: '.trivyignore'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+        category: 'trivy-container'
 
   docker-build:
     name: Build and Push Docker Image

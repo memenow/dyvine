@@ -149,7 +149,7 @@ async def get_user(
         logger.exception(
             "Error processing get_user request", extra={"user_id": user_id}
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post(
@@ -214,7 +214,7 @@ async def download_user_content(
             "Error processing download_user_content request",
             extra={"user_id": user_id},
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.get(
@@ -258,4 +258,4 @@ async def get_operation(
             "Error processing get_operation request",
             extra={"operation_id": operation_id},
         )
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail="Internal server error") from e

@@ -7,10 +7,14 @@ resources:
   - core/namespace.yaml
   - core/service-account.yaml
   - core/configmap.yaml
-  - core/secret.yaml
   - core/deployment.yaml
   - core/service.yaml
   - core/pvc.yaml
+# The ``dyvine-secrets`` Secret is intentionally excluded from the base so
+# the deploy workflows can create it from GitHub Secrets before applying
+# this kustomization. Including an empty Secret here would cause the
+# ``kubectl apply -k`` step to blank the credentials that the previous
+# ``kubectl create secret`` step just populated.
 
 commonLabels:
   app.kubernetes.io/managed-by: kustomize

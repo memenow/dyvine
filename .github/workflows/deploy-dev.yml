@@ -19,6 +19,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # ``pipefail`` makes multi-stage pipes such as
+    # ``kubectl create secret ... | kubectl label ... | kubectl apply -f -``
+    # fail when an intermediate command (not just the tail) errors out.
+    # Without it, a failure in the middle is masked by the 0 exit code of
+    # ``kubectl apply -f -`` on empty stdin, and the Secret is silently
+    # left unchanged.
+    defaults:
+      run:
+        shell: /bin/bash -euo pipefail {0}
 
     steps:
     - name: Checkout
@@ -68,6 +77,9 @@ jobs:
 
     - name: Create Application Secrets
       run: |
+        # Attach the same ``commonLabels`` the base kustomization applies so
+        # a future ``kubectl apply --prune -l app.kubernetes.io/managed-by=kustomize``
+        # sweep does not treat this Secret as stray and delete it.
         kubectl create secret generic dyvine-secrets \
           --from-literal=SECURITY_SECRET_KEY="${{ secrets.DEV_SECURITY_SECRET_KEY }}" \
           --from-literal=SECURITY_API_KEY="${{ secrets.DEV_SECURITY_API_KEY }}" \
@@ -76,34 +88,47 @@ jobs:
           --from-literal=R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
           --from-literal=DOUYIN_COOKIE="${{ secrets.DOUYIN_COOKIE }}" \
           --namespace=dyvine \
-          --dry-run=client -o yaml | kubectl apply -f -
+          --dry-run=client -o yaml \
+          | kubectl label --local=true -f - --overwrite -o yaml --dry-run=client \
+              app.kubernetes.io/managed-by=kustomize \
+              app.kubernetes.io/name=dyvine \
+              app.kubernetes.io/component=api \
+              app.kubernetes.io/part-of=dyvine \
+              app.kubernetes.io/version=latest \
+          | kubectl apply -f -
 
     - name: Deploy to Development
       run: |
-        # Create temporary kustomization for dev
+        # Build a temporary overlay under k8s/overlays/dev-runtime that
+        # references the base and applies dev-specific image tag, replicas,
+        # and config overrides. Using a dedicated directory keeps the
+        # `kubectl apply -k` invocation valid (mixing -k and -f is not
+        # supported by kubectl and would fail).
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-        cat > k8s/overlays/dev-deploy.yaml << EOF
+        RUNTIME_DIR=k8s/overlays/dev-runtime
+        # Clean up the scratch kustomization on any exit path, including
+        # ``kubectl apply`` failures under ``set -e``.
+        trap 'rm -rf "${RUNTIME_DIR}"' EXIT
+        mkdir -p "${RUNTIME_DIR}"
+        cat > "${RUNTIME_DIR}/kustomization.yaml" << EOF
         apiVersion: kustomize.config.k8s.io/v1beta1
         kind: Kustomization
-        
+
         namespace: dyvine
-        
+
         resources:
-          - ../base
-        
+          - ../../base
+
         images:
           - name: ghcr.io/${{ github.repository }}
             newTag: main-${SHORT_SHA}
-        
-        patchesStrategicMerge:
-          - |-
-            apiVersion: apps/v1
-            kind: Deployment
-            metadata:
+
+        patches:
+          - path: replicas-patch.yaml
+            target:
+              kind: Deployment
               name: dyvine-api
-            spec:
-              replicas: 1
-        
+
         configMapGenerator:
           - name: dyvine-config
             behavior: merge
@@ -112,9 +137,17 @@ jobs:
               - API_ENVIRONMENT=development
               - R2_BUCKET_NAME=mmn-dev-data
         EOF
-        
-        kubectl apply -k k8s/overlays/ -f k8s/overlays/dev-deploy.yaml
-        rm k8s/overlays/dev-deploy.yaml
+
+        cat > "${RUNTIME_DIR}/replicas-patch.yaml" << 'EOF'
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: dyvine-api
+        spec:
+          replicas: 1
+        EOF
+
+        kubectl apply -k "${RUNTIME_DIR}"
 
     - name: Verify deployment
       run: |

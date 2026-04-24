@@ -68,6 +68,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # ``pipefail`` makes multi-stage pipes such as
+    # ``kubectl create secret ... | kubectl label ... | kubectl apply -f -``
+    # fail when an intermediate command (not just the tail) errors out.
+    # Without it, a failure in the middle is masked by the 0 exit code of
+    # ``kubectl apply -f -`` on empty stdin, and the Secret is silently
+    # left unchanged.
+    defaults:
+      run:
+        shell: /bin/bash -euo pipefail {0}
 
     steps:
     - name: Checkout
@@ -94,6 +103,9 @@ jobs:
 
     - name: Create Application Secrets
       run: |
+        # Attach the same ``commonLabels`` the base kustomization applies so
+        # a future ``kubectl apply --prune -l app.kubernetes.io/managed-by=kustomize``
+        # sweep does not treat this Secret as stray and delete it.
         kubectl create secret generic dyvine-secrets \
           --from-literal=SECURITY_SECRET_KEY="${{ secrets.PROD_SECURITY_SECRET_KEY }}" \
           --from-literal=SECURITY_API_KEY="${{ secrets.PROD_SECURITY_API_KEY }}" \
@@ -102,42 +114,65 @@ jobs:
           --from-literal=R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
           --from-literal=DOUYIN_COOKIE="${{ secrets.DOUYIN_COOKIE }}" \
           --namespace=dyvine \
-          --dry-run=client -o yaml | kubectl apply -f -
+          --dry-run=client -o yaml \
+          | kubectl label --local=true -f - --overwrite -o yaml --dry-run=client \
+              app.kubernetes.io/managed-by=kustomize \
+              app.kubernetes.io/name=dyvine \
+              app.kubernetes.io/component=api \
+              app.kubernetes.io/part-of=dyvine \
+              app.kubernetes.io/version=latest \
+          | kubectl apply -f -
+
+    - name: Render Ingress host
+      env:
+        INGRESS_HOST: ${{ env.INGRESS_HOST }}
+      run: |
+        # The production Ingress manifest keeps `INGRESS_HOST` as a literal
+        # placeholder so that the file is a valid kustomize input. The actual
+        # host is substituted at deploy time from the workflow env (which
+        # already reads ``secrets.PROD_INGRESS_HOST``). Tell the runner to
+        # mask the value so any follow-up step that echoes the rendered
+        # manifest (for example ``kubectl diff``) cannot leak the host into
+        # the public Actions log.
+        echo "::add-mask::${INGRESS_HOST}"
+        sed -i "s|INGRESS_HOST|${INGRESS_HOST}|g" k8s/overlays/production/ingress.yaml
 
     - name: Deploy to Production
       run: |
-        # Create temporary kustomization for prod
-        cat > k8s/overlays/prod-deploy.yaml << EOF
+        # Build a temporary overlay under k8s/overlays/prod-runtime that
+        # layers on top of the production overlay and injects the release
+        # image tag, replica count, resource overrides, and env-specific
+        # ConfigMap values. Using a dedicated directory keeps the
+        # `kubectl apply -k` invocation valid (mixing -k and -f is not
+        # supported by kubectl and would fail).
+        RUNTIME_DIR=k8s/overlays/prod-runtime
+        # Clean up the scratch kustomization on any exit path, including
+        # ``kubectl apply`` failures under ``set -e``.
+        trap 'rm -rf "${RUNTIME_DIR}"' EXIT
+        mkdir -p "${RUNTIME_DIR}"
+        cat > "${RUNTIME_DIR}/kustomization.yaml" << EOF
         apiVersion: kustomize.config.k8s.io/v1beta1
         kind: Kustomization
-        
+
         namespace: dyvine
-        
+
         resources:
-          - ../base
-        
+          - ../production
+
         images:
           - name: ghcr.io/${{ github.repository }}
             newTag: ${{ needs.pre-deployment-checks.outputs.image-tag }}
-        
-        patchesStrategicMerge:
-          - |-
-            apiVersion: apps/v1
-            kind: Deployment
-            metadata:
+
+        patches:
+          - path: replicas-patch.yaml
+            target:
+              kind: Deployment
               name: dyvine-api
-            spec:
-              replicas: 3
-              template:
-                spec:
-                  resources:
-                    requests:
-                      memory: "256Mi"
-                      cpu: "100m"
-                    limits:
-                      memory: "512Mi"
-                      cpu: "500m"
-        
+          - path: resources-patch.yaml
+            target:
+              kind: Deployment
+              name: dyvine-api
+
         configMapGenerator:
           - name: dyvine-config
             behavior: merge
@@ -147,9 +182,29 @@ jobs:
               - R2_BUCKET_NAME=mmn-prod-data
               - API_VERSION=${{ needs.pre-deployment-checks.outputs.image-tag }}
         EOF
-        
-        kubectl apply -k k8s/overlays/ -f k8s/overlays/prod-deploy.yaml
-        rm k8s/overlays/prod-deploy.yaml
+
+        cat > "${RUNTIME_DIR}/replicas-patch.yaml" << 'EOF'
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: dyvine-api
+        spec:
+          replicas: 3
+        EOF
+
+        cat > "${RUNTIME_DIR}/resources-patch.yaml" << 'EOF'
+        - op: replace
+          path: /spec/template/spec/containers/0/resources
+          value:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+        EOF
+
+        kubectl apply -k "${RUNTIME_DIR}"
 
     - name: Verify deployment
       run: |
@@ -159,16 +214,19 @@ jobs:
       run: |
         # Wait for service to be ready
         sleep 30
-        
+
         # Get service endpoint
         SERVICE_IP=$(kubectl get service dyvine-api -n dyvine -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-        
+
         if [ -z "$SERVICE_IP" ]; then
           echo "Warning: No external IP found, checking ingress..."
           kubectl get ingress -n dyvine
         else
-          # Test health endpoint
-          curl -f http://${SERVICE_IP}:8000/health || exit 1
+          # Test readiness endpoint. We use /readyz (not /health) because
+          # /health returns HTTP 200 even in "degraded" state, whereas
+          # /readyz is the true readiness gate driving load-balancer
+          # membership.
+          curl -f http://${SERVICE_IP}:8000/readyz || exit 1
         fi
 
     - name: Production deployment summary

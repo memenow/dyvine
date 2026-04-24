@@ -65,6 +65,7 @@ Performance Considerations:
 import asyncio
 import re
 from pathlib import Path
+from typing import Any
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
@@ -239,6 +240,7 @@ class UserService:
             self._process_download(
                 operation.operation_id,
                 user_id=user_id,
+                include_posts=include_posts,
                 include_likes=include_likes,
                 max_items=max_items,
             )
@@ -267,14 +269,43 @@ class UserService:
         task_id: str,
         *,
         user_id: str,
+        include_posts: bool,
         include_likes: bool,
         max_items: int | None,
     ) -> None:
         """Process a download task asynchronously.
 
         Args:
-            task_id (str): The unique identifier of the download task.
+            task_id: The unique identifier of the download task.
+            user_id: The Douyin user whose content is being downloaded.
+            include_posts: Whether to enumerate the user's own posts.
+            include_likes: Whether to include the user's liked posts in the
+                download batch forwarded to ``DouyinHandler``.
+            max_items: Optional cap on the number of items to download.
         """
+        if not include_posts and not include_likes:
+            # Nothing was requested; record an immediate completion so the
+            # operation record still reflects the resolved state instead of
+            # leaving a pending row behind.
+            self.operation_store.update_operation(
+                task_id,
+                status="completed",
+                message="Download skipped (nothing requested)",
+                progress=100.0,
+                total_items=0,
+                completed_items=0,
+            )
+            return
+
+        # ``include_posts=False`` with ``include_likes=True`` pivots the
+        # whole loop to the user's liked-items feed so we actually honor
+        # the API contract. f2 exposes a parallel ``fetch_user_like_videos``
+        # whose page entries match the shape ``fetch_user_post_videos``
+        # returns, which means the rest of the pipeline (downloader, R2
+        # upload, progress bookkeeping) is unchanged.
+        downloading_likes_only = not include_posts and include_likes
+        mode_label = "like" if downloading_likes_only else "post"
+
         temp_dir = None
         try:
             self.operation_store.update_operation(
@@ -300,10 +331,15 @@ class UserService:
                 "proxy": settings.douyin_proxy_http,
                 "download_path": str(temp_dir),
                 "max_counts": max_items,
-                "download_favorite": include_likes,
+                # ``download_favorite`` only means "also fetch likes" when
+                # the loop is already walking the posts feed. In the
+                # dedicated likes path we point the fetcher at the likes
+                # endpoint directly, so keep the flag off to avoid f2's
+                # implicit dual-fetch behavior.
+                "download_favorite": (include_likes and not downloading_likes_only),
                 "timeout": 5,
                 "folderize": True,
-                "mode": "post",
+                "mode": mode_label,
                 "naming": "{create}_{desc}",
                 "download_image": True,
                 "filename_filter": sanitize_filename,  # Add filename sanitization
@@ -316,27 +352,41 @@ class UserService:
             if not user_data.nickname:
                 raise UserNotFoundError(f"User {user_id} not found")
 
-            # Get total posts count from profile
-            aweme_count = user_data.aweme_count
-            total_posts = int(aweme_count) if isinstance(aweme_count, int) else 0
-            if total_posts == 0:
-                logger.info("User %s has no posts", user_id)
+            if downloading_likes_only:
+                # The profile endpoint does not expose a total liked-items
+                # count. Leave ``total_posts`` unset and let the operation
+                # store track a running count; the completion branch at the
+                # bottom will record the final tally once the loop drains.
+                total_posts = 0
+            else:
+                # Get total posts count from profile
+                aweme_count = user_data.aweme_count
+                total_posts = int(aweme_count) if isinstance(aweme_count, int) else 0
+                if total_posts == 0:
+                    logger.info("User %s has no posts", user_id)
+                    self.operation_store.update_operation(
+                        task_id,
+                        status="completed",
+                        message="Download completed",
+                        progress=100.0,
+                        total_items=0,
+                        completed_items=0,
+                    )
+                    return
+
+            if downloading_likes_only:
+                logger.info("User %s requested likes-only download", user_data.nickname)
                 self.operation_store.update_operation(
                     task_id,
-                    status="completed",
-                    message="Download completed",
-                    progress=100.0,
-                    total_items=0,
-                    completed_items=0,
+                    message="Downloading liked items",
                 )
-                return
-
-            logger.info("User %s has %s posts", user_data.nickname, total_posts)
-            self.operation_store.update_operation(
-                task_id,
-                total_items=total_posts,
-                message="Download in progress",
-            )
+            else:
+                logger.info("User %s has %s posts", user_data.nickname, total_posts)
+                self.operation_store.update_operation(
+                    task_id,
+                    total_items=total_posts,
+                    message="Download in progress",
+                )
 
             # Create user directory in temp
             user_dir = temp_dir / user_data.nickname
@@ -347,39 +397,64 @@ class UserService:
             has_more = True
             downloaded_count = 0
 
+            # ``fetch_user_like_videos`` has no ``min_cursor`` parameter,
+            # so only include it for the posts fetcher.
+            if downloading_likes_only:
+                fetcher = handler.fetch_user_like_videos
+                fetcher_extra: dict[str, Any] = {}
+            else:
+                fetcher = handler.fetch_user_post_videos
+                fetcher_extra = {"min_cursor": 0}
+
             while has_more and (max_items is None or downloaded_count < max_items):
-                async for aweme_data in handler.fetch_user_post_videos(
+                iterated = False
+                async for aweme_data in fetcher(
                     user_id,
-                    min_cursor=0,
                     max_cursor=max_cursor,
                     page_counts=100,  # Increased page size
                     max_counts=max_items,
+                    **fetcher_extra,
                 ):
+                    iterated = True
                     if not aweme_data.has_aweme:
                         has_more = False
                         break
 
                     current_batch_size = len(aweme_data.aweme_id)
                     downloaded_count += current_batch_size
-                    if total_posts > 0:
+                    # Likes-only runs have no known total up front, so we
+                    # cannot express progress as a percentage. Report
+                    # ``progress=None`` in that case and only fill in a
+                    # numeric percentage for the posts path where
+                    # ``total_posts`` reflects the profile's aweme_count.
+                    if downloading_likes_only:
+                        progress = None
+                    elif total_posts > 0:
                         progress = (downloaded_count / total_posts) * 100
                     else:
                         progress = 100.0
 
-                    self.operation_store.update_operation(
-                        task_id,
-                        progress=progress,
-                        completed_items=downloaded_count,
-                        total_items=total_posts,
-                        message="Download in progress",
-                    )
+                    update_fields: dict[str, Any] = {
+                        "completed_items": downloaded_count,
+                        "total_items": total_posts,
+                        "message": "Download in progress",
+                    }
+                    if progress is not None:
+                        update_fields["progress"] = progress
+                    self.operation_store.update_operation(task_id, **update_fields)
 
-                    logger.info(
-                        "Downloaded %s/%s posts (%.1f%%)",
-                        downloaded_count,
-                        total_posts,
-                        progress,
-                    )
+                    if progress is None:
+                        logger.info(
+                            "Downloaded %s liked items so far",
+                            downloaded_count,
+                        )
+                    else:
+                        logger.info(
+                            "Downloaded %s/%s posts (%.1f%%)",
+                            downloaded_count,
+                            total_posts,
+                            progress,
+                        )
 
                     # Download files to temp directory
                     await handler.downloader.create_download_tasks(
@@ -454,6 +529,14 @@ class UserService:
 
                     # Add delay between pages
                     await asyncio.sleep(5.0)
+
+                if not iterated:
+                    # The fetcher produced no items (either because the
+                    # upstream feed is empty or because an earlier batch
+                    # already advanced past ``max_counts``). Without this
+                    # bail-out ``has_more`` stays True and the outer while
+                    # loop spins.
+                    has_more = False
             # Verify download completion
             if total_posts > 0:
                 completion_percentage = (downloaded_count / total_posts) * 100
