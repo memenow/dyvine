@@ -12,6 +12,20 @@ from typing import Any
 
 from .settings import settings
 
+# Module-level ContextVars shared by every ``ContextLogger`` instance.
+#
+# Logging context (correlation IDs and arbitrary key/value pairs) is associated
+# with the current asyncio Task / contextvars ``Context`` rather than a
+# particular logger. Using module-level variables means a correlation ID set in
+# a request middleware propagates to background tasks and to logger instances
+# defined in other modules, as long as those tasks inherit the same context.
+_correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "dyvine_correlation_id", default=None
+)
+_context_var: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "dyvine_logging_context", default=None
+)
+
 
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging."""
@@ -83,35 +97,29 @@ class ContextLogger:
 
     def __init__(self, name: str) -> None:
         self.logger = logging.getLogger(name)
-        self.correlation_id_var: contextvars.ContextVar[str | None] = (
-            contextvars.ContextVar(f"{name}_correlation_id", default=None)
-        )
-        self.context_var: contextvars.ContextVar[dict[str, Any] | None] = (
-            contextvars.ContextVar(f"{name}_context", default=None)
-        )
 
     @property
     def correlation_id(self) -> str | None:
         """Expose the current request-scoped correlation ID."""
-        return self.correlation_id_var.get()
+        return _correlation_id_var.get()
 
     @property
     def context(self) -> dict[str, Any]:
         """Expose the current request-scoped logging context."""
-        return dict(self.context_var.get() or {})
+        return dict(_context_var.get() or {})
 
     def set_correlation_id(self, correlation_id: str | None) -> None:
-        self.correlation_id_var.set(correlation_id)
+        _correlation_id_var.set(correlation_id)
 
     def add_context(self, **kwargs: Any) -> "ContextLogger":
-        context = dict(self.context_var.get() or {})
+        context = dict(_context_var.get() or {})
         context.update(kwargs)
-        self.context_var.set(context)
+        _context_var.set(context)
         return self
 
     def clear_context(self) -> None:
         """Reset request-scoped logging context."""
-        self.context_var.set({})
+        _context_var.set({})
 
     @asynccontextmanager
     async def track_time(self, operation: str) -> AsyncGenerator[None, None]:
@@ -151,8 +159,8 @@ class ContextLogger:
         **kwargs: Any,
     ) -> None:
         extra = kwargs.pop("extra", {})
-        correlation_id = self.correlation_id_var.get()
-        context = self.context_var.get()
+        correlation_id = _correlation_id_var.get()
+        context = _context_var.get()
         if correlation_id:
             extra["correlation_id"] = correlation_id
         if context:

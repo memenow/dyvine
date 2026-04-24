@@ -7,7 +7,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dyvine.core import logging as dyvine_logging
 from dyvine.core.logging import ContextLogger, JSONFormatter
+
+
+@pytest.fixture(autouse=True)
+def _reset_logging_context_vars() -> None:
+    """Reset module-level logging ContextVars between tests.
+
+    ``ContextLogger`` stores the correlation ID and context dict in
+    module-level ``ContextVar`` instances so they propagate across logger
+    instances. Clearing them before each test avoids cross-test bleed.
+    """
+    dyvine_logging._correlation_id_var.set(None)
+    dyvine_logging._context_var.set(None)
+
 
 # ── JSONFormatter ────────────────────────────────────────────────────────
 
@@ -164,3 +178,25 @@ async def test_context_logger_uses_task_local_context() -> None:
     )
     assert correlation_one == "cid-1"
     assert correlation_two == "cid-2"
+
+
+def test_context_logger_shares_correlation_id_across_instances() -> None:
+    """Correlation IDs are shared across ``ContextLogger`` instances.
+
+    Middleware sets a single correlation ID that every logger (including
+    those instantiated by background tasks in different modules) must see,
+    so the module-level ``ContextVar`` is shared across instances.
+    """
+    first = ContextLogger("test.shared.one")
+    second = ContextLogger("test.shared.two")
+    first.clear_context()
+    first.set_correlation_id(None)
+    try:
+        first.set_correlation_id("cid-shared")
+        assert second.correlation_id == "cid-shared"
+
+        first.add_context(tenant="acme")
+        assert second.context["tenant"] == "acme"
+    finally:
+        first.set_correlation_id(None)
+        first.clear_context()
