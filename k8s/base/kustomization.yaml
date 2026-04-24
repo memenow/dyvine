@@ -10,6 +10,7 @@ resources:
   - core/deployment.yaml
   - core/service.yaml
   - core/pvc.yaml
+  - core/networkpolicy.yaml
 # The ``dyvine-secrets`` Secret is intentionally excluded from the base so
 # the deploy workflows can create it from GitHub Secrets before applying
 # this kustomization. Including an empty Secret here would cause the
