@@ -10,6 +10,7 @@ R2 storage operations including:
 
 """
 
+import asyncio
 import base64
 import mimetypes
 import time
@@ -304,14 +305,13 @@ class R2StorageService:
                 },
             )
 
-            with open(file_path, "rb") as f:
-                self.client.put_object(
-                    Bucket=self.bucket,
-                    Key=storage_path,
-                    Body=f,
-                    ContentType=content_type,
-                    Metadata=metadata,
-                )
+            url = await asyncio.to_thread(
+                self._upload_file_sync,
+                file_path=file_path,
+                storage_path=storage_path,
+                content_type=content_type,
+                metadata=metadata,
+            )
 
             duration = time.time() - start_time
 
@@ -329,13 +329,6 @@ class R2StorageService:
             r2_upload_requests.labels(type=metadata["category"], status="success").inc()
             r2_upload_bytes.labels(category=metadata["category"]).inc(file_size)
             r2_upload_duration.observe(duration)
-
-            # Generate presigned URL for temporary access (default 1 hour)
-            url = self.client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": self.bucket, "Key": storage_path},
-                ExpiresIn=3600,  # 1 hour
-            )
 
             logger.info(
                 "File uploaded successfully",
@@ -364,6 +357,36 @@ class R2StorageService:
             )
             raise StorageError(f"Upload failed: {str(e)}") from e
 
+    def _upload_file_sync(
+        self,
+        *,
+        file_path: Path,
+        storage_path: str,
+        content_type: str,
+        metadata: dict[str, str],
+    ) -> str:
+        """Run the blocking upload + presign pair on a worker thread.
+
+        ``put_object`` needs the file handle to stay open for the duration of
+        the request, so the file read and the upload live together. The
+        presigned URL is generated in the same thread to keep the entire
+        boto3 interaction off the event loop.
+        """
+        assert self.client is not None and self.bucket is not None
+        with open(file_path, "rb") as f:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=storage_path,
+                Body=f,
+                ContentType=content_type,
+                Metadata=metadata,
+            )
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": storage_path},
+            ExpiresIn=3600,  # 1 hour
+        )
+
     async def get_object_metadata(self, storage_path: str) -> dict[str, str]:
         """Get metadata for an object in R2 storage.
 
@@ -382,7 +405,9 @@ class R2StorageService:
             )
 
         try:
-            response = self.client.head_object(Bucket=self.bucket, Key=storage_path)
+            response = await asyncio.to_thread(
+                self.client.head_object, Bucket=self.bucket, Key=storage_path
+            )
             return response.get("Metadata", {})
 
         except ClientError as e:
@@ -405,7 +430,9 @@ class R2StorageService:
             )
 
         try:
-            self.client.delete_object(Bucket=self.bucket, Key=storage_path)
+            await asyncio.to_thread(
+                self.client.delete_object, Bucket=self.bucket, Key=storage_path
+            )
             logger.info("Object deleted", extra={"storage_path": storage_path})
 
         except ClientError as e:
@@ -439,35 +466,47 @@ class R2StorageService:
             )
 
         try:
-            response = self.client.list_objects_v2(
-                Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys
+            return await asyncio.to_thread(
+                self._list_objects_sync, prefix=prefix, max_keys=max_keys
             )
-
-            objects = response.get("Contents", [])
-            results: list[dict[str, Any]] = []
-            for obj in objects:
-                obj_data: dict[str, Any] = {
-                    "Key": obj.get("Key"),
-                    "LastModified": obj.get("LastModified"),
-                    "ETag": obj.get("ETag"),
-                    "Size": obj.get("Size"),
-                    "StorageClass": obj.get("StorageClass"),
-                }
-                try:
-                    if "Key" in obj and obj["Key"]:
-                        head = self.client.head_object(
-                            Bucket=self.bucket, Key=obj["Key"]
-                        )
-                        obj_data["Metadata"] = head.get("Metadata", {})
-                    else:
-                        obj_data["Metadata"] = {}
-                except ClientError:
-                    obj_data["Metadata"] = {}
-                results.append(obj_data)
-            return results
-
         except ClientError as e:
             logger.exception(
                 "List objects failed", extra={"prefix": prefix, "error": str(e)}
             )
             raise StorageError(f"List objects failed: {str(e)}") from e
+
+    def _list_objects_sync(self, *, prefix: str, max_keys: int) -> list[dict[str, Any]]:
+        """Run one ``list_objects_v2`` plus the per-object ``head_object`` fan-out.
+
+        Kept in a private sync method so the whole listing -- including the
+        N follow-up ``head_object`` calls that carry object metadata -- runs
+        in a single worker thread rather than bouncing every call back to
+        the event loop. ``max_keys`` caps the single page; callers that need
+        more than one page are expected to paginate themselves. The N+1
+        shape is tracked as a separate optimization item.
+        """
+        assert self.client is not None and self.bucket is not None
+        response = self.client.list_objects_v2(
+            Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys
+        )
+
+        objects = response.get("Contents", [])
+        results: list[dict[str, Any]] = []
+        for obj in objects:
+            obj_data: dict[str, Any] = {
+                "Key": obj.get("Key"),
+                "LastModified": obj.get("LastModified"),
+                "ETag": obj.get("ETag"),
+                "Size": obj.get("Size"),
+                "StorageClass": obj.get("StorageClass"),
+            }
+            try:
+                if "Key" in obj and obj["Key"]:
+                    head = self.client.head_object(Bucket=self.bucket, Key=obj["Key"])
+                    obj_data["Metadata"] = head.get("Metadata", {})
+                else:
+                    obj_data["Metadata"] = {}
+            except ClientError:
+                obj_data["Metadata"] = {}
+            results.append(obj_data)
+        return results

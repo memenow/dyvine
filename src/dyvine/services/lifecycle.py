@@ -11,6 +11,7 @@ The service reads rules from storage_lifecycle.json and applies them to stored
 content based on content type and age.
 """
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -133,7 +134,7 @@ class LifecycleManager:
 
             # Generate audit log
             if self.audit_config["enabled"]:
-                self._write_audit_log(summary)
+                await self._write_audit_log(summary)
 
             return summary
 
@@ -192,34 +193,42 @@ class LifecycleManager:
 
         return None
 
-    def _write_audit_log(self, summary: dict[str, Any]) -> None:
+    async def _write_audit_log(self, summary: dict[str, Any]) -> None:
         """Write lifecycle actions to audit log.
 
         Args:
             summary: Summary of actions taken
         """
         try:
-            now = datetime.now(UTC)
-            log_path = Path("logs/r2_lifecycle_audit.log")
-            log_path.parent.mkdir(exist_ok=True)
-
-            with open(log_path, "a") as f:
-                for action in summary["details"]:
-                    log_entry = self.audit_config["log_format"].format(
-                        timestamp=now.isoformat(),
-                        user="system",
-                        action=action["action"],
-                        object_key=action["object_key"],
-                        metadata_size="0B",
-                        status="success",
-                    )
-                    f.write(log_entry + "\n")
-
-            # Rotate old logs
-            self._rotate_audit_logs()
-
+            await asyncio.to_thread(self._write_audit_log_sync, summary)
         except Exception as e:
             logger.exception("Failed to write audit log", extra={"error": str(e)})
+
+    def _write_audit_log_sync(self, summary: dict[str, Any]) -> None:
+        """Perform the blocking file write and log rotation off the loop.
+
+        Keeping ``open``/``write`` together with ``_rotate_audit_logs`` in a
+        single sync helper means the caller pays for exactly one thread
+        hand-off instead of one per IO operation.
+        """
+        now = datetime.now(UTC)
+        log_path = Path("logs/r2_lifecycle_audit.log")
+        log_path.parent.mkdir(exist_ok=True)
+
+        with open(log_path, "a") as f:
+            for action in summary["details"]:
+                log_entry = self.audit_config["log_format"].format(
+                    timestamp=now.isoformat(),
+                    user="system",
+                    action=action["action"],
+                    object_key=action["object_key"],
+                    metadata_size="0B",
+                    status="success",
+                )
+                f.write(log_entry + "\n")
+
+        # Rotate old logs within the same worker thread.
+        self._rotate_audit_logs()
 
     def _rotate_audit_logs(self) -> None:
         """Rotate audit logs based on retention policy."""
