@@ -19,6 +19,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # ``pipefail`` makes multi-stage pipes such as
+    # ``kubectl create secret ... | kubectl label ... | kubectl apply -f -``
+    # fail when an intermediate command (not just the tail) errors out.
+    # Without it, a failure in the middle is masked by the 0 exit code of
+    # ``kubectl apply -f -`` on empty stdin, and the Secret is silently
+    # left unchanged.
+    defaults:
+      run:
+        shell: /bin/bash -euo pipefail {0}
 
     steps:
     - name: Checkout

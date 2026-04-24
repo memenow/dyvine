@@ -91,11 +91,11 @@ jobs:
 
     - name: Assert no dev tooling in runtime image
       run: |
-        # ``.trivyignore`` accepts the lingering ``black`` dist-info because
-        # the binary itself is supposed to be absent from the production
-        # image. If ``uv sync --no-dev`` ever regresses and actually ships
-        # the binary, this assertion fails fast instead of trusting the
-        # acceptance note.
+        # The builder stage deletes the f2-injected ``black`` binary, its
+        # dist-info, and the package directory explicitly. If that ``rm``
+        # ever fails silently (glob mismatch, path relocation in a future
+        # f2 / uv release, etc.), catch the regression here instead of
+        # shipping the binary to production.
         docker run --rm --entrypoint /bin/sh scan-target:${{ github.sha }} \
           -c '! test -x /app/.venv/bin/black'
 
