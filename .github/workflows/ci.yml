@@ -101,6 +101,7 @@ jobs:
         exit-code: '0'
         severity: 'HIGH,CRITICAL'
         ignore-unfixed: true
+        trivyignores: '.trivyignore'
 
     - name: Run Trivy vulnerability scanner
       uses: aquasecurity/trivy-action@v0.35.0
@@ -111,6 +112,7 @@ jobs:
         exit-code: '1'
         severity: 'HIGH,CRITICAL'
         ignore-unfixed: true
+        trivyignores: '.trivyignore'
 
     - name: Upload Trivy scan results
       uses: github/codeql-action/upload-sarif@v3
