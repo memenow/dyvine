@@ -75,12 +75,13 @@ class ServiceContainer:
         self._services: dict[str, Any] = {}
         self._initialized = False
 
-    def initialize(self) -> None:
+    async def initialize(self) -> None:
         """Initialize all registered services with their configurations.
 
-        This method sets up all core application services with proper
-        configuration. It's idempotent - calling it multiple times has
-        no additional effect.
+        Coroutine because ``OperationStore`` recovery uses async sqlite IO
+        (``mark_incomplete_operations_failed`` dispatches to a worker
+        thread). Safe to ``await`` multiple times; subsequent calls are
+        no-ops.
 
         Services initialized:
             - DouyinHandler: Configured with headers, proxies, and download settings
@@ -88,9 +89,9 @@ class ServiceContainer:
             - UserService: Basic user management service
 
         Note:
-            This method is automatically called when services are accessed
-            via property methods, but can be called explicitly for eager
-            initialization.
+            This method is awaited by the FastAPI lifespan. Direct access
+            through the property methods still works but now raises if the
+            container has not been initialized yet.
         """
         if self._initialized:
             return
@@ -99,20 +100,21 @@ class ServiceContainer:
         douyin_config = self._create_douyin_config()
         self._services["douyin_handler"] = DouyinHandler(douyin_config)
 
-        # Initialize operation store
-        self._services["operation_store"] = OperationStore()
-        self._services["operation_store"].mark_incomplete_operations_failed()
+        # Initialize operation store (sqlite bootstrap happens synchronously
+        # inside the constructor, which is cheap and keeps the OperationStore
+        # usable from both async and sync contexts).
+        operation_store = OperationStore()
+        self._services["operation_store"] = operation_store
+        await operation_store.mark_incomplete_operations_failed()
 
         # Initialize user service
-        self._services["user_service"] = UserService(
-            operation_store=self._services["operation_store"]
-        )
+        self._services["user_service"] = UserService(operation_store=operation_store)
 
         # Initialize livestream service
         self._services["livestream_service"] = LivestreamService(
             douyin_handler=self._services["douyin_handler"],
             user_service=self._services["user_service"],
-            operation_store=self._services["operation_store"],
+            operation_store=operation_store,
         )
 
         self._initialized = True
@@ -151,8 +153,12 @@ class ServiceContainer:
     def get_service(self, service_name: str) -> Any:
         """Get a service instance by name.
 
-        Retrieves a registered service instance, initializing the container
-        if not already done. Returns None if the service is not registered.
+        The container must have been initialized before any service is
+        requested. ``initialize`` is a coroutine (it awaits SQLite recovery
+        in the operation store), so synchronous access has no safe way to
+        self-heal. The FastAPI lifespan awaits ``initialize`` before any
+        request can reach a dependency, so this only fires when tests or
+        ad-hoc scripts forget to bootstrap.
 
         Args:
             service_name: Name of the service to retrieve.
@@ -160,12 +166,15 @@ class ServiceContainer:
         Returns:
             Service instance if found, None otherwise.
 
-        Example:
-            container = ServiceContainer()
-            user_service = container.get_service('user_service')
+        Raises:
+            RuntimeError: If ``initialize`` has not been awaited yet.
         """
         if not self._initialized:
-            self.initialize()
+            raise RuntimeError(
+                "ServiceContainer has not been initialized; await "
+                "container.initialize() (normally via the FastAPI lifespan) "
+                "before requesting services."
+            )
         return self._services.get(service_name)
 
     @property
