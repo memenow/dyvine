@@ -239,6 +239,7 @@ class UserService:
             self._process_download(
                 operation.operation_id,
                 user_id=user_id,
+                include_posts=include_posts,
                 include_likes=include_likes,
                 max_items=max_items,
             )
@@ -267,14 +268,32 @@ class UserService:
         task_id: str,
         *,
         user_id: str,
+        include_posts: bool,
         include_likes: bool,
         max_items: int | None,
     ) -> None:
         """Process a download task asynchronously.
 
         Args:
-            task_id (str): The unique identifier of the download task.
+            task_id: The unique identifier of the download task.
+            user_id: The Douyin user whose content is being downloaded.
+            include_posts: When ``False``, skip post enumeration and mark the
+                operation as completed without fetching the user profile.
+            include_likes: Whether to include the user's liked posts in the
+                download batch forwarded to ``DouyinHandler``.
+            max_items: Optional cap on the number of items to download.
         """
+        if not include_posts:
+            self.operation_store.update_operation(
+                task_id,
+                status="completed",
+                message="Posts download skipped",
+                progress=100.0,
+                total_items=0,
+                completed_items=0,
+            )
+            return
+
         temp_dir = None
         try:
             self.operation_store.update_operation(

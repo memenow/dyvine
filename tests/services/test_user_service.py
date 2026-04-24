@@ -188,6 +188,7 @@ async def test_process_download_no_posts(monkeypatch: pytest.MonkeyPatch) -> Non
     await service._process_download(
         operation.operation_id,
         user_id="empty-user",
+        include_posts=True,
         include_likes=False,
         max_items=None,
     )
@@ -222,6 +223,7 @@ async def test_process_download_sets_failed_on_error(
     await service._process_download(
         operation.operation_id,
         user_id="bad-user",
+        include_posts=True,
         include_likes=False,
         max_items=None,
     )
@@ -229,3 +231,43 @@ async def test_process_download_sets_failed_on_error(
     refreshed = await service.get_download_status(operation.operation_id)
     assert refreshed.status == "failed"
     assert refreshed.error == "api error"
+
+
+@pytest.mark.asyncio
+async def test_start_download_skips_posts_when_include_posts_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dyvine.services import users as users_mod
+
+    fetch_profile = AsyncMock()
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        fetch_user_profile = fetch_profile
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+
+    service = UserService()
+    operation = service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="opt-out-user",
+        status="pending",
+        message="scheduled",
+    )
+
+    await service._process_download(
+        operation.operation_id,
+        user_id="opt-out-user",
+        include_posts=False,
+        include_likes=False,
+        max_items=None,
+    )
+
+    refreshed = await service.get_download_status(operation.operation_id)
+    assert refreshed.status == "completed"
+    assert refreshed.progress == 100.0
+    assert refreshed.total_items == 0
+    assert refreshed.completed_items == 0
+    fetch_profile.assert_not_called()
