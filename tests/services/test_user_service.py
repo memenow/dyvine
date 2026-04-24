@@ -234,9 +234,10 @@ async def test_process_download_sets_failed_on_error(
 
 
 @pytest.mark.asyncio
-async def test_start_download_skips_posts_when_include_posts_false(
+async def test_process_download_skips_when_nothing_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A request with neither posts nor likes should complete immediately."""
     from dyvine.services import users as users_mod
 
     fetch_profile = AsyncMock()
@@ -271,3 +272,49 @@ async def test_start_download_skips_posts_when_include_posts_false(
     assert refreshed.total_items == 0
     assert refreshed.completed_items == 0
     fetch_profile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_download_runs_when_only_likes_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``include_posts=False`` with ``include_likes=True`` must still run.
+
+    The previous guard treated any ``include_posts=False`` as a no-op, which
+    silently dropped the likes-only scenario. The download path is still
+    invoked through ``DouyinHandler``; verify by asserting that the profile
+    fetch happens instead of the short-circuit completion.
+    """
+    from dyvine.services import users as users_mod
+
+    mock_user_data = MagicMock()
+    mock_user_data.nickname = "likes-only-user"
+    mock_user_data.aweme_count = 0
+
+    fetch_profile = AsyncMock(return_value=mock_user_data)
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        fetch_user_profile = fetch_profile
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+
+    service = UserService()
+    operation = service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="likes-only-user",
+        status="pending",
+        message="scheduled",
+    )
+
+    await service._process_download(
+        operation.operation_id,
+        user_id="likes-only-user",
+        include_posts=False,
+        include_likes=True,
+        max_items=None,
+    )
+
+    fetch_profile.assert_awaited()

@@ -277,17 +277,21 @@ class UserService:
         Args:
             task_id: The unique identifier of the download task.
             user_id: The Douyin user whose content is being downloaded.
-            include_posts: When ``False``, skip post enumeration and mark the
-                operation as completed without fetching the user profile.
+            include_posts: Whether to enumerate the user's own posts.
             include_likes: Whether to include the user's liked posts in the
                 download batch forwarded to ``DouyinHandler``.
             max_items: Optional cap on the number of items to download.
         """
-        if not include_posts:
+        if not include_posts and not include_likes:
+            # Nothing was requested; record an immediate completion so the
+            # operation record still reflects the resolved state instead of
+            # leaving a pending row behind. A likes-only run (``include_posts``
+            # is False but ``include_likes`` is True) still falls through to
+            # the normal download path so the user's liked items get fetched.
             self.operation_store.update_operation(
                 task_id,
                 status="completed",
-                message="Posts download skipped",
+                message="Download skipped (nothing requested)",
                 progress=100.0,
                 total_items=0,
                 completed_items=0,
