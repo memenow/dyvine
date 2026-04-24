@@ -493,14 +493,11 @@ async def readiness_probe(request: Request) -> JSONResponse:
             operation_store_ok = False
             operation_store_status = "unavailable"
 
-    # R2 storage credentials are required to persist downloaded content.
-    r2_credentials = (
-        settings.r2.access_key_id,
-        settings.r2.secret_access_key,
-        settings.r2.bucket_name,
-        settings.r2.account_id,
-    )
-    r2_ok = all(bool(value) for value in r2_credentials)
+    # R2 storage credentials, bucket, and endpoint are all required to
+    # persist downloaded content. Delegate to ``R2Settings.is_configured``
+    # so ``/readyz`` and ``R2StorageService`` stay in lockstep on the
+    # exact fields a real upload needs.
+    r2_ok = settings.r2.is_configured
     r2_status = "configured" if r2_ok else "missing_credentials"
 
     ready = douyin_ok and container_ok and operation_store_ok and r2_ok

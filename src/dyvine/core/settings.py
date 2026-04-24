@@ -182,6 +182,7 @@ class R2Settings(BaseSettings):
                 self.access_key_id,
                 self.secret_access_key,
                 self.bucket_name,
+                self.endpoint,
             ]
         )
 
