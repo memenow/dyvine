@@ -425,3 +425,109 @@ async def test_download_post_content_error() -> None:
         await svc._download_post_content(
             {"aweme_id": "123"}, PostType.VIDEO, Path("/tmp")
         )
+
+
+# ── download_all_user_posts pagination guards ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_download_all_user_posts_breaks_on_empty_aweme_list() -> None:
+    """An empty ``aweme_list`` with ``has_more=True`` must not spin the loop.
+
+    Before the fix, a page with ``aweme_list=[]`` but ``has_more=True``
+    would fall through to the cursor-advance branch and reissue the same
+    request forever. The guarded ``break`` ends pagination as soon as the
+    upstream stops returning posts, mirroring the ``iterated`` sentinel
+    that PR #37 added to the livestream likes-only path.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 5
+    profile.nickname = "LoopUser"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/loop-user"))
+
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+
+        svc = _build_service(handler)
+        svc.handler = handler
+
+        # Each invocation returns ``has_more=True`` and a fresh cursor, so
+        # without the empty-batch guard the outer ``while True`` would
+        # advance forever. The test caps the fetch call count to ensure
+        # the loop exits instead of spinning.
+        call_count = 0
+
+        async def fake_fetch(
+            sec_user_id: str, cursor: int
+        ) -> dict:  # type: ignore[override]
+            nonlocal call_count
+            call_count += 1
+            if call_count > 5:  # safety net; the fix should cap at 1.
+                raise AssertionError("Outer pagination loop spun past the empty batch")
+            return {
+                "aweme_list": [],
+                "has_more": True,
+                "max_cursor": cursor + 1,
+            }
+
+        with patch.object(svc, "_fetch_posts_batch", side_effect=fake_fetch):
+            result = await svc.download_all_user_posts("loop-user")
+
+        # The first empty batch must short-circuit the loop.
+        assert call_count == 1
+        assert result.total_downloaded == 0
+
+
+@pytest.mark.asyncio
+async def test_download_all_user_posts_stops_on_batch_error() -> None:
+    """A persistent batch-level exception must not busy-loop.
+
+    The previous ``except Exception: continue`` path swallowed the error
+    without advancing ``current_cursor``, so any recurrent failure (e.g.
+    a flaky upstream) spun the loop. The fix converts ``continue`` to
+    ``break`` and surfaces the resulting state via the bulk response.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 3
+    profile.nickname = "ErrorUser"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/error-user"))
+
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+
+        svc = _build_service(handler)
+        svc.handler = handler
+
+        call_count = 0
+
+        async def failing_fetch(
+            sec_user_id: str, cursor: int
+        ) -> dict:  # type: ignore[override]
+            nonlocal call_count
+            call_count += 1
+            if call_count > 3:
+                raise AssertionError("Outer pagination loop spun past the batch error")
+            raise RuntimeError("upstream flaky")
+
+        with patch.object(svc, "_fetch_posts_batch", side_effect=failing_fetch):
+            result = await svc.download_all_user_posts("error-user")
+
+        assert call_count == 1
+        assert result.total_downloaded == 0
+        assert result.status == DownloadStatus.FAILED

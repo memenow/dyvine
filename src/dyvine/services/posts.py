@@ -267,6 +267,23 @@ class PostService:
                     if not posts:
                         break
 
+                    # Defensive break matching the ``iterated`` sentinel PR #37
+                    # added for the livestream likes-only path: if the upstream
+                    # page carries ``has_more=True`` but no posts, advancing
+                    # ``current_cursor`` would loop forever because the server
+                    # keeps echoing the same empty response. Treat an empty
+                    # ``aweme_list`` as end-of-feed.
+                    aweme_list = posts.get("aweme_list") or []
+                    if not aweme_list:
+                        logger.info(
+                            "Upstream returned empty batch; ending pagination",
+                            extra={
+                                "cursor": current_cursor,
+                                "has_more": posts.get("has_more"),
+                            },
+                        )
+                        break
+
                     await self._process_posts_batch(posts, download_stats, user_path)
 
                     # Handle pagination
@@ -283,10 +300,15 @@ class PostService:
                     logger.info("Moving to next page", extra={"cursor": current_cursor})
 
                 except Exception as batch_error:
+                    # A ``continue`` here without advancing ``current_cursor``
+                    # would busy-loop on a persistent upstream failure. Break
+                    # so the bulk response reflects whatever completed before
+                    # the error instead of spinning indefinitely.
                     logger.error(
-                        "Error processing batch", extra={"error": str(batch_error)}
+                        "Error processing batch; ending pagination",
+                        extra={"error": str(batch_error), "cursor": current_cursor},
                     )
-                    continue
+                    break
 
         except UserNotFoundError:
             raise
