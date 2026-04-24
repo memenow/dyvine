@@ -164,7 +164,7 @@ async def http_exception_handler(
         error_code = str(detail.get("error_code") or f"HTTP_{exc.status_code}")
         details = detail.get("details")
     else:
-        message = str(detail)
+        message = str(detail) if detail is not None else ""
         error_code = f"HTTP_{exc.status_code}"
         details = None
 
