@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from dyvine.services.storage import (
+    LIST_OBJECTS_HEAD_MAX_WORKERS,
     ContentType,
     R2StorageService,
     StorageError,
@@ -225,25 +229,36 @@ async def test_delete_object_client_error_surfaces_as_storage_error() -> None:
 
 @pytest.mark.asyncio
 async def test_list_objects_per_item_head_error_returns_empty_metadata() -> None:
+    """A per-item ``head_object`` failure is tolerated and ordering is preserved.
+
+    The fan-out is parallel, so the test dispatches ``head_object`` by key
+    rather than by call index to stay deterministic regardless of thread
+    scheduling. A mid-list failure still yields ``Metadata: {}`` for that
+    item while neighbors retain their metadata.
+    """
     from botocore.exceptions import ClientError
 
     svc = _build_service(with_client=True)
+    keys = [f"videos/u1/{c}.mp4" for c in ("a", "b", "c", "d", "e")]
     svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
-        "Contents": [
-            {"Key": "videos/u1/a.mp4", "Size": 1},
-            {"Key": "videos/u1/b.mp4", "Size": 2},
-        ]
+        "Contents": [{"Key": k, "Size": i + 1} for i, k in enumerate(keys)]
     }
-    svc.client.head_object.side_effect = [  # type: ignore[union-attr]
-        {"Metadata": {"author": "one"}},
-        ClientError({"Error": {"Code": "AccessDenied"}}, "HeadObject"),
-    ]
+
+    def head_by_key(**kwargs: Any) -> dict[str, Any]:
+        if kwargs["Key"] == "videos/u1/c.mp4":
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "HeadObject")
+        return {"Metadata": {"author": Path(kwargs["Key"]).stem}}
+
+    svc.client.head_object.side_effect = head_by_key  # type: ignore[union-attr]
 
     results = await svc.list_objects("videos/u1/")
 
-    assert [r["Key"] for r in results] == ["videos/u1/a.mp4", "videos/u1/b.mp4"]
-    assert results[0]["Metadata"] == {"author": "one"}
-    assert results[1]["Metadata"] == {}
+    assert [r["Key"] for r in results] == keys
+    assert results[0]["Metadata"] == {"author": "a"}
+    assert results[1]["Metadata"] == {"author": "b"}
+    assert results[2]["Metadata"] == {}  # mid-list failure
+    assert results[3]["Metadata"] == {"author": "d"}
+    assert results[4]["Metadata"] == {"author": "e"}
 
 
 @pytest.mark.asyncio
@@ -269,3 +284,119 @@ async def test_upload_file_guesses_content_type(tmp_path: Path) -> None:
 
     result = await svc.upload_file(f, "images/u/image.jpg", {"category": "posts"})
     assert "image" in result["content_type"]
+
+
+# ── list_objects parallel fan-out behavior ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_objects_preserves_order_under_variable_latency() -> None:
+    """``list_objects`` returns items in ``Contents`` order regardless of
+    how long each per-item ``head_object`` takes.
+
+    Early keys are made slow and later keys fast so that, under a parallel
+    fan-out, results would arrive out of order if ``_list_objects_sync``
+    naively yielded in completion order.
+    """
+    svc = _build_service(with_client=True)
+    keys = [f"videos/u1/{i:02d}.mp4" for i in range(10)]
+    svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
+        "Contents": [{"Key": k, "Size": i} for i, k in enumerate(keys)]
+    }
+
+    # Early keys sleep longer than later keys; parallel execution would
+    # otherwise let the fast ones finish first.
+    delays = {k: (len(keys) - i) * 0.01 for i, k in enumerate(keys)}
+
+    def head_by_key(**kwargs: Any) -> dict[str, Any]:
+        key = kwargs["Key"]
+        time.sleep(delays[key])
+        return {"Metadata": {"k": key}}
+
+    svc.client.head_object.side_effect = head_by_key  # type: ignore[union-attr]
+
+    results = await svc.list_objects("videos/u1/")
+
+    assert [r["Key"] for r in results] == keys
+    assert [r["Metadata"]["k"] for r in results] == keys
+
+
+@pytest.mark.asyncio
+async def test_list_objects_bounded_concurrency() -> None:
+    """``head_object`` fan-out never exceeds :data:`LIST_OBJECTS_HEAD_MAX_WORKERS`.
+
+    A counter tracks in-flight calls; the peak must not exceed the cap
+    even when the listing contains many more objects than workers.
+    """
+    svc = _build_service(with_client=True)
+    # Use comfortably more than the cap so the bound is actually hit.
+    keys = [f"videos/u1/{i:03d}.mp4" for i in range(LIST_OBJECTS_HEAD_MAX_WORKERS * 3)]
+    svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
+        "Contents": [{"Key": k, "Size": 1} for k in keys]
+    }
+
+    lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+
+    def head_counting(**_: Any) -> dict[str, Any]:
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            time.sleep(0.01)
+        finally:
+            with lock:
+                in_flight -= 1
+        return {"Metadata": {}}
+
+    svc.client.head_object.side_effect = head_counting  # type: ignore[union-attr]
+
+    results = await svc.list_objects("videos/u1/")
+
+    assert len(results) == len(keys)
+    assert peak <= LIST_OBJECTS_HEAD_MAX_WORKERS
+    # Sanity check: with this many keys the cap really was exercised.
+    assert peak >= 2
+
+
+@pytest.mark.asyncio
+async def test_list_objects_workers_capped_for_small_listings() -> None:
+    """For small listings, worker count is capped by item count, not the max.
+
+    Exercises the ``min(max, len(objects))`` sizing behavior so a small
+    page does not spin up a needlessly large pool.
+    """
+    svc = _build_service(with_client=True)
+    keys = ["videos/u1/only.mp4"]
+    svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
+        "Contents": [{"Key": k, "Size": 1} for k in keys]
+    }
+
+    lock = threading.Lock()
+    seen_threads: set[str] = set()
+
+    def head_record_thread(**_: Any) -> dict[str, Any]:
+        with lock:
+            seen_threads.add(threading.current_thread().name)
+        return {"Metadata": {}}
+
+    svc.client.head_object.side_effect = head_record_thread  # type: ignore[union-attr]
+
+    results = await svc.list_objects("videos/u1/")
+
+    assert len(results) == 1
+    assert len(seen_threads) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_objects_empty_returns_no_results() -> None:
+    """An empty ``Contents`` list short-circuits without launching a pool."""
+    svc = _build_service(with_client=True)
+    svc.client.list_objects_v2.return_value = {"Contents": []}  # type: ignore[union-attr]
+
+    results = await svc.list_objects("videos/u1/")
+
+    assert results == []
+    svc.client.head_object.assert_not_called()  # type: ignore[union-attr]
