@@ -422,25 +422,39 @@ class UserService:
 
                     current_batch_size = len(aweme_data.aweme_id)
                     downloaded_count += current_batch_size
-                    if total_posts > 0:
+                    # Likes-only runs have no known total up front, so we
+                    # cannot express progress as a percentage. Report
+                    # ``progress=None`` in that case and only fill in a
+                    # numeric percentage for the posts path where
+                    # ``total_posts`` reflects the profile's aweme_count.
+                    if downloading_likes_only:
+                        progress = None
+                    elif total_posts > 0:
                         progress = (downloaded_count / total_posts) * 100
                     else:
                         progress = 100.0
 
-                    self.operation_store.update_operation(
-                        task_id,
-                        progress=progress,
-                        completed_items=downloaded_count,
-                        total_items=total_posts,
-                        message="Download in progress",
-                    )
+                    update_fields: dict[str, Any] = {
+                        "completed_items": downloaded_count,
+                        "total_items": total_posts,
+                        "message": "Download in progress",
+                    }
+                    if progress is not None:
+                        update_fields["progress"] = progress
+                    self.operation_store.update_operation(task_id, **update_fields)
 
-                    logger.info(
-                        "Downloaded %s/%s posts (%.1f%%)",
-                        downloaded_count,
-                        total_posts,
-                        progress,
-                    )
+                    if progress is None:
+                        logger.info(
+                            "Downloaded %s liked items so far",
+                            downloaded_count,
+                        )
+                    else:
+                        logger.info(
+                            "Downloaded %s/%s posts (%.1f%%)",
+                            downloaded_count,
+                            total_posts,
+                            progress,
+                        )
 
                     # Download files to temp directory
                     await handler.downloader.create_download_tasks(
