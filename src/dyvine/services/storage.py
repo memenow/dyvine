@@ -15,7 +15,7 @@ import mimetypes
 import time
 import uuid
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -56,7 +56,7 @@ class StorageError(Exception):
     pass
 
 
-class ContentType(str, Enum):
+class ContentType(StrEnum):
     """Enum for content type categories."""
 
     POSTS = "posts"

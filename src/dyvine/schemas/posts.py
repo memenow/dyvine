@@ -9,12 +9,12 @@ This module defines Pydantic models and enums for:
 All models include proper type hints and validation.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 
-class PostType(str, Enum):
+class PostType(StrEnum):
     """Enumeration of possible post content types.
 
     Attributes:
@@ -36,7 +36,7 @@ class PostType(str, Enum):
     UNKNOWN = "unknown"
 
 
-class DownloadStatus(str, Enum):
+class DownloadStatus(StrEnum):
     """Enumeration of possible download operation statuses.
 
     Attributes:
