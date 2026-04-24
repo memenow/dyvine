@@ -72,7 +72,7 @@ async def test_get_download_status_raises_for_unknown_task() -> None:
 @pytest.mark.asyncio
 async def test_get_download_status_rejects_non_user_operation(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    operation = store.create_operation(
+    operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-1",
         status="pending",
@@ -180,7 +180,7 @@ async def test_process_download_no_posts(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
     service = UserService()
-    operation = service.operation_store.create_operation(
+    operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="empty-user",
         status="pending",
@@ -215,7 +215,7 @@ async def test_process_download_sets_failed_on_error(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
     service = UserService()
-    operation = service.operation_store.create_operation(
+    operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="bad-user",
         status="pending",
@@ -253,7 +253,7 @@ async def test_process_download_skips_when_nothing_requested(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
     service = UserService()
-    operation = service.operation_store.create_operation(
+    operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="opt-out-user",
         status="pending",
@@ -314,7 +314,7 @@ async def test_process_download_runs_when_only_likes_requested(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
     service = UserService()
-    operation = service.operation_store.create_operation(
+    operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="likes-only-user",
         status="pending",
@@ -385,7 +385,7 @@ async def test_process_download_likes_reports_progress_as_indeterminate(
     monkeypatch.chdir(tmp_path)
 
     service = UserService()
-    operation = service.operation_store.create_operation(
+    operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="likes-progress-user",
         status="pending",
@@ -395,12 +395,12 @@ async def test_process_download_likes_reports_progress_as_indeterminate(
     progress_samples: list[float | None] = []
     original_update = service.operation_store.update_operation
 
-    def capture_update(operation_id: str, **fields: Any) -> Any:
+    async def capture_update(operation_id: str, **fields: Any) -> Any:
         # Only capture in-loop updates (they carry ``completed_items`` but
         # never a ``status`` change; the ``running`` bootstrap update does).
         if "status" not in fields and "completed_items" in fields:
             progress_samples.append(fields.get("progress"))
-        return original_update(operation_id, **fields)
+        return await original_update(operation_id, **fields)
 
     monkeypatch.setattr(service.operation_store, "update_operation", capture_update)
 

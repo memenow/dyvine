@@ -343,7 +343,7 @@ class TestResolveStreams:
 @pytest.mark.asyncio
 async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    operation = store.create_operation(
+    operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-1",
         status="pending",
@@ -386,7 +386,7 @@ async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
     finally:
         livestreams_mod.DouyinDownloader = original_downloader
 
-    refreshed = store.get_operation(operation.operation_id)
+    refreshed = await store.get_operation(operation.operation_id)
     assert refreshed.status == "failed"
     assert refreshed.error == "Expected livestream artifact was not created"
     assert refreshed.download_path is None
@@ -426,7 +426,7 @@ async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    operation = store.create_operation(
+    operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-99",
         status="completed",
@@ -446,7 +446,7 @@ async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_get_download_status_rejects_non_livestream_operation(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    operation = store.create_operation(
+    operation = await store.create_operation(
         operation_type="user_content_download",
         subject_id="user-1",
         status="pending",
@@ -548,7 +548,7 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
     assert str(failures[0]) == "Already downloading this stream"
 
     # Only one operation record should exist for the room.
-    latest = store.get_latest_operation_for_subject(
+    latest = await store.get_latest_operation_for_subject(
         "room-77", operation_type="livestream_download"
     )
     assert latest is not None
