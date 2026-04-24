@@ -81,15 +81,7 @@ class R2StorageService:
         Configures the boto3 client with R2-specific settings and retry config.
         """
         # Check if R2 configuration is available
-        if not all(
-            [
-                settings.r2_endpoint,
-                settings.r2_account_id,
-                settings.r2_access_key_id,
-                settings.r2_secret_access_key,
-                settings.r2_bucket_name,
-            ]
-        ):
+        if not settings.r2.is_configured:
             logger.warning(
                 "R2 configuration incomplete, storage service will be disabled"
             )
