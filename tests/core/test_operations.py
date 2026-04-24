@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -113,7 +114,11 @@ def test_operation_store_get_latest_operation_for_subject(tmp_path) -> None:
 def test_operation_store_enables_wal(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
 
-    with sqlite3.connect(store.db_path) as connection:
+    # ``sqlite3.connect`` in a ``with`` block only commits/rollbacks — it does
+    # not close the connection. Wrap it in ``closing`` so ``-W error`` does
+    # not trip the ResourceWarning emitted when the connection is garbage
+    # collected.
+    with closing(sqlite3.connect(store.db_path)) as connection:
         mode = connection.execute("PRAGMA journal_mode;").fetchone()[0]
 
     assert mode.lower() == "wal"
@@ -122,7 +127,7 @@ def test_operation_store_enables_wal(tmp_path) -> None:
 def test_operation_store_creates_lookup_index(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
 
-    with sqlite3.connect(store.db_path) as connection:
+    with closing(sqlite3.connect(store.db_path)) as connection:
         row = connection.execute(
             """
             SELECT name FROM sqlite_master

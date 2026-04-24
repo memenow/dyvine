@@ -70,10 +70,18 @@ class OperationStore:
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, check_same_thread=False)
-        connection.row_factory = sqlite3.Row
-        # synchronous is a per-connection PRAGMA, so reapply on every connect.
-        connection.execute("PRAGMA synchronous=NORMAL;")
-        connection.execute("PRAGMA busy_timeout=5000;")
+        try:
+            connection.row_factory = sqlite3.Row
+            # synchronous is a per-connection PRAGMA, so reapply on every connect.
+            connection.execute("PRAGMA synchronous=NORMAL;")
+            connection.execute("PRAGMA busy_timeout=5000;")
+        except Exception:
+            # A post-open configuration failure (e.g. attempting to set
+            # synchronous on a read-only WAL database) must not leak the
+            # already-opened handle, or Python 3.13 will flag it as an
+            # unclosed database on garbage collection.
+            connection.close()
+            raise
         return connection
 
     def _initialize(self) -> None:
@@ -117,11 +125,19 @@ class OperationStore:
                 so callers can treat failure as "not ready".
         """
         # BEGIN IMMEDIATE acquires a RESERVED lock, which proves the database
-        # file is writable without mutating any rows.
+        # file is writable without mutating any rows. The rollback lives in
+        # ``finally`` so a failed BEGIN never leaves a pending transaction
+        # on the connection -- Python 3.13 turns that into a ResourceWarning
+        # at close time, which becomes an error under ``-W error``.
         with closing(self._connect()) as connection:
-            connection.execute("SELECT 1").fetchone()
-            connection.execute("BEGIN IMMEDIATE")
-            connection.rollback()
+            try:
+                connection.execute("SELECT 1").fetchone()
+                connection.execute("BEGIN IMMEDIATE")
+            finally:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
 
     @staticmethod
     def _now() -> str:
