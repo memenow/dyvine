@@ -29,6 +29,7 @@ Example:
         user_service = container.user_service
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any
 
@@ -38,6 +39,17 @@ from ..services.livestreams import LivestreamService
 from ..services.users import UserService
 from .operations import OperationStore
 from .settings import settings
+
+# Dedicated thread pool sizes per IO domain. The defaults are tuned for the
+# single-worker uvicorn deployment: R2 uploads are the dominant long-running
+# call, sqlite writes are short but frequent, and audit log writes are rare
+# but must never starve the other two pools. Keeping each domain in its own
+# bounded pool prevents a burst in one from exhausting the default asyncio
+# executor (``min(32, cpu+4)``) that every ``asyncio.to_thread`` call would
+# otherwise share.
+R2_EXECUTOR_MAX_WORKERS = 16
+SQLITE_EXECUTOR_MAX_WORKERS = 4
+AUDIT_EXECUTOR_MAX_WORKERS = 2
 
 
 class ServiceContainer:
@@ -74,6 +86,9 @@ class ServiceContainer:
         """
         self._services: dict[str, Any] = {}
         self._initialized = False
+        self._r2_executor: ThreadPoolExecutor | None = None
+        self._sqlite_executor: ThreadPoolExecutor | None = None
+        self._audit_executor: ThreadPoolExecutor | None = None
 
     async def initialize(self) -> None:
         """Initialize all registered services with their configurations.
@@ -87,6 +102,12 @@ class ServiceContainer:
             - DouyinHandler: Configured with headers, proxies, and download settings
             - OperationStore: Persistent state for asynchronous work
             - UserService: Basic user management service
+            - LivestreamService: Livestream download orchestration
+
+        Executors created:
+            - ``r2_executor`` (16 workers): R2 upload/head/delete/list
+            - ``sqlite_executor`` (4 workers): OperationStore writes/reads
+            - ``audit_executor`` (2 workers): LifecycleManager audit writes
 
         Note:
             This method is awaited by the FastAPI lifespan. Direct access
@@ -96,28 +117,79 @@ class ServiceContainer:
         if self._initialized:
             return
 
+        # Create dedicated thread pool executors for each IO domain before
+        # instantiating any service that might need one. The thread-name
+        # prefix shows up in logs/traces so hot threads are easy to spot.
+        self._r2_executor = ThreadPoolExecutor(
+            max_workers=R2_EXECUTOR_MAX_WORKERS,
+            thread_name_prefix="dyvine-r2",
+        )
+        self._sqlite_executor = ThreadPoolExecutor(
+            max_workers=SQLITE_EXECUTOR_MAX_WORKERS,
+            thread_name_prefix="dyvine-sqlite",
+        )
+        self._audit_executor = ThreadPoolExecutor(
+            max_workers=AUDIT_EXECUTOR_MAX_WORKERS,
+            thread_name_prefix="dyvine-audit",
+        )
+
         # Initialize Douyin handler with configuration
         douyin_config = self._create_douyin_config()
         self._services["douyin_handler"] = DouyinHandler(douyin_config)
 
         # Initialize operation store (sqlite bootstrap happens synchronously
         # inside the constructor, which is cheap and keeps the OperationStore
-        # usable from both async and sync contexts).
-        operation_store = OperationStore()
+        # usable from both async and sync contexts). The dedicated sqlite
+        # executor is attached immediately so the recovery sweep below
+        # already runs on the bounded pool.
+        operation_store = OperationStore(executor=self._sqlite_executor)
         self._services["operation_store"] = operation_store
         await operation_store.mark_incomplete_operations_failed()
 
-        # Initialize user service
-        self._services["user_service"] = UserService(operation_store=operation_store)
+        # Initialize user service and wire its R2 client to the R2 executor.
+        user_service = UserService(operation_store=operation_store)
+        user_service.storage.set_executor(self._r2_executor)
+        self._services["user_service"] = user_service
 
         # Initialize livestream service
         self._services["livestream_service"] = LivestreamService(
             douyin_handler=self._services["douyin_handler"],
-            user_service=self._services["user_service"],
+            user_service=user_service,
             operation_store=operation_store,
         )
 
         self._initialized = True
+
+    async def shutdown(self) -> None:
+        """Release services and tear down the dedicated executor pools.
+
+        Called from the FastAPI lifespan's shutdown branch so that the
+        worker threads held by each ``ThreadPoolExecutor`` do not outlive
+        the application. Safe to call multiple times; subsequent calls are
+        no-ops.
+
+        Each executor is shut down with ``wait=True`` so pending work (e.g.
+        a final audit-log write) drains before the process exits. Executors
+        are shut down in reverse initialization order so downstream
+        dependencies finish before their producers go away.
+        """
+        if not self._initialized:
+            return
+
+        # Let the operation store close its per-thread reader connections
+        # before we reap the sqlite executor that owns those worker threads.
+        operation_store = self._services.get("operation_store")
+        if isinstance(operation_store, OperationStore):
+            operation_store.shutdown()
+
+        for attr in ("_audit_executor", "_sqlite_executor", "_r2_executor"):
+            executor = getattr(self, attr)
+            if executor is not None:
+                executor.shutdown(wait=True)
+                setattr(self, attr, None)
+
+        self._services.clear()
+        self._initialized = False
 
     def _create_douyin_config(self) -> dict[str, Any]:
         """Create Douyin handler configuration from application settings.

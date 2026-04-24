@@ -12,14 +12,16 @@ R2 storage operations including:
 
 import asyncio
 import base64
+import functools
 import mimetypes
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Executor, ThreadPoolExecutor
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import boto3
 from botocore.config import Config
@@ -28,6 +30,8 @@ from prometheus_client import Counter, Histogram
 
 from ..core.logging import ContextLogger
 from ..core.settings import settings
+
+_R = TypeVar("_R")
 
 # Initialize logger
 logger = ContextLogger(__name__)
@@ -83,11 +87,20 @@ class R2StorageService:
         bucket: Name of the R2 bucket
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, executor: Executor | None = None) -> None:
         """Initialize the R2 storage service.
 
         Configures the boto3 client with R2-specific settings and retry config.
+
+        Args:
+            executor: Optional dedicated ``concurrent.futures.Executor`` used
+                to run the synchronous boto3 operations off the event loop.
+                When ``None`` the service falls back to the default asyncio
+                executor, which keeps historical behavior for tests that
+                build the service directly.
         """
+        self._executor: Executor | None = executor
+
         # Check if R2 configuration is available
         if not settings.r2.is_configured:
             logger.warning(
@@ -117,6 +130,30 @@ class R2StorageService:
             "R2StorageService initialized",
             extra={"bucket": self.bucket, "endpoint": settings.r2_endpoint},
         )
+
+    def set_executor(self, executor: Executor | None) -> None:
+        """Attach a dedicated executor after construction.
+
+        The service is instantiated eagerly inside ``UserService`` today; the
+        ``ServiceContainer`` wires in the shared R2 executor post-hoc so all
+        R2 calls share one bounded thread pool without changing the
+        ``UserService`` constructor signature.
+        """
+        self._executor = executor
+
+    async def _run(self, func: Callable[..., _R], /, *args: Any, **kwargs: Any) -> _R:
+        """Dispatch a blocking boto3 call to the configured executor.
+
+        Uses ``loop.run_in_executor`` with ``functools.partial`` so callers can
+        pass keyword arguments, and falls back to the default executor when
+        none has been attached (e.g. unit tests that exercise the service in
+        isolation).
+        """
+        loop = asyncio.get_running_loop()
+        result: _R = await loop.run_in_executor(
+            self._executor, functools.partial(func, *args, **kwargs)
+        )
+        return result
 
     def generate_ugc_path(
         self, user_id: str, original_filename: str, content_type: str
@@ -312,7 +349,7 @@ class R2StorageService:
                 },
             )
 
-            url = await asyncio.to_thread(
+            url = await self._run(
                 self._upload_file_sync,
                 file_path=file_path,
                 storage_path=storage_path,
@@ -412,7 +449,7 @@ class R2StorageService:
             )
 
         try:
-            response = await asyncio.to_thread(
+            response = await self._run(
                 self.client.head_object, Bucket=self.bucket, Key=storage_path
             )
             return response.get("Metadata", {})
@@ -437,7 +474,7 @@ class R2StorageService:
             )
 
         try:
-            await asyncio.to_thread(
+            await self._run(
                 self.client.delete_object, Bucket=self.bucket, Key=storage_path
             )
             logger.info("Object deleted", extra={"storage_path": storage_path})
@@ -473,7 +510,7 @@ class R2StorageService:
             )
 
         try:
-            return await asyncio.to_thread(
+            return await self._run(
                 self._list_objects_sync, prefix=prefix, max_keys=max_keys
             )
         except ClientError as e:

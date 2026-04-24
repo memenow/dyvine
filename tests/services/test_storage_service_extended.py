@@ -20,6 +20,10 @@ from dyvine.services.storage import (
 def _build_service(*, with_client: bool = False) -> R2StorageService:
     """Create R2StorageService without boto3 initialization."""
     svc = object.__new__(R2StorageService)
+    # The service normally takes its executor through ``__init__``. ``None``
+    # falls back to the default asyncio executor, which is enough for tests
+    # that exercise the service in isolation.
+    svc._executor = None  # type: ignore[attr-defined]
     if with_client:
         svc.client = MagicMock()  # type: ignore[attr-defined]
         svc.bucket = "test-bucket"  # type: ignore[attr-defined]
