@@ -211,6 +211,55 @@ async def test_delete_object_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_object_client_error_surfaces_as_storage_error() -> None:
+    from botocore.exceptions import ClientError
+
+    svc = _build_service(with_client=True)
+    svc.client.delete_object.side_effect = ClientError(  # type: ignore[union-attr]
+        {"Error": {"Code": "AccessDenied"}}, "DeleteObject"
+    )
+
+    with pytest.raises(StorageError, match="Deletion failed"):
+        await svc.delete_object("videos/u1/clip.mp4")
+
+
+@pytest.mark.asyncio
+async def test_list_objects_per_item_head_error_returns_empty_metadata() -> None:
+    from botocore.exceptions import ClientError
+
+    svc = _build_service(with_client=True)
+    svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
+        "Contents": [
+            {"Key": "videos/u1/a.mp4", "Size": 1},
+            {"Key": "videos/u1/b.mp4", "Size": 2},
+        ]
+    }
+    svc.client.head_object.side_effect = [  # type: ignore[union-attr]
+        {"Metadata": {"author": "one"}},
+        ClientError({"Error": {"Code": "AccessDenied"}}, "HeadObject"),
+    ]
+
+    results = await svc.list_objects("videos/u1/")
+
+    assert [r["Key"] for r in results] == ["videos/u1/a.mp4", "videos/u1/b.mp4"]
+    assert results[0]["Metadata"] == {"author": "one"}
+    assert results[1]["Metadata"] == {}
+
+
+@pytest.mark.asyncio
+async def test_list_objects_client_error_surfaces_as_storage_error() -> None:
+    from botocore.exceptions import ClientError
+
+    svc = _build_service(with_client=True)
+    svc.client.list_objects_v2.side_effect = ClientError(  # type: ignore[union-attr]
+        {"Error": {"Code": "AccessDenied"}}, "ListObjectsV2"
+    )
+
+    with pytest.raises(StorageError, match="List objects failed"):
+        await svc.list_objects("videos/u1/")
+
+
+@pytest.mark.asyncio
 async def test_upload_file_guesses_content_type(tmp_path: Path) -> None:
     svc = _build_service(with_client=True)
     f = tmp_path / "image.jpg"

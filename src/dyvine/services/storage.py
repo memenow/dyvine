@@ -476,13 +476,14 @@ class R2StorageService:
             raise StorageError(f"List objects failed: {str(e)}") from e
 
     def _list_objects_sync(self, *, prefix: str, max_keys: int) -> list[dict[str, Any]]:
-        """Paginate object listings and fan out per-object ``head_object``.
+        """Run one ``list_objects_v2`` plus the per-object ``head_object`` fan-out.
 
         Kept in a private sync method so the whole listing -- including the
         N follow-up ``head_object`` calls that carry object metadata -- runs
         in a single worker thread rather than bouncing every call back to
-        the event loop. The N+1 shape is still present and is tracked as a
-        separate optimization item.
+        the event loop. ``max_keys`` caps the single page; callers that need
+        more than one page are expected to paginate themselves. The N+1
+        shape is tracked as a separate optimization item.
         """
         assert self.client is not None and self.bucket is not None
         response = self.client.list_objects_v2(
