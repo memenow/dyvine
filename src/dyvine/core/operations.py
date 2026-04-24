@@ -5,26 +5,32 @@ operation metadata. It is intended for API workflows that return immediately
 and complete in the background, such as content downloads.
 
 All public methods are ``async`` and delegate the synchronous ``sqlite3``
-calls to ``asyncio.to_thread`` so they never block the event loop. Per-page
-progress updates on long-running downloads used to stall other requests on a
+calls to a dedicated ``concurrent.futures.Executor`` (owned by
+``ServiceContainer``) so they never block the event loop. Per-page progress
+updates on long-running downloads used to stall other requests on a
 single-worker uvicorn deployment; moving the IO off-loop restores fairness.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import sqlite3
 import threading
 import uuid
+from collections.abc import Callable
+from concurrent.futures import Executor
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .exceptions import DownloadError
 from .settings import settings
+
+_R = TypeVar("_R")
 
 
 @dataclass(slots=True)
@@ -69,21 +75,60 @@ class OperationStore:
     """SQLite-backed persistence for asynchronous operation state.
 
     Public methods are coroutines. They perform no sqlite IO on the calling
-    thread: every database call is dispatched to ``asyncio.to_thread`` so the
-    event loop stays responsive during progress updates, healthchecks, and
-    cross-request writes. The synchronous implementation is kept private
-    (``_<name>_sync``) so it can be unit tested directly and reused from
-    non-async bootstrapping paths (currently only ``__init__``).
+    thread: every database call is dispatched to a dedicated executor owned
+    by the container so the event loop stays responsive during progress
+    updates, healthchecks, and cross-request writes. The synchronous
+    implementation is kept private (``_<name>_sync``) so it can be unit
+    tested directly and reused from non-async bootstrapping paths
+    (currently only ``__init__``).
     """
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        executor: Executor | None = None,
+    ) -> None:
         self.db_path = Path(db_path or settings.operation_db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # ``threading.Lock`` because ``asyncio.to_thread`` hands work to a
-        # shared thread pool; several worker threads can race for the same
+        # ``threading.Lock`` because the sqlite worker pool hands work to
+        # multiple threads; several worker threads can race for the same
         # connection attempt if we only relied on asyncio coordination.
         self._lock = threading.Lock()
+        self._executor: Executor | None = executor
         self._initialize()
+
+    def set_executor(self, executor: Executor | None) -> None:
+        """Attach a dedicated executor after construction.
+
+        The container owns the sqlite executor lifecycle. Late binding lets
+        the store bootstrap synchronously inside ``ServiceContainer`` (no
+        running event loop yet) while still routing every later async call
+        through the dedicated worker pool.
+        """
+        self._executor = executor
+
+    def shutdown(self) -> None:
+        """Release any per-store resources held outside the executor.
+
+        The default implementation is a no-op; subsequent refactors add a
+        per-thread reader connection pool that hooks in here to close its
+        handles before the owning executor reaps its worker threads.
+        """
+        return None
+
+    async def _run(self, func: Callable[..., _R], /, *args: Any, **kwargs: Any) -> _R:
+        """Dispatch a blocking sqlite call to the configured executor.
+
+        Falls back to the default asyncio executor when no dedicated pool is
+        attached, which keeps tests that instantiate the store directly
+        working without a container.
+        """
+        loop = asyncio.get_running_loop()
+        result: _R = await loop.run_in_executor(
+            self._executor, functools.partial(func, *args, **kwargs)
+        )
+        return result
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -141,7 +186,7 @@ class OperationStore:
                 the connection or executing a trivial write-capable probe,
                 so callers can treat failure as "not ready".
         """
-        await asyncio.to_thread(self._healthcheck_sync)
+        await self._run(self._healthcheck_sync)
 
     def _healthcheck_sync(self) -> None:
         # BEGIN IMMEDIATE acquires a RESERVED lock, which proves the database
@@ -207,7 +252,7 @@ class OperationStore:
         operation_id: str | None = None,
     ) -> OperationRecord:
         """Create and persist a new operation."""
-        return await asyncio.to_thread(
+        return await self._run(
             self._create_operation_sync,
             operation_type=operation_type,
             subject_id=subject_id,
@@ -283,7 +328,7 @@ class OperationStore:
 
     async def get_operation(self, operation_id: str) -> OperationRecord:
         """Fetch a single operation or raise ``DownloadError``."""
-        return await asyncio.to_thread(self._get_operation_sync, operation_id)
+        return await self._run(self._get_operation_sync, operation_id)
 
     def _get_operation_sync(self, operation_id: str) -> OperationRecord:
         with self._lock, closing(self._connect()) as connection:
@@ -311,7 +356,7 @@ class OperationStore:
         Raises:
             DownloadError: If no operation matches the subject identifier.
         """
-        return await asyncio.to_thread(
+        return await self._run(
             self._get_latest_operation_for_subject_sync,
             subject_id,
             operation_type=operation_type,
@@ -341,9 +386,7 @@ class OperationStore:
         self, operation_id: str, **fields: Any
     ) -> OperationRecord:
         """Update selected fields on an operation and return the new state."""
-        return await asyncio.to_thread(
-            self._update_operation_sync, operation_id, **fields
-        )
+        return await self._run(self._update_operation_sync, operation_id, **fields)
 
     def _update_operation_sync(
         self, operation_id: str, **fields: Any
@@ -389,7 +432,7 @@ class OperationStore:
         Returns:
             Number of operations that were updated.
         """
-        return await asyncio.to_thread(self._mark_incomplete_operations_failed_sync)
+        return await self._run(self._mark_incomplete_operations_failed_sync)
 
     def _mark_incomplete_operations_failed_sync(self) -> int:
         updated_at = self._now()

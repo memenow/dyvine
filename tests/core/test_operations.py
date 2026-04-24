@@ -199,12 +199,10 @@ async def test_operation_store_update_runs_in_thread(
 ) -> None:
     """Writes must not block the event loop.
 
-    Patch ``asyncio.to_thread`` to record that it was invoked for every
-    public method that is supposed to delegate. Without this contract,
-    per-page progress updates would stall the loop during bulk downloads.
+    Wrap ``OperationStore._run`` to record every sync helper that gets
+    dispatched. Without this contract, per-page progress updates would
+    stall the loop during bulk downloads.
     """
-    import asyncio as _asyncio
-
     store = OperationStore(str(tmp_path / "operations.db"))
     created = await store.create_operation(
         operation_type="livestream_download",
@@ -214,13 +212,13 @@ async def test_operation_store_update_runs_in_thread(
     )
 
     calls: list[str] = []
-    original = _asyncio.to_thread
+    original_run = store._run
 
-    async def tracking_to_thread(fn, *args, **kwargs):
+    async def tracking_run(fn, /, *args, **kwargs):
         calls.append(fn.__name__)
-        return await original(fn, *args, **kwargs)
+        return await original_run(fn, *args, **kwargs)
 
-    monkeypatch.setattr("dyvine.core.operations.asyncio.to_thread", tracking_to_thread)
+    monkeypatch.setattr(store, "_run", tracking_run)
 
     await store.update_operation(
         created.operation_id, status="running", message="running"

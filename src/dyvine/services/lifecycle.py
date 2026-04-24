@@ -12,7 +12,9 @@ content based on content type and age.
 """
 
 import asyncio
+import functools
 import json
+from concurrent.futures import Executor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -42,13 +44,24 @@ class LifecycleManager:
         audit_config: Audit logging configuration
     """
 
-    def __init__(self, storage: R2StorageService) -> None:
+    def __init__(
+        self,
+        storage: R2StorageService,
+        *,
+        executor: Executor | None = None,
+    ) -> None:
         """Initialize the lifecycle manager.
 
         Args:
-            storage: Configured R2StorageService instance
+            storage: Configured R2StorageService instance.
+            executor: Optional dedicated ``concurrent.futures.Executor`` used
+                to run the synchronous audit-log writer off the event loop.
+                When ``None`` the manager falls back to the default asyncio
+                executor, keeping unit tests that build the manager directly
+                working without a container.
         """
         self.storage = storage
+        self._executor: Executor | None = executor
         self.rules: dict[str, Any] = {}
         self.audit_config: dict[str, Any] = {}
         self._load_config()
@@ -56,6 +69,10 @@ class LifecycleManager:
         logger.info(
             "LifecycleManager initialized", extra={"rules_count": len(self.rules)}
         )
+
+    def set_executor(self, executor: Executor | None) -> None:
+        """Attach a dedicated executor after construction."""
+        self._executor = executor
 
     def _load_config(self) -> None:
         """Load lifecycle configuration from JSON file."""
@@ -200,7 +217,11 @@ class LifecycleManager:
             summary: Summary of actions taken
         """
         try:
-            await asyncio.to_thread(self._write_audit_log_sync, summary)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                self._executor,
+                functools.partial(self._write_audit_log_sync, summary),
+            )
         except Exception as e:
             logger.exception("Failed to write audit log", extra={"error": str(e)})
 

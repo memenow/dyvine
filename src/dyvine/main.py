@@ -170,6 +170,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     app.state.startup_complete = False
 
+    # Drain the dedicated executor pools before the process exits. Missing
+    # this step leaves non-daemon worker threads alive and delays shutdown
+    # until the Python interpreter tears them down.
+    try:
+        await container.shutdown()
+    except Exception:  # pragma: no cover - shutdown is best-effort
+        app.state.logger.exception("Service container shutdown failed")
+
 
 # Create FastAPI application instance with comprehensive configuration
 app = FastAPI(

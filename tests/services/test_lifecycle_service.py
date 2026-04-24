@@ -41,6 +41,9 @@ def _build_manager(
     mgr.storage = MagicMock()  # type: ignore[attr-defined]
     mgr.storage.list_objects = AsyncMock(return_value=[])  # type: ignore[attr-defined]
     mgr.storage.delete_object = AsyncMock()  # type: ignore[attr-defined]
+    # The container normally injects a dedicated audit executor; ``None``
+    # falls back to the default asyncio executor, which is enough for tests.
+    mgr._executor = None  # type: ignore[attr-defined]
     mgr.rules = rules or {}  # type: ignore[attr-defined]
     mgr.audit_config = audit_config or {  # type: ignore[attr-defined]
         "enabled": False,

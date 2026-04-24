@@ -10,6 +10,7 @@ from dyvine.services.storage import ContentType, R2StorageService, StorageError
 
 def build_service_without_init() -> R2StorageService:
     service = object.__new__(R2StorageService)
+    service._executor = None  # type: ignore[attr-defined]
     return service  # type: ignore[return-value]
 
 

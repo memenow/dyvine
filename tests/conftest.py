@@ -59,4 +59,6 @@ def storage_service_no_init():
     """Create R2StorageService without calling __init__ (avoids boto3)."""
     from dyvine.services.storage import R2StorageService
 
-    return object.__new__(R2StorageService)
+    service = object.__new__(R2StorageService)
+    service._executor = None  # type: ignore[attr-defined]
+    return service
