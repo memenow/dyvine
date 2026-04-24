@@ -302,6 +302,7 @@ docker run -d \
 - **Monitoring**: Scrape `/metrics` and aggregate structured logs
 - **Horizontal Scaling**: Use a shared operation backend before increasing replicas beyond 1
 - **Backup**: Implement persistent volume and log archival strategies
+- **Persistent Storage**: The default Kubernetes manifests provision a `ReadWriteOnce` `PersistentVolumeClaim` named `dyvine-operation-state` for the SQLite-backed operation store at `/app/data`. The cluster must provide a default StorageClass. Reusing `emptyDir` is not supported because operation state must survive Pod restarts.
 
 ## Monitoring and Logging
 
@@ -322,6 +323,11 @@ Response includes:
 - Memory and CPU metrics
 - Prometheus-compatible metrics at `/metrics`
 
+#### Breaking changes in probe semantics
+
+- `/livez`, `/readyz`, `/startupz` are the orchestration-facing probes.
+- `/health` is retained as a human-facing summary endpoint. Its HTTP status semantics changed with the introduction of separate probes: it now returns `503` only when the aggregated status is `unhealthy`; a `degraded` status (for example, R2 credentials missing) now returns `200`. Monitors previously relying on `/health` to page on `degraded` should migrate to `/readyz`, which fails closed when any dependency is missing.
+
 ### Logging Features
 
 - Structured JSON logging for machine readability
@@ -340,6 +346,7 @@ Response includes:
 
 - The bundled Kubernetes manifests run the API as a single replica because the default operation store uses a pod-local SQLite file.
 - Do not increase replicas or enable autoscaling until you replace the SQLite-backed operation store with a shared backend.
+- The base manifests include a `PersistentVolumeClaim` (`dyvine-operation-state`, `ReadWriteOnce`, 1Gi) mounted at `/app/data` so that in-flight operation records survive Pod restarts. Increasing replicas beyond 1 still requires replacing the SQLite-backed operation store with a shared backend.
 
 ### Development Commands
 
