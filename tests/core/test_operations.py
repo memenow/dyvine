@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import sqlite3
+
 import pytest
 
 from dyvine.core.exceptions import DownloadError
@@ -105,3 +108,68 @@ def test_operation_store_get_latest_operation_for_subject(tmp_path) -> None:
 
     assert latest.operation_id == second.operation_id
     assert latest.operation_id != first.operation_id
+
+
+def test_operation_store_enables_wal(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+
+    with sqlite3.connect(store.db_path) as connection:
+        mode = connection.execute("PRAGMA journal_mode;").fetchone()[0]
+
+    assert mode.lower() == "wal"
+
+
+def test_operation_store_creates_lookup_index(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+
+    with sqlite3.connect(store.db_path) as connection:
+        row = connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_operations_subject_type_updated'
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == "idx_operations_subject_type_updated"
+
+
+def test_operation_store_healthcheck_succeeds(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+
+    store.healthcheck()
+
+
+def test_operation_store_healthcheck_fails_when_path_unwritable(tmp_path) -> None:
+    readonly_dir = tmp_path / "readonly"
+    readonly_dir.mkdir()
+    store = OperationStore(str(readonly_dir / "operations.db"))
+
+    # Drop write permissions on both the database file and its parent directory
+    # so BEGIN IMMEDIATE cannot acquire a RESERVED lock.
+    os.chmod(store.db_path, 0o444)
+    os.chmod(readonly_dir, 0o555)
+
+    try:
+        with pytest.raises(Exception):
+            store.healthcheck()
+    finally:
+        os.chmod(readonly_dir, 0o755)
+        os.chmod(store.db_path, 0o644)
+
+
+def test_operation_store_reads_back_empty_strings_as_empty(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+
+    created = store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-empty",
+        status="pending",
+        message="scheduled",
+        download_path="",
+        error="",
+    )
+
+    loaded = store.get_operation(created.operation_id)
+    assert loaded.download_path == ""
+    assert loaded.error == ""
