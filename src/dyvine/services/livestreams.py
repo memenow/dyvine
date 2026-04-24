@@ -53,6 +53,10 @@ class LivestreamService:
             "proxies": base_config["proxies"],
         }
         self.download_jobs: dict[str, asyncio.Task[Any]] = {}
+        # Serializes the dedupe-check / job-registration window so concurrent
+        # callers cannot both observe an empty ``download_jobs`` across the
+        # metadata await in ``download_stream``.
+        self._dedupe_lock: asyncio.Lock | None = None
         self.user_service = user_service
         self.operation_store = operation_store
         self.douyin_handler = douyin_handler
@@ -422,6 +426,19 @@ class LivestreamService:
     # Main download orchestrator
     # ------------------------------------------------------------------
 
+    def _get_dedupe_lock(self) -> asyncio.Lock:
+        """Return the dedupe lock, creating it lazily on first use.
+
+        ``asyncio.Lock`` binds to the running event loop, so constructing it on
+        first access keeps the service usable from bare ``object.__new__``
+        stubs in unit tests and avoids tying initialization to a specific loop.
+        """
+        lock = getattr(self, "_dedupe_lock", None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._dedupe_lock = lock
+        return lock
+
     async def download_stream(
         self, url: str, output_path: str | None = None
     ) -> LiveStreamDownloadResponse:
@@ -472,9 +489,6 @@ class LivestreamService:
         )
         room_id = str(room_info.get("room_id", webcast_id) or webcast_id)
 
-        if room_id in self.download_jobs:
-            raise LivestreamError("Already downloading this stream")
-
         status_code = room_info.get("status")
         if status_code != 2:
             raise LivestreamError(
@@ -524,31 +538,41 @@ class LivestreamService:
         }
 
         target_file = output_dir / f"{room_id}_live.flv"
-        operation = self.operation_store.create_operation(
-            operation_type="livestream_download",
-            subject_id=room_id,
-            status="pending",
-            message="Livestream download scheduled",
-            progress=0.0,
-            download_path=str(target_file),
-            metadata={
-                "source_url": normalized,
-                "webcast_id": webcast_id,
-                "room_id": room_id,
-            },
-        )
 
-        job = asyncio.create_task(
-            self._run_stream_download(
-                operation.operation_id,
-                room_id,
-                download_kwargs,
-                webcast_payload,
-                output_dir,
-                target_file,
+        # Hold the dedupe lock across the check/register window so two
+        # concurrent callers for the same ``room_id`` cannot both observe an
+        # empty ``download_jobs`` and double-schedule a background task that
+        # writes to the same target file.
+        async with self._get_dedupe_lock():
+            if room_id in self.download_jobs:
+                raise LivestreamError("Already downloading this stream")
+
+            operation = self.operation_store.create_operation(
+                operation_type="livestream_download",
+                subject_id=room_id,
+                status="pending",
+                message="Livestream download scheduled",
+                progress=0.0,
+                download_path=str(target_file),
+                metadata={
+                    "source_url": normalized,
+                    "webcast_id": webcast_id,
+                    "room_id": room_id,
+                },
             )
-        )
-        self.download_jobs[room_id] = job
+
+            job = asyncio.create_task(
+                self._run_stream_download(
+                    operation.operation_id,
+                    room_id,
+                    download_kwargs,
+                    webcast_payload,
+                    output_dir,
+                    target_file,
+                )
+            )
+            self.download_jobs[room_id] = job
+
         return LiveStreamDownloadResponse(**operation.to_response())
 
     async def _run_stream_download(

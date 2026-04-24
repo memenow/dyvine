@@ -4,6 +4,7 @@ These tests cover the static/class methods that don't require network
 access or the f2 runtime, making them fast and deterministic.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -456,3 +457,109 @@ async def test_get_download_status_rejects_non_livestream_operation(tmp_path) ->
 
     with pytest.raises(livestreams_mod.DownloadError):
         await service.get_download_status(operation.operation_id)
+
+
+@pytest.mark.asyncio
+async def test_download_stream_serializes_concurrent_requests_same_room(
+    tmp_path,
+) -> None:
+    """Two concurrent callers for the same room must not both schedule a job.
+
+    Simulates the race where both coroutines reach the metadata await before
+    either has registered an entry in ``download_jobs``. Exactly one call must
+    succeed, the other must raise ``LivestreamError``, and only a single
+    operation record must exist for the room.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    service = object.__new__(LivestreamService)
+    service.settings = SimpleNamespace(douyin_cookie="cookie")
+    service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
+    service.download_jobs = {}
+    service.user_service = None
+    service.operation_store = store
+    service.douyin_handler = None
+    service._dedupe_lock = asyncio.Lock()
+
+    service._parse_url = lambda url: ("live.douyin.com", "/abc", "abc")  # type: ignore[method-assign]
+
+    async def resolve_webcast_id(*args, **kwargs):
+        return "webcast-1", {"room_id": "room-77", "status": 2}
+
+    async def load_live_filter(*args, **kwargs):
+        # Yield control once so both callers enter the await before either
+        # reaches the dedupe-check / registration section.
+        await asyncio.sleep(0)
+        return None
+
+    service._resolve_webcast_id = resolve_webcast_id  # type: ignore[method-assign]
+    service._load_live_filter = load_live_filter  # type: ignore[method-assign]
+    service._resolve_streams = lambda live_filter, profile: (  # type: ignore[method-assign]
+        {"HD1": "https://stream"},
+        {},
+    )
+    service._select_stream_url = lambda stream_map: "https://stream"  # type: ignore[method-assign]
+
+    # Prevent the background task from performing a real download.
+    class NoopDownloader:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            pass
+
+        async def __aenter__(self) -> "NoopDownloader":
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def create_stream_tasks(
+            self,
+            download_kwargs: dict[str, Any],
+            webcast_payload: dict[str, Any],
+            output_dir: Path,
+        ) -> None:
+            return None
+
+    original_downloader = livestreams_mod.DouyinDownloader
+    livestreams_mod.DouyinDownloader = NoopDownloader
+    try:
+        results = await asyncio.gather(
+            service.download_stream(
+                "https://live.douyin.com/abc",
+                output_path=str(tmp_path / "dl"),
+            ),
+            service.download_stream(
+                "https://live.douyin.com/abc",
+                output_path=str(tmp_path / "dl"),
+            ),
+            return_exceptions=True,
+        )
+    finally:
+        livestreams_mod.DouyinDownloader = original_downloader
+        # Await the scheduled background task so it settles before teardown.
+        job = service.download_jobs.get("room-77")
+        if job is not None:
+            await job
+
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    failures = [r for r in results if isinstance(r, BaseException)]
+
+    assert len(successes) == 1, f"Expected exactly one success, got {results!r}"
+    assert len(failures) == 1, f"Expected exactly one failure, got {results!r}"
+    assert isinstance(failures[0], LivestreamError)
+    assert str(failures[0]) == "Already downloading this stream"
+
+    # Only one operation record should exist for the room.
+    latest = store.get_latest_operation_for_subject(
+        "room-77", operation_type="livestream_download"
+    )
+    assert latest is not None
+    assert latest.subject_id == "room-77"
+    connection = store._connect()  # type: ignore[attr-defined]
+    try:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM operations WHERE subject_id = ? "
+            "AND operation_type = ?",
+            ("room-77", "livestream_download"),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 1
