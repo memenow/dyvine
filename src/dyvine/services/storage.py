@@ -15,6 +15,7 @@ import base64
 import mimetypes
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -49,6 +50,12 @@ r2_upload_duration = Histogram(
 r2_upload_failures = Counter(
     "r2_upload_failures_total", "Total number of R2 upload failures", ["error_type"]
 )
+
+# Upper bound on concurrent ``head_object`` calls issued while hydrating
+# object metadata inside ``_list_objects_sync``. Capped to keep a single
+# listing from exhausting the boto3 connection pool (default 10) by too
+# much; the pool is still resized on demand per request.
+LIST_OBJECTS_HEAD_MAX_WORKERS = 16
 
 
 class StorageError(Exception):
@@ -476,37 +483,56 @@ class R2StorageService:
             raise StorageError(f"List objects failed: {str(e)}") from e
 
     def _list_objects_sync(self, *, prefix: str, max_keys: int) -> list[dict[str, Any]]:
-        """Run one ``list_objects_v2`` plus the per-object ``head_object`` fan-out.
+        """Run one ``list_objects_v2`` plus a bounded parallel ``head_object`` fan-out.
 
         Kept in a private sync method so the whole listing -- including the
         N follow-up ``head_object`` calls that carry object metadata -- runs
-        in a single worker thread rather than bouncing every call back to
-        the event loop. ``max_keys`` caps the single page; callers that need
-        more than one page are expected to paginate themselves. The N+1
-        shape is tracked as a separate optimization item.
+        off the event loop. ``list_objects_v2`` returns objects in
+        lexicographic order; this method preserves that ordering in its
+        output. The ``head_object`` fan-out is dispatched to a short-lived
+        ``ThreadPoolExecutor`` with worker count capped at
+        :data:`LIST_OBJECTS_HEAD_MAX_WORKERS` to avoid saturating the
+        boto3 connection pool on large pages. ``max_keys`` caps the single
+        page; callers that need more than one page are expected to
+        paginate themselves.
         """
         assert self.client is not None and self.bucket is not None
-        response = self.client.list_objects_v2(
-            Bucket=self.bucket, Prefix=prefix, MaxKeys=max_keys
+        client = self.client
+        bucket = self.bucket
+        response = client.list_objects_v2(
+            Bucket=bucket, Prefix=prefix, MaxKeys=max_keys
         )
 
         objects = response.get("Contents", [])
-        results: list[dict[str, Any]] = []
-        for obj in objects:
-            obj_data: dict[str, Any] = {
+        if not objects:
+            return []
+
+        results: list[dict[str, Any]] = [
+            {
                 "Key": obj.get("Key"),
                 "LastModified": obj.get("LastModified"),
                 "ETag": obj.get("ETag"),
                 "Size": obj.get("Size"),
                 "StorageClass": obj.get("StorageClass"),
             }
+            for obj in objects
+        ]
+
+        def _fetch_metadata(key: str | None) -> dict[str, str]:
+            if not key:
+                return {}
             try:
-                if "Key" in obj and obj["Key"]:
-                    head = self.client.head_object(Bucket=self.bucket, Key=obj["Key"])
-                    obj_data["Metadata"] = head.get("Metadata", {})
-                else:
-                    obj_data["Metadata"] = {}
+                head = client.head_object(Bucket=bucket, Key=key)
             except ClientError:
-                obj_data["Metadata"] = {}
-            results.append(obj_data)
+                return {}
+            return head.get("Metadata", {}) or {}
+
+        keys: list[str | None] = [obj.get("Key") for obj in objects]
+        workers = min(LIST_OBJECTS_HEAD_MAX_WORKERS, len(keys))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="r2-head"
+        ) as executor:
+            metadata_iter = executor.map(_fetch_metadata, keys)
+            for obj_data, metadata in zip(results, metadata_iter, strict=True):
+                obj_data["Metadata"] = metadata
         return results
