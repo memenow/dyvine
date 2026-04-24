@@ -1,9 +1,50 @@
+import sqlite3
 import uuid
+from collections.abc import Iterator
 
+import pytest
 from fastapi.testclient import TestClient
 
 from dyvine.core.settings import settings
 from dyvine.main import app
+
+
+@pytest.fixture
+def prime_ready_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    """Yield a TestClient with all readiness dependencies configured to pass.
+
+    The fixture restores the original settings on exit and exposes the
+    running client so individual tests can further tweak the environment.
+    """
+    original_cookie = settings.douyin.cookie
+    original_r2 = {
+        "account_id": settings.r2.account_id,
+        "access_key_id": settings.r2.access_key_id,
+        "secret_access_key": settings.r2.secret_access_key,
+        "bucket_name": settings.r2.bucket_name,
+    }
+
+    settings.douyin.cookie = "dummy-cookie"
+    settings.r2.account_id = "acc"
+    settings.r2.access_key_id = "key"
+    settings.r2.secret_access_key = "secret"
+    settings.r2.bucket_name = "bucket"
+
+    try:
+        with TestClient(app) as client:
+            container = app.state.container
+            monkeypatch.setattr(
+                container.operation_store, "healthcheck", lambda: None
+            )
+            yield client
+    finally:
+        settings.douyin.cookie = original_cookie
+        settings.r2.account_id = original_r2["account_id"]
+        settings.r2.access_key_id = original_r2["access_key_id"]
+        settings.r2.secret_access_key = original_r2["secret_access_key"]
+        settings.r2.bucket_name = original_r2["bucket_name"]
 
 
 def test_read_main():
@@ -20,40 +61,38 @@ def test_read_main():
         assert data["features"] == ["users", "posts", "livestreams"]
 
 
-def test_health_check_healthy_response():
-    with TestClient(app) as client:
-        original_cookie = settings.douyin.cookie
-        original_r2 = {
-            "account_id": settings.r2.account_id,
-            "access_key_id": settings.r2.access_key_id,
-            "secret_access_key": settings.r2.secret_access_key,
-            "bucket_name": settings.r2.bucket_name,
-        }
+def test_readiness_probe_returns_ready_when_all_dependencies_ok(
+    prime_ready_dependencies: TestClient,
+) -> None:
+    response = prime_ready_dependencies.get("/readyz")
 
-        try:
-            settings.douyin.cookie = "dummy-cookie"
-            settings.r2.account_id = "acc"
-            settings.r2.access_key_id = "key"
-            settings.r2.secret_access_key = "secret"
-            settings.r2.bucket_name = "bucket"
-
-            request_id = str(uuid.uuid4())
-            response = client.get("/readyz", headers={"X-Request-ID": request_id})
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["status"] == "ready"
-            assert data["correlation_id"] == request_id
-            assert response.headers["X-Correlation-ID"] == request_id
-        finally:
-            settings.douyin.cookie = original_cookie
-            settings.r2.account_id = original_r2["account_id"]
-            settings.r2.access_key_id = original_r2["access_key_id"]
-            settings.r2.secret_access_key = original_r2["secret_access_key"]
-            settings.r2.bucket_name = original_r2["bucket_name"]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ready"
+    assert data["dependencies"] == {
+        "douyin_api": "configured",
+        "service_container": "initialized",
+        "operation_store": "available",
+        "r2_storage": "configured",
+    }
 
 
-def test_health_check_missing_douyin_cookie_is_unhealthy():
+def test_readiness_probe_returns_ready_with_request_id(
+    prime_ready_dependencies: TestClient,
+) -> None:
+    request_id = str(uuid.uuid4())
+    response = prime_ready_dependencies.get(
+        "/readyz", headers={"X-Request-ID": request_id}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ready"
+    assert data["correlation_id"] == request_id
+    assert response.headers["X-Correlation-ID"] == request_id
+
+
+def test_readiness_probe_returns_not_ready_when_douyin_cookie_missing() -> None:
     with TestClient(app) as client:
         original_cookie = settings.douyin.cookie
         try:
@@ -63,8 +102,84 @@ def test_health_check_missing_douyin_cookie_is_unhealthy():
             assert response.status_code == 503
             data = response.json()
             assert data["status"] == "not_ready"
+            assert data["dependencies"]["douyin_api"] == "missing_credentials"
         finally:
             settings.douyin.cookie = original_cookie
+
+
+def test_readiness_probe_returns_not_ready_when_operation_store_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_cookie = settings.douyin.cookie
+    original_r2 = {
+        "account_id": settings.r2.account_id,
+        "access_key_id": settings.r2.access_key_id,
+        "secret_access_key": settings.r2.secret_access_key,
+        "bucket_name": settings.r2.bucket_name,
+    }
+
+    settings.douyin.cookie = "dummy-cookie"
+    settings.r2.account_id = "acc"
+    settings.r2.access_key_id = "key"
+    settings.r2.secret_access_key = "secret"
+    settings.r2.bucket_name = "bucket"
+
+    def _raise() -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    try:
+        with TestClient(app) as client:
+            container = app.state.container
+            monkeypatch.setattr(container.operation_store, "healthcheck", _raise)
+            response = client.get("/readyz")
+
+            assert response.status_code == 503
+            data = response.json()
+            assert data["status"] == "not_ready"
+            assert data["dependencies"]["operation_store"] == "unavailable"
+    finally:
+        settings.douyin.cookie = original_cookie
+        settings.r2.account_id = original_r2["account_id"]
+        settings.r2.access_key_id = original_r2["access_key_id"]
+        settings.r2.secret_access_key = original_r2["secret_access_key"]
+        settings.r2.bucket_name = original_r2["bucket_name"]
+
+
+def test_readiness_probe_returns_not_ready_when_r2_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_cookie = settings.douyin.cookie
+    original_r2 = {
+        "account_id": settings.r2.account_id,
+        "access_key_id": settings.r2.access_key_id,
+        "secret_access_key": settings.r2.secret_access_key,
+        "bucket_name": settings.r2.bucket_name,
+    }
+
+    settings.douyin.cookie = "dummy-cookie"
+    settings.r2.account_id = ""
+    settings.r2.access_key_id = ""
+    settings.r2.secret_access_key = ""
+    settings.r2.bucket_name = ""
+
+    try:
+        with TestClient(app) as client:
+            container = app.state.container
+            monkeypatch.setattr(
+                container.operation_store, "healthcheck", lambda: None
+            )
+            response = client.get("/readyz")
+
+            assert response.status_code == 503
+            data = response.json()
+            assert data["status"] == "not_ready"
+            assert data["dependencies"]["r2_storage"] == "missing_credentials"
+    finally:
+        settings.douyin.cookie = original_cookie
+        settings.r2.account_id = original_r2["account_id"]
+        settings.r2.access_key_id = original_r2["access_key_id"]
+        settings.r2.secret_access_key = original_r2["secret_access_key"]
+        settings.r2.bucket_name = original_r2["bucket_name"]
 
 
 def test_invalid_request_id_is_regenerated():
