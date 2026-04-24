@@ -37,9 +37,7 @@ def prime_ready_dependencies(
     try:
         with TestClient(app) as client:
             container = app.state.container
-            monkeypatch.setattr(
-                container.operation_store, "healthcheck", lambda: None
-            )
+            monkeypatch.setattr(container.operation_store, "healthcheck", lambda: None)
             yield client
     finally:
         settings.douyin.cookie = original_cookie
@@ -173,9 +171,7 @@ def test_readiness_probe_returns_not_ready_when_r2_missing(
     try:
         with TestClient(app) as client:
             container = app.state.container
-            monkeypatch.setattr(
-                container.operation_store, "healthcheck", lambda: None
-            )
+            monkeypatch.setattr(container.operation_store, "healthcheck", lambda: None)
             response = client.get("/readyz")
 
             assert response.status_code == 503
@@ -216,9 +212,7 @@ def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
     try:
         with TestClient(app) as client:
             container = app.state.container
-            monkeypatch.setattr(
-                container.operation_store, "healthcheck", lambda: None
-            )
+            monkeypatch.setattr(container.operation_store, "healthcheck", lambda: None)
             response = client.get("/readyz")
 
             assert response.status_code == 503

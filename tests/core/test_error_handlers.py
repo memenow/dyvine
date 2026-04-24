@@ -43,17 +43,13 @@ def test_error_response_basic() -> None:
 
 
 def test_error_response_includes_details() -> None:
-    resp = ErrorResponse.create_response(
-        400, "bad", details={"field": "name"}
-    )
+    resp = ErrorResponse.create_response(400, "bad", details={"field": "name"})
     body = resp.body.decode()
     assert "name" in body
 
 
 def test_error_response_includes_correlation_id() -> None:
-    resp = ErrorResponse.create_response(
-        400, "bad", correlation_id="abc-123"
-    )
+    resp = ErrorResponse.create_response(400, "bad", correlation_id="abc-123")
     body = resp.body.decode()
     assert "abc-123" in body
 

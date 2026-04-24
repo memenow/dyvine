@@ -83,12 +83,12 @@ class ContextLogger:
 
     def __init__(self, name: str) -> None:
         self.logger = logging.getLogger(name)
-        self.correlation_id_var: contextvars.ContextVar[
-            str | None
-        ] = contextvars.ContextVar(f"{name}_correlation_id", default=None)
-        self.context_var: contextvars.ContextVar[
-            dict[str, Any] | None
-        ] = contextvars.ContextVar(f"{name}_context", default=None)
+        self.correlation_id_var: contextvars.ContextVar[str | None] = (
+            contextvars.ContextVar(f"{name}_correlation_id", default=None)
+        )
+        self.context_var: contextvars.ContextVar[dict[str, Any] | None] = (
+            contextvars.ContextVar(f"{name}_context", default=None)
+        )
 
     @property
     def correlation_id(self) -> str | None:

@@ -9,25 +9,27 @@ import pytest
 
 from dyvine.services.lifecycle import LifecycleError, LifecycleManager
 
-CONFIG_JSON = json.dumps({
-    "version": "1.0",
-    "rules": [
-        {
-            "content_type": "livestream",
-            "retention_days": 180,
-            "transition": {"days": 30, "storage_class": "ARCHIVE"},
-        }
-    ],
-    "audit": {
-        "enabled": True,
-        "log_format": (
-            "{timestamp} user={user} action={action} "
-            "object_key={object_key} "
-            "metadata_size={metadata_size} status={status}"
-        ),
-        "log_retention_days": 90,
-    },
-})
+CONFIG_JSON = json.dumps(
+    {
+        "version": "1.0",
+        "rules": [
+            {
+                "content_type": "livestream",
+                "retention_days": 180,
+                "transition": {"days": 30, "storage_class": "ARCHIVE"},
+            }
+        ],
+        "audit": {
+            "enabled": True,
+            "log_format": (
+                "{timestamp} user={user} action={action} "
+                "object_key={object_key} "
+                "metadata_size={metadata_size} status={status}"
+            ),
+            "log_retention_days": 90,
+        },
+    }
+)
 
 
 def _build_manager(
@@ -166,18 +168,14 @@ def test_write_audit_log_format() -> None:
         audit_config={
             "enabled": True,
             "log_format": (
-            "{timestamp} user={user} action={action} "
-            "object_key={object_key} "
-            "metadata_size={metadata_size} status={status}"
-        ),
+                "{timestamp} user={user} action={action} "
+                "object_key={object_key} "
+                "metadata_size={metadata_size} status={status}"
+            ),
             "log_retention_days": 90,
         }
     )
-    summary = {
-        "details": [
-            {"action": "delete", "object_key": "test/obj.mp4"}
-        ]
-    }
+    summary = {"details": [{"action": "delete", "object_key": "test/obj.mp4"}]}
     m = mock_open()
     with patch("builtins.open", m), patch.object(mgr, "_rotate_audit_logs"):
         mgr._write_audit_log(summary)
@@ -221,8 +219,10 @@ def test_rotate_audit_logs_removes_old_files() -> None:
     old_file.stem = "r2_lifecycle_audit.20230101"
     old_file.unlink = MagicMock()
 
-    with patch("pathlib.Path.exists", return_value=True), \
-         patch("pathlib.Path.glob", return_value=[old_file]):
+    with (
+        patch("pathlib.Path.exists", return_value=True),
+        patch("pathlib.Path.glob", return_value=[old_file]),
+    ):
         mgr._rotate_audit_logs()
 
     old_file.unlink.assert_called_once()
