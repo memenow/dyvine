@@ -9,11 +9,21 @@ modules with side effects at import time (e.g. Prometheus metrics in storage.py)
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# Flag the test runtime as "debug" before any ``dyvine.core.settings`` import
+# so the production-only validator in ``SecuritySettings.validate_not_default``
+# does not reject the default ``change-me-in-production`` sentinel values that
+# pydantic-settings supplies when no real env vars are present. Production
+# deployments set ``API_DEBUG=false`` explicitly; leaving this unset in tests
+# used to silently skip the validator, which was the bug fixed alongside this
+# conftest change.
+os.environ.setdefault("API_DEBUG", "true")
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
