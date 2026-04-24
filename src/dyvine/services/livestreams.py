@@ -547,7 +547,7 @@ class LivestreamService:
             if room_id in self.download_jobs:
                 raise LivestreamError("Already downloading this stream")
 
-            operation = self.operation_store.create_operation(
+            operation = await self.operation_store.create_operation(
                 operation_type="livestream_download",
                 subject_id=room_id,
                 status="pending",
@@ -586,7 +586,7 @@ class LivestreamService:
     ) -> None:
         """Run the f2 livestream downloader in the background."""
         try:
-            self.operation_store.update_operation(
+            await self.operation_store.update_operation(
                 operation_id,
                 status="running",
                 message="Livestream download in progress",
@@ -597,7 +597,7 @@ class LivestreamService:
                     download_kwargs, webcast_payload, output_dir
                 )
             if not target_file.exists():
-                self.operation_store.update_operation(
+                await self.operation_store.update_operation(
                     operation_id,
                     status="failed",
                     message="Livestream download finished without an artifact",
@@ -607,7 +607,7 @@ class LivestreamService:
                 return
 
             final_path = str(target_file)
-            self.operation_store.update_operation(
+            await self.operation_store.update_operation(
                 operation_id,
                 status="completed",
                 message="Livestream download completed",
@@ -623,7 +623,7 @@ class LivestreamService:
                     "error": str(error),
                 },
             )
-            self.operation_store.update_operation(
+            await self.operation_store.update_operation(
                 operation_id,
                 status="failed",
                 message="Livestream download failed",
@@ -645,9 +645,9 @@ class LivestreamService:
             The current persisted operation response.
         """
         try:
-            operation = self.operation_store.get_operation(operation_id)
+            operation = await self.operation_store.get_operation(operation_id)
         except DownloadError:
-            operation = self.operation_store.get_latest_operation_for_subject(
+            operation = await self.operation_store.get_latest_operation_for_subject(
                 operation_id,
                 operation_type="livestream_download",
             )

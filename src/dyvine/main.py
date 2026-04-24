@@ -136,7 +136,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Initialize service container with all dependencies
     container = get_service_container()
-    container.initialize()
+    await container.initialize()
     app.state.container = container
     app.state.startup_complete = True
 
@@ -486,7 +486,7 @@ async def readiness_probe(request: Request) -> JSONResponse:
     operation_store_status = "missing"
     if container is not None:
         try:
-            container.operation_store.healthcheck()
+            await container.operation_store.healthcheck()
             operation_store_ok = True
             operation_store_status = "available"
         except Exception:

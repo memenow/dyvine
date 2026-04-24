@@ -10,10 +10,11 @@ from dyvine.core.exceptions import DownloadError
 from dyvine.core.operations import OperationStore
 
 
-def test_operation_store_create_and_get(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_create_and_get(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
 
-    created = store.create_operation(
+    created = await store.create_operation(
         operation_type="user_content_download",
         subject_id="user-1",
         status="pending",
@@ -22,22 +23,23 @@ def test_operation_store_create_and_get(tmp_path) -> None:
         metadata={"include_likes": False},
     )
 
-    loaded = store.get_operation(created.operation_id)
+    loaded = await store.get_operation(created.operation_id)
     assert loaded.operation_id == created.operation_id
     assert loaded.operation_type == "user_content_download"
     assert loaded.metadata == {"include_likes": False}
 
 
-def test_operation_store_update_operation(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_update_operation(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    created = store.create_operation(
+    created = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-1",
         status="pending",
         message="scheduled",
     )
 
-    updated = store.update_operation(
+    updated = await store.update_operation(
         created.operation_id,
         status="completed",
         message="done",
@@ -52,57 +54,60 @@ def test_operation_store_update_operation(tmp_path) -> None:
     assert updated.download_path == "/tmp/file.flv"
 
 
-def test_operation_store_missing_operation_raises(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_missing_operation_raises(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
     with pytest.raises(DownloadError):
-        store.get_operation("missing")
+        await store.get_operation("missing")
 
 
-def test_operation_store_marks_incomplete_operations_failed(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_marks_incomplete_operations_failed(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    pending = store.create_operation(
+    pending = await store.create_operation(
         operation_type="user_content_download",
         subject_id="user-2",
         status="pending",
         message="scheduled",
     )
-    running = store.create_operation(
+    running = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-2",
         status="running",
         message="running",
     )
-    completed = store.create_operation(
+    completed = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-3",
         status="completed",
         message="done",
     )
 
-    updated = store.mark_incomplete_operations_failed()
+    updated = await store.mark_incomplete_operations_failed()
 
     assert updated == 2
-    assert store.get_operation(pending.operation_id).status == "failed"
-    assert store.get_operation(running.operation_id).status == "failed"
-    assert store.get_operation(completed.operation_id).status == "completed"
+    assert (await store.get_operation(pending.operation_id)).status == "failed"
+    assert (await store.get_operation(running.operation_id)).status == "failed"
+    assert (await store.get_operation(completed.operation_id)).status == "completed"
 
 
-def test_operation_store_get_latest_operation_for_subject(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_get_latest_operation_for_subject(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    first = store.create_operation(
+    first = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-4",
         status="pending",
         message="scheduled",
     )
-    second = store.create_operation(
+    second = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-4",
         status="completed",
         message="done",
     )
 
-    latest = store.get_latest_operation_for_subject(
+    latest = await store.get_latest_operation_for_subject(
         "room-4",
         operation_type="livestream_download",
     )
@@ -139,13 +144,17 @@ def test_operation_store_creates_lookup_index(tmp_path) -> None:
     assert row[0] == "idx_operations_subject_type_updated"
 
 
-def test_operation_store_healthcheck_succeeds(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_healthcheck_succeeds(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
 
-    store.healthcheck()
+    await store.healthcheck()
 
 
-def test_operation_store_healthcheck_fails_when_path_unwritable(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_healthcheck_fails_when_path_unwritable(
+    tmp_path,
+) -> None:
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("chmod-based permission enforcement has no effect as root")
 
@@ -160,16 +169,17 @@ def test_operation_store_healthcheck_fails_when_path_unwritable(tmp_path) -> Non
 
     try:
         with pytest.raises(sqlite3.OperationalError):
-            store.healthcheck()
+            await store.healthcheck()
     finally:
         os.chmod(readonly_dir, 0o755)
         os.chmod(store.db_path, 0o644)
 
 
-def test_operation_store_reads_back_empty_strings_as_empty(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_operation_store_reads_back_empty_strings_as_empty(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
 
-    created = store.create_operation(
+    created = await store.create_operation(
         operation_type="user_content_download",
         subject_id="user-empty",
         status="pending",
@@ -178,6 +188,54 @@ def test_operation_store_reads_back_empty_strings_as_empty(tmp_path) -> None:
         error="",
     )
 
-    loaded = store.get_operation(created.operation_id)
+    loaded = await store.get_operation(created.operation_id)
     assert loaded.download_path == ""
     assert loaded.error == ""
+
+
+@pytest.mark.asyncio
+async def test_operation_store_update_runs_in_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Writes must not block the event loop.
+
+    Patch ``asyncio.to_thread`` to record that it was invoked for every
+    public method that is supposed to delegate. Without this contract,
+    per-page progress updates would stall the loop during bulk downloads.
+    """
+    import asyncio as _asyncio
+
+    store = OperationStore(str(tmp_path / "operations.db"))
+    created = await store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-99",
+        status="pending",
+        message="scheduled",
+    )
+
+    calls: list[str] = []
+    original = _asyncio.to_thread
+
+    async def tracking_to_thread(fn, *args, **kwargs):
+        calls.append(fn.__name__)
+        return await original(fn, *args, **kwargs)
+
+    monkeypatch.setattr("dyvine.core.operations.asyncio.to_thread", tracking_to_thread)
+
+    await store.update_operation(
+        created.operation_id, status="running", message="running"
+    )
+    await store.get_operation(created.operation_id)
+    await store.get_latest_operation_for_subject(
+        "room-99", operation_type="livestream_download"
+    )
+    await store.healthcheck()
+    await store.mark_incomplete_operations_failed()
+
+    assert calls == [
+        "_update_operation_sync",
+        "_get_operation_sync",
+        "_get_latest_operation_for_subject_sync",
+        "_healthcheck_sync",
+        "_mark_incomplete_operations_failed_sync",
+    ]

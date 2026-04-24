@@ -3,10 +3,16 @@
 This module provides a lightweight SQLite-backed store for asynchronous
 operation metadata. It is intended for API workflows that return immediately
 and complete in the background, such as content downloads.
+
+All public methods are ``async`` and delegate the synchronous ``sqlite3``
+calls to ``asyncio.to_thread`` so they never block the event loop. Per-page
+progress updates on long-running downloads used to stall other requests on a
+single-worker uvicorn deployment; moving the IO off-loop restores fairness.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
@@ -60,11 +66,22 @@ class OperationRecord:
 
 
 class OperationStore:
-    """SQLite-backed persistence for asynchronous operation state."""
+    """SQLite-backed persistence for asynchronous operation state.
+
+    Public methods are coroutines. They perform no sqlite IO on the calling
+    thread: every database call is dispatched to ``asyncio.to_thread`` so the
+    event loop stays responsive during progress updates, healthchecks, and
+    cross-request writes. The synchronous implementation is kept private
+    (``_<name>_sync``) so it can be unit tested directly and reused from
+    non-async bootstrapping paths (currently only ``__init__``).
+    """
 
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = Path(db_path or settings.operation_db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # ``threading.Lock`` because ``asyncio.to_thread`` hands work to a
+        # shared thread pool; several worker threads can race for the same
+        # connection attempt if we only relied on asyncio coordination.
         self._lock = threading.Lock()
         self._initialize()
 
@@ -116,7 +133,7 @@ class OperationStore:
             )
             connection.commit()
 
-    def healthcheck(self) -> None:
+    async def healthcheck(self) -> None:
         """Verify the backing store is reachable and writable.
 
         Raises:
@@ -124,6 +141,9 @@ class OperationStore:
                 the connection or executing a trivial write-capable probe,
                 so callers can treat failure as "not ready".
         """
+        await asyncio.to_thread(self._healthcheck_sync)
+
+    def _healthcheck_sync(self) -> None:
         # BEGIN IMMEDIATE acquires a RESERVED lock, which proves the database
         # file is writable without mutating any rows. The rollback lives in
         # ``finally`` so a failed BEGIN never leaves a pending transaction
@@ -171,7 +191,7 @@ class OperationStore:
             updated_at=str(row["updated_at"]),
         )
 
-    def create_operation(
+    async def create_operation(
         self,
         *,
         operation_type: str,
@@ -187,6 +207,36 @@ class OperationStore:
         operation_id: str | None = None,
     ) -> OperationRecord:
         """Create and persist a new operation."""
+        return await asyncio.to_thread(
+            self._create_operation_sync,
+            operation_type=operation_type,
+            subject_id=subject_id,
+            status=status,
+            message=message,
+            progress=progress,
+            total_items=total_items,
+            completed_items=completed_items,
+            download_path=download_path,
+            error=error,
+            metadata=metadata,
+            operation_id=operation_id,
+        )
+
+    def _create_operation_sync(
+        self,
+        *,
+        operation_type: str,
+        subject_id: str,
+        status: str,
+        message: str,
+        progress: float | None = None,
+        total_items: int | None = None,
+        completed_items: int | None = None,
+        download_path: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        operation_id: str | None = None,
+    ) -> OperationRecord:
         created_at = self._now()
         operation = OperationRecord(
             operation_id=operation_id or str(uuid.uuid4()),
@@ -231,8 +281,11 @@ class OperationStore:
             connection.commit()
         return operation
 
-    def get_operation(self, operation_id: str) -> OperationRecord:
+    async def get_operation(self, operation_id: str) -> OperationRecord:
         """Fetch a single operation or raise ``DownloadError``."""
+        return await asyncio.to_thread(self._get_operation_sync, operation_id)
+
+    def _get_operation_sync(self, operation_id: str) -> OperationRecord:
         with self._lock, closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT * FROM operations WHERE operation_id = ?",
@@ -243,7 +296,7 @@ class OperationStore:
             raise DownloadError(f"Operation {operation_id} not found")
         return operation
 
-    def get_latest_operation_for_subject(
+    async def get_latest_operation_for_subject(
         self, subject_id: str, *, operation_type: str | None = None
     ) -> OperationRecord:
         """Fetch the most recently updated operation for a subject.
@@ -258,6 +311,15 @@ class OperationStore:
         Raises:
             DownloadError: If no operation matches the subject identifier.
         """
+        return await asyncio.to_thread(
+            self._get_latest_operation_for_subject_sync,
+            subject_id,
+            operation_type=operation_type,
+        )
+
+    def _get_latest_operation_for_subject_sync(
+        self, subject_id: str, *, operation_type: str | None = None
+    ) -> OperationRecord:
         query = """
             SELECT * FROM operations
             WHERE subject_id = ?
@@ -275,9 +337,18 @@ class OperationStore:
             raise DownloadError(f"Operation {subject_id} not found")
         return operation
 
-    def update_operation(self, operation_id: str, **fields: Any) -> OperationRecord:
+    async def update_operation(
+        self, operation_id: str, **fields: Any
+    ) -> OperationRecord:
         """Update selected fields on an operation and return the new state."""
-        current = self.get_operation(operation_id)
+        return await asyncio.to_thread(
+            self._update_operation_sync, operation_id, **fields
+        )
+
+    def _update_operation_sync(
+        self, operation_id: str, **fields: Any
+    ) -> OperationRecord:
+        current = self._get_operation_sync(operation_id)
         allowed_fields = {
             "status",
             "message",
@@ -310,14 +381,17 @@ class OperationStore:
             )
             connection.commit()
 
-        return self.get_operation(operation_id)
+        return self._get_operation_sync(operation_id)
 
-    def mark_incomplete_operations_failed(self) -> int:
+    async def mark_incomplete_operations_failed(self) -> int:
         """Mark stale pending/running operations as interrupted.
 
         Returns:
             Number of operations that were updated.
         """
+        return await asyncio.to_thread(self._mark_incomplete_operations_failed_sync)
+
+    def _mark_incomplete_operations_failed_sync(self) -> int:
         updated_at = self._now()
         with self._lock, closing(self._connect()) as connection:
             cursor = connection.execute(

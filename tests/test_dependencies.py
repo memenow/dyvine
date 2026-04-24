@@ -17,7 +17,8 @@ def reset_container_cache() -> None:
     dependencies.get_service_container.cache_clear()
 
 
-def test_service_container_initializes_with_douyin_handler(
+@pytest.mark.asyncio
+async def test_service_container_initializes_with_douyin_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured_kwargs: dict[str, object] = {}
@@ -29,7 +30,7 @@ def test_service_container_initializes_with_douyin_handler(
     monkeypatch.setattr(dependencies, "DouyinHandler", build_handler)
 
     container = dependencies.ServiceContainer()
-    container.initialize()
+    await container.initialize()
 
     handler = container.douyin_handler
     assert isinstance(handler, DummyHandler)
@@ -50,7 +51,8 @@ def test_get_service_container_returns_singleton(
     assert container_one is container_two
 
 
-def test_service_container_reconciles_incomplete_operations(
+@pytest.mark.asyncio
+async def test_service_container_reconciles_incomplete_operations(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     monkeypatch.setattr(
@@ -63,7 +65,7 @@ def test_service_container_reconciles_incomplete_operations(
     )
 
     preexisting = dependencies.OperationStore(str(tmp_path / "operations.db"))
-    operation = preexisting.create_operation(
+    operation = await preexisting.create_operation(
         operation_type="user_content_download",
         subject_id="user-1",
         status="running",
@@ -71,8 +73,26 @@ def test_service_container_reconciles_incomplete_operations(
     )
 
     container = dependencies.ServiceContainer()
-    container.initialize()
+    await container.initialize()
 
-    refreshed = container.operation_store.get_operation(operation.operation_id)
+    refreshed = await container.operation_store.get_operation(operation.operation_id)
     assert refreshed.status == "failed"
     assert refreshed.error == "Operation interrupted during process restart"
+
+
+def test_service_container_requires_initialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accessing a service before awaiting ``initialize`` must fail loudly.
+
+    ``initialize`` is a coroutine because it awaits sqlite recovery via
+    ``asyncio.to_thread``. Synchronous property access has no safe way to
+    bootstrap, so the container should raise rather than block the caller.
+    """
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
+
+    container = dependencies.ServiceContainer()
+    with pytest.raises(RuntimeError, match="ServiceContainer has not been initialized"):
+        _ = container.douyin_handler
