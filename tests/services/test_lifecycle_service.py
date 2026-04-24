@@ -163,7 +163,8 @@ async def test_apply_lifecycle_rules_skips_current() -> None:
 # ── _write_audit_log ────────────────────────────────────────────────────
 
 
-def test_write_audit_log_format() -> None:
+@pytest.mark.asyncio
+async def test_write_audit_log_format() -> None:
     mgr = _build_manager(
         audit_config={
             "enabled": True,
@@ -178,7 +179,7 @@ def test_write_audit_log_format() -> None:
     summary = {"details": [{"action": "delete", "object_key": "test/obj.mp4"}]}
     m = mock_open()
     with patch("builtins.open", m), patch.object(mgr, "_rotate_audit_logs"):
-        mgr._write_audit_log(summary)
+        await mgr._write_audit_log(summary)
     written = m().write.call_args[0][0]
     assert "delete" in written
     assert "test/obj.mp4" in written
