@@ -156,7 +156,7 @@ def test_operation_store_healthcheck_fails_when_path_unwritable(tmp_path) -> Non
     os.chmod(readonly_dir, 0o555)
 
     try:
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.OperationalError):
             store.healthcheck()
     finally:
         os.chmod(readonly_dir, 0o755)
