@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -278,12 +279,12 @@ async def test_process_download_skips_when_nothing_requested(
 async def test_process_download_runs_when_only_likes_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``include_posts=False`` with ``include_likes=True`` must still run.
+    """``include_posts=False`` with ``include_likes=True`` routes to likes.
 
-    The previous guard treated any ``include_posts=False`` as a no-op, which
-    silently dropped the likes-only scenario. The download path is still
-    invoked through ``DouyinHandler``; verify by asserting that the profile
-    fetch happens instead of the short-circuit completion.
+    Asserts the loop walks ``fetch_user_like_videos`` (not the post feed),
+    that ``mode`` is tagged ``"like"`` on the handler kwargs, and that
+    ``download_favorite`` stays off so f2 does not double-fetch through
+    the posts feed.
     """
     from dyvine.services import users as users_mod
 
@@ -292,12 +293,22 @@ async def test_process_download_runs_when_only_likes_requested(
     mock_user_data.aweme_count = 0
 
     fetch_profile = AsyncMock(return_value=mock_user_data)
+    fetch_post_videos = MagicMock()
+    captured_kwargs: dict[str, Any] = {}
+
+    async def fake_fetch_likes(*_args: Any, **_kwargs: Any) -> Any:
+        # Empty async generator; the loop treats this as "no likes yet"
+        # and exits cleanly.
+        if False:
+            yield None
 
     class FakeHandler:
         def __init__(self, kwargs: dict) -> None:
-            pass
+            captured_kwargs.update(kwargs)
 
         fetch_user_profile = fetch_profile
+        fetch_user_post_videos = fetch_post_videos
+        fetch_user_like_videos = staticmethod(fake_fetch_likes)
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
@@ -318,3 +329,6 @@ async def test_process_download_runs_when_only_likes_requested(
     )
 
     fetch_profile.assert_awaited()
+    fetch_post_videos.assert_not_called()
+    assert captured_kwargs["mode"] == "like"
+    assert captured_kwargs["download_favorite"] is False
