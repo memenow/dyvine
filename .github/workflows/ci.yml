@@ -73,6 +73,7 @@ jobs:
     name: Container Vulnerability Scan
     needs: [quality]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       security-events: write
@@ -87,6 +88,16 @@ jobs:
         # authenticate to any registry here so PR-triggered runs from
         # forks cannot access production secrets.
         docker build -t scan-target:${{ github.sha }} .
+
+    - name: Assert no dev tooling in runtime image
+      run: |
+        # ``.trivyignore`` accepts the lingering ``black`` dist-info because
+        # the binary itself is supposed to be absent from the production
+        # image. If ``uv sync --no-dev`` ever regresses and actually ships
+        # the binary, this assertion fails fast instead of trusting the
+        # acceptance note.
+        docker run --rm --entrypoint /bin/sh scan-target:${{ github.sha }} \
+          -c '! test -x /app/.venv/bin/black'
 
     - name: Scan image and enforce vulnerability budget
       # Table output is the pass/fail gate because ``aquasecurity/trivy-action``

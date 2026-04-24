@@ -187,16 +187,14 @@ def test_context_logger_shares_correlation_id_across_instances() -> None:
     those instantiated by background tasks in different modules) must see,
     so the module-level ``ContextVar`` is shared across instances.
     """
+    # The autouse ``_reset_logging_context_vars`` fixture already clears the
+    # module-level ContextVars between tests, so no explicit teardown is
+    # required here.
     first = ContextLogger("test.shared.one")
     second = ContextLogger("test.shared.two")
-    first.clear_context()
-    first.set_correlation_id(None)
-    try:
-        first.set_correlation_id("cid-shared")
-        assert second.correlation_id == "cid-shared"
 
-        first.add_context(tenant="acme")
-        assert second.context["tenant"] == "acme"
-    finally:
-        first.set_correlation_id(None)
-        first.clear_context()
+    first.set_correlation_id("cid-shared")
+    assert second.correlation_id == "cid-shared"
+
+    first.add_context(tenant="acme")
+    assert second.context["tenant"] == "acme"

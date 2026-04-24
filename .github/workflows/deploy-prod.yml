@@ -94,6 +94,9 @@ jobs:
 
     - name: Create Application Secrets
       run: |
+        # Attach the same ``commonLabels`` the base kustomization applies so
+        # a future ``kubectl apply --prune -l app.kubernetes.io/managed-by=kustomize``
+        # sweep does not treat this Secret as stray and delete it.
         kubectl create secret generic dyvine-secrets \
           --from-literal=SECURITY_SECRET_KEY="${{ secrets.PROD_SECURITY_SECRET_KEY }}" \
           --from-literal=SECURITY_API_KEY="${{ secrets.PROD_SECURITY_API_KEY }}" \
@@ -102,7 +105,14 @@ jobs:
           --from-literal=R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
           --from-literal=DOUYIN_COOKIE="${{ secrets.DOUYIN_COOKIE }}" \
           --namespace=dyvine \
-          --dry-run=client -o yaml | kubectl apply -f -
+          --dry-run=client -o yaml \
+          | kubectl label --local=true -f - --overwrite -o yaml --dry-run=client \
+              app.kubernetes.io/managed-by=kustomize \
+              app.kubernetes.io/name=dyvine \
+              app.kubernetes.io/component=api \
+              app.kubernetes.io/part-of=dyvine \
+              app.kubernetes.io/version=latest \
+          | kubectl apply -f -
 
     - name: Render Ingress host
       env:
@@ -111,7 +121,11 @@ jobs:
         # The production Ingress manifest keeps `INGRESS_HOST` as a literal
         # placeholder so that the file is a valid kustomize input. The actual
         # host is substituted at deploy time from the workflow env (which
-        # already reads ``secrets.PROD_INGRESS_HOST``).
+        # already reads ``secrets.PROD_INGRESS_HOST``). Tell the runner to
+        # mask the value so any follow-up step that echoes the rendered
+        # manifest (for example ``kubectl diff``) cannot leak the host into
+        # the public Actions log.
+        echo "::add-mask::${INGRESS_HOST}"
         sed -i "s|INGRESS_HOST|${INGRESS_HOST}|g" k8s/overlays/production/ingress.yaml
 
     - name: Deploy to Production
@@ -123,6 +137,9 @@ jobs:
         # `kubectl apply -k` invocation valid (mixing -k and -f is not
         # supported by kubectl and would fail).
         RUNTIME_DIR=k8s/overlays/prod-runtime
+        # Clean up the scratch kustomization on any exit path, including
+        # ``kubectl apply`` failures under ``set -e``.
+        trap 'rm -rf "${RUNTIME_DIR}"' EXIT
         mkdir -p "${RUNTIME_DIR}"
         cat > "${RUNTIME_DIR}/kustomization.yaml" << EOF
         apiVersion: kustomize.config.k8s.io/v1beta1
@@ -179,7 +196,6 @@ jobs:
         EOF
 
         kubectl apply -k "${RUNTIME_DIR}"
-        rm -rf "${RUNTIME_DIR}"
 
     - name: Verify deployment
       run: |
