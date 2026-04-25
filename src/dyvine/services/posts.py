@@ -140,6 +140,13 @@ class PostService:
     ) -> list[PostDetail]:
         """Retrieve a paginated list of posts from a Douyin user.
 
+        ``count`` is intentionally a literal default rather than the
+        module-level :data:`PAGE_SIZE`. The latter binds the bulk
+        download loop guard to the fetcher used by ``_fetch_posts_batch``;
+        this single-page API is a public read endpoint whose contract
+        should not silently change if a future tuning PR adjusts
+        :data:`PAGE_SIZE`.
+
         Args:
             sec_user_id: Unique identifier of the user.
             max_cursor: Pagination cursor for fetching the next batch of posts.

@@ -28,7 +28,8 @@ PAGE_SLACK = 20
 # upstream still has room to make progress before the cap fires.
 PAGE_MULTIPLIER = 2
 
-# Used when the upstream does not expose a total (likes-only runs and
-# the bulk-post loop without a profile total). Bounds the loop at
-# ``MAX_PAGES_FALLBACK * PAGE_SIZE`` items per call.
+# Used when the upstream does not expose a positive total (likes-only
+# runs, profiles reporting zero, or non-int ``aweme_count`` coerced to
+# ``0``). Bounds the loop at ``MAX_PAGES_FALLBACK * PAGE_SIZE`` items
+# per call.
 MAX_PAGES_FALLBACK = 500
