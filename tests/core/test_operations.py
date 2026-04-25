@@ -565,6 +565,19 @@ def test_operation_store_healthcheck_swallows_rollback_errors(
         store._healthcheck_sync()
 
 
+def test_operation_store_is_closed_property_reflects_shutdown(tmp_path) -> None:
+    """``is_closed`` lets callers probe the store without provoking ``_run``."""
+    store = OperationStore(str(tmp_path / "operations.db"))
+    assert store.is_closed is False
+
+    store.shutdown()
+    assert store.is_closed is True
+
+    # Idempotent shutdown keeps the flag set.
+    store.shutdown()
+    assert store.is_closed is True
+
+
 @pytest.mark.asyncio
 async def test_operation_store_async_calls_after_shutdown_raise(tmp_path) -> None:
     """Every async dispatch must reject calls once ``shutdown`` has run.

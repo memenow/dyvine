@@ -196,6 +196,16 @@ class OperationStore:
         """
         self._executor = executor
 
+    @property
+    def is_closed(self) -> bool:
+        """Whether :meth:`shutdown` has been called.
+
+        Callers can probe this to avoid issuing work that is guaranteed to
+        be rejected by :meth:`_run`. The flag never flips back to
+        ``False``; the store is single-use after shutdown.
+        """
+        return self._closed
+
     async def _run(self, func: Callable[..., _R], /, *args: Any, **kwargs: Any) -> _R:
         """Dispatch a blocking sqlite call to the configured executor.
 

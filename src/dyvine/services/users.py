@@ -73,19 +73,15 @@ from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
+from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..core.settings import settings
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
 
-# Pagination constants for ``_process_download``. ``f2`` reports up to
-# ``PAGE_SIZE`` items per page; the outer loop expects roughly
-# ``total_posts / PAGE_SIZE`` pages, so we double that plus slack for
-# upstream quirks. Likes-only runs have no known total, so they fall back
-# to ``MAX_PAGES_FALLBACK``.
+# Page size requested from the f2 fetcher. The outer loop guard uses the
+# shared :mod:`dyvine.core.pagination` constants together with this value
+# to bound the number of pages we will walk before giving up.
 PAGE_SIZE = 100
-PAGE_SLACK = 20
-PAGE_MULTIPLIER = 2
-MAX_PAGES_FALLBACK = 500
 
 
 def sanitize_filename(filename: str) -> str:

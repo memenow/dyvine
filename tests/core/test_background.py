@@ -129,3 +129,17 @@ async def test_spawn_or_fallback_falls_back_to_create_task() -> None:
     task = spawn_or_fallback(None, quick())
     assert isinstance(task, asyncio.Task)
     assert await task == 11
+
+
+@pytest.mark.asyncio
+async def test_is_closed_property_reflects_drain_state() -> None:
+    """``is_closed`` lets callers probe the registry without raising."""
+    registry = BackgroundTaskRegistry(drain_timeout=0.1)
+    assert registry.is_closed is False
+
+    await registry.drain()
+    assert registry.is_closed is True
+
+    # Idempotent: a second drain does not flip the flag back.
+    await registry.drain()
+    assert registry.is_closed is True

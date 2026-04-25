@@ -32,6 +32,7 @@ from ..core.exceptions import (
     UserNotFoundError,
 )
 from ..core.logging import ContextLogger
+from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..schemas.posts import (
     BulkDownloadResponse,
     DownloadStatus,
@@ -46,16 +47,12 @@ logger = ContextLogger(__name__)
 # Alias for backward compatibility
 PostServiceError = ServiceError
 
-# ``_fetch_posts_batch`` requests 20 items per page. The bulk download loop
-# can in principle terminate via ``has_more=False`` or by exhausting all
-# posts, but a sticky upstream cursor (server keeps echoing the same
-# non-empty batch with ``has_more=True``) would otherwise spin the loop
-# forever after the ``+1`` cursor advance. ``MAX_PAGES_FALLBACK`` bounds
-# the loop when ``total_posts`` is unknown.
-_BATCH_PAGE_SIZE = 20
-_PAGE_SLACK = 20
-_PAGE_MULTIPLIER = 2
-_MAX_PAGES_FALLBACK = 500
+# Page size requested from ``_fetch_posts_batch``. The outer loop guard
+# combines this with the shared :mod:`dyvine.core.pagination` constants
+# so a sticky upstream cursor cannot keep the ``+1`` cursor advance
+# spinning forever. The fallback covers ``MAX_PAGES_FALLBACK * PAGE_SIZE``
+# items when ``total_posts`` is unknown.
+PAGE_SIZE = 20
 
 
 class PostService:
@@ -278,11 +275,9 @@ class PostService:
             # the server keeps replying with the same ``max_cursor`` the
             # only stop conditions become ``has_more=False`` or this cap.
             if total_posts > 0:
-                max_pages = (
-                    total_posts // _BATCH_PAGE_SIZE
-                ) * _PAGE_MULTIPLIER + _PAGE_SLACK
+                max_pages = (total_posts // PAGE_SIZE) * PAGE_MULTIPLIER + PAGE_SLACK
             else:
-                max_pages = _MAX_PAGES_FALLBACK
+                max_pages = MAX_PAGES_FALLBACK
             page_count = 0
 
             while True:
@@ -385,7 +380,7 @@ class PostService:
         )
 
         posts_iterator = self.handler.fetch_user_post_videos(
-            sec_user_id=sec_user_id, max_cursor=cursor, page_counts=20
+            sec_user_id=sec_user_id, max_cursor=cursor, page_counts=PAGE_SIZE
         )
 
         try:

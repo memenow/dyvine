@@ -116,6 +116,16 @@ class BackgroundTaskRegistry:
         """Number of tasks currently tracked (not yet completed)."""
         return len(self._tasks)
 
+    @property
+    def is_closed(self) -> bool:
+        """Whether ``drain`` has been entered.
+
+        Callers can probe this to avoid scheduling work that is
+        guaranteed to be rejected by :meth:`spawn`. The flag never flips
+        back to ``False``; the registry is single-use.
+        """
+        return self._closed
+
 
 def spawn_or_fallback(
     registry: BackgroundTaskRegistry | None,
