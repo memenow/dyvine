@@ -9,7 +9,7 @@ from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
 from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 
-from ..core.background import BackgroundTaskRegistry
+from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
     DownloadError,
     LivestreamError,
@@ -586,14 +586,14 @@ class LivestreamService:
             )
             # Route through the shared registry so the FastAPI lifespan can
             # drain in-flight recordings before the R2 / audit executors
-            # are reaped. Fall back to ``create_task`` for isolated unit
-            # tests that bypass the container.
-            if self._task_registry is not None:
-                job = self._task_registry.spawn(
-                    coro, name=f"livestream-download-{room_id}"
-                )
-            else:
-                job = asyncio.create_task(coro)
+            # are reaped. ``spawn_or_fallback`` falls back to a bare
+            # ``asyncio.create_task`` for isolated unit tests that bypass
+            # the container.
+            job = spawn_or_fallback(
+                self._task_registry,
+                coro,
+                name=f"livestream-download-{room_id}",
+            )
             self.download_jobs[room_id] = job
 
         return LiveStreamDownloadResponse(**operation.to_response())

@@ -166,6 +166,12 @@ class OperationStore:
         # the finalizer below close the writer even if the instance itself
         # has already been garbage collected.
         self._writer_slot = _WriterSlot()
+        # Set to True by ``shutdown`` so any later async dispatch fails
+        # loudly with ``RuntimeError`` rather than returning a closed
+        # sqlite handle. The container drains every background task before
+        # calling ``shutdown``, so in normal operation this guard only
+        # surfaces programming errors.
+        self._closed = False
         # Register a weakref finalizer so an ``OperationStore`` that falls
         # out of scope without an explicit ``shutdown`` (typical in tests)
         # still closes every handle and does not trip the
@@ -190,13 +196,32 @@ class OperationStore:
         """
         self._executor = executor
 
+    @property
+    def is_closed(self) -> bool:
+        """Whether :meth:`shutdown` has been called.
+
+        Callers can probe this to avoid issuing work that is guaranteed to
+        be rejected by :meth:`_run`. The flag never flips back to
+        ``False``; the store is single-use after shutdown.
+        """
+        return self._closed
+
     async def _run(self, func: Callable[..., _R], /, *args: Any, **kwargs: Any) -> _R:
         """Dispatch a blocking sqlite call to the configured executor.
 
         Falls back to the default asyncio executor when no dedicated pool is
         attached, which keeps tests that instantiate the store directly
         working without a container.
+
+        Raises:
+            RuntimeError: If ``shutdown`` has already closed the store. All
+                public coroutines route through this helper, so a single
+                guard here covers the full async surface.
         """
+        if self._closed:
+            raise RuntimeError(
+                "OperationStore has been shut down; cannot dispatch new work"
+            )
         loop = asyncio.get_running_loop()
         result: _R = await loop.run_in_executor(
             self._executor, functools.partial(func, *args, **kwargs)
@@ -310,8 +335,12 @@ class OperationStore:
         exit. Safe to call multiple times.
         """
         # Snapshot under the lock so we don't iterate while another thread
-        # registers a fresh reader.
+        # registers a fresh reader. ``_closed`` is flipped here too so
+        # ``_run`` rejects further async dispatches even if a worker thread
+        # still holds a stale ``threading.local`` reference to a connection
+        # we are about to close.
         with self._reader_lock:
+            self._closed = True
             readers = list(self._reader_connections.values())
             self._reader_connections.clear()
         for connection in readers:

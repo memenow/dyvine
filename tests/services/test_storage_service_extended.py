@@ -20,10 +20,12 @@ from dyvine.services.storage import (
 def _build_service(*, with_client: bool = False) -> R2StorageService:
     """Create R2StorageService without boto3 initialization."""
     svc = object.__new__(R2StorageService)
-    # The service normally takes its executor through ``__init__``. ``None``
-    # falls back to the default asyncio executor, which is enough for tests
-    # that exercise the service in isolation.
+    # The service normally takes its executors through ``__init__``. ``None``
+    # falls back to the default asyncio executor and to the per-call
+    # short-lived head pool, which is enough for tests that exercise the
+    # service in isolation.
     svc._executor = None  # type: ignore[attr-defined]
+    svc._head_executor = None  # type: ignore[attr-defined]
     if with_client:
         svc.client = MagicMock()  # type: ignore[attr-defined]
         svc.bucket = "test-bucket"  # type: ignore[attr-defined]
@@ -207,6 +209,51 @@ async def test_list_objects_success() -> None:
     assert len(results) == 1
     assert results[0]["Key"] == "videos/u1/clip.mp4"
     assert results[0]["Metadata"] == {"author": "test"}
+
+
+@pytest.mark.asyncio
+async def test_list_objects_uses_injected_head_executor() -> None:
+    """``set_head_executor`` routes the head fan-out through the shared pool.
+
+    Without injection ``_list_objects_sync`` constructs a per-call
+    ``ThreadPoolExecutor``. After injection the head_object calls must
+    run on the shared pool so several concurrent listings share one
+    bounded thread budget. We assert this by recording the worker
+    thread name prefix and verifying every head call landed on the
+    injected pool, not on a one-off ``r2-head`` worker.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    svc = _build_service(with_client=True)
+    svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
+        "Contents": [
+            {"Key": f"videos/u1/clip-{i}.mp4", "Size": 1, "StorageClass": "STANDARD"}
+            for i in range(5)
+        ]
+    }
+
+    head_thread_names: list[str] = []
+
+    def head_object(Bucket: str, Key: str) -> dict:
+        head_thread_names.append(threading.current_thread().name)
+        return {"Metadata": {"key": Key}}
+
+    svc.client.head_object.side_effect = head_object  # type: ignore[union-attr]
+
+    injected = ThreadPoolExecutor(max_workers=4, thread_name_prefix="injected-head")
+    try:
+        svc.set_head_executor(injected)
+        results = await svc.list_objects("videos/u1/")
+    finally:
+        svc.set_head_executor(None)
+        injected.shutdown(wait=True)
+
+    assert [r["Key"] for r in results] == [f"videos/u1/clip-{i}.mp4" for i in range(5)]
+    assert head_thread_names, "head_object was never invoked"
+    assert all(
+        name.startswith("injected-head") for name in head_thread_names
+    ), f"head_object ran outside the injected pool: {head_thread_names}"
 
 
 @pytest.mark.asyncio

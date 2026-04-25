@@ -487,6 +487,73 @@ async def test_download_all_user_posts_breaks_on_empty_aweme_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_download_all_user_posts_caps_pagination_under_sticky_cursor() -> None:
+    """A non-empty batch with a sticky cursor must terminate via ``max_pages``.
+
+    Without the cap, the ``+1`` cursor advance keeps the loop running
+    forever when the upstream returns the same non-empty batch on every
+    call. The new ``max_pages`` ceiling mirrors the guard PR #44 added
+    to the user-content download path in ``services/users.py``.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 100
+    profile.nickname = "StickyUser"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/sticky-user"))
+
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+
+        svc = _build_service(handler)
+        svc.handler = handler
+
+        call_count = 0
+
+        async def sticky_fetch(sec_user_id: str, cursor: int) -> dict:
+            nonlocal call_count
+            call_count += 1
+            if call_count > 200:  # safety net; the cap should fire long before.
+                raise AssertionError(
+                    "Outer pagination loop exceeded 200 fetches "
+                    "despite the max_pages guard"
+                )
+            # Sticky cursor: server keeps echoing the same non-empty
+            # batch with ``has_more=True`` and ``max_cursor=0``. Without
+            # the new guard, the ``+1`` advance below would keep the
+            # loop running forever.
+            return {
+                "aweme_list": [{"aweme_id": f"p{call_count}", "aweme_type": 0}],
+                "has_more": True,
+                "max_cursor": 0,
+            }
+
+        process_batch = AsyncMock()
+        with patch.object(svc, "_fetch_posts_batch", side_effect=sticky_fetch):
+            with patch.object(svc, "_process_posts_batch", new=process_batch):
+                result = await svc.download_all_user_posts("sticky-user")
+
+        # max_pages = (100 // 20) * 2 + 20 = 30. The loop breaks when
+        # ``page_count > max_pages``, so call_count should be at most 31.
+        assert (
+            call_count <= 31
+        ), f"max_pages cap failed; loop ran {call_count} iterations"
+        # Forward progress was made before the cap kicked in.
+        assert process_batch.await_count == call_count
+        # ``total_downloaded`` is computed from ``download_stats`` which
+        # the patched ``_process_posts_batch`` never increments, so the
+        # response status must be FAILED. The important contract for
+        # this test is termination, not the stats.
+        assert result.total_downloaded == 0
+
+
+@pytest.mark.asyncio
 async def test_download_all_user_posts_stops_on_batch_error() -> None:
     """A persistent batch-level exception must not busy-loop.
 

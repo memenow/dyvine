@@ -32,6 +32,7 @@ from ..core.exceptions import (
     UserNotFoundError,
 )
 from ..core.logging import ContextLogger
+from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..schemas.posts import (
     BulkDownloadResponse,
     DownloadStatus,
@@ -45,6 +46,13 @@ logger = ContextLogger(__name__)
 
 # Alias for backward compatibility
 PostServiceError = ServiceError
+
+# Page size requested from ``_fetch_posts_batch``. The outer loop guard
+# combines this with the shared :mod:`dyvine.core.pagination` constants
+# so a sticky upstream cursor cannot keep the ``+1`` cursor advance
+# spinning forever. The fallback covers ``MAX_PAGES_FALLBACK * PAGE_SIZE``
+# items when ``total_posts`` is unknown.
+PAGE_SIZE = 20
 
 
 class PostService:
@@ -131,6 +139,13 @@ class PostService:
         count: int = 20,
     ) -> list[PostDetail]:
         """Retrieve a paginated list of posts from a Douyin user.
+
+        ``count`` is intentionally a literal default rather than the
+        module-level :data:`PAGE_SIZE`. The latter binds the bulk
+        download loop guard to the fetcher used by ``_fetch_posts_batch``;
+        this single-page API is a public read endpoint whose contract
+        should not silently change if a future tuning PR adjusts
+        :data:`PAGE_SIZE`.
 
         Args:
             sec_user_id: Unique identifier of the user.
@@ -261,7 +276,31 @@ class PostService:
                 )
 
             current_cursor = max_cursor
+            # Bound the outer loop so a sticky upstream cursor cannot pin a
+            # worker forever even when each page is non-empty. The
+            # ``+1`` cursor advance below keeps progress moving, but if
+            # the server keeps replying with the same ``max_cursor`` the
+            # only stop conditions become ``has_more=False`` or this cap.
+            if total_posts > 0:
+                max_pages = (total_posts // PAGE_SIZE) * PAGE_MULTIPLIER + PAGE_SLACK
+            else:
+                max_pages = MAX_PAGES_FALLBACK
+            page_count = 0
+
             while True:
+                page_count += 1
+                if page_count > max_pages:
+                    logger.warning(
+                        "Bulk download loop exceeded max_pages; stopping",
+                        extra={
+                            "sec_user_id": sec_user_id,
+                            "cursor": current_cursor,
+                            "max_pages": max_pages,
+                            "total_downloaded": sum(download_stats.values()),
+                            "total_posts": total_posts,
+                        },
+                    )
+                    break
                 try:
                     posts = await self._fetch_posts_batch(sec_user_id, current_cursor)
                     if not posts:
@@ -348,7 +387,7 @@ class PostService:
         )
 
         posts_iterator = self.handler.fetch_user_post_videos(
-            sec_user_id=sec_user_id, max_cursor=cursor, page_counts=20
+            sec_user_id=sec_user_id, max_cursor=cursor, page_counts=PAGE_SIZE
         )
 
         try:
