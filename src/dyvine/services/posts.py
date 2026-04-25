@@ -46,6 +46,17 @@ logger = ContextLogger(__name__)
 # Alias for backward compatibility
 PostServiceError = ServiceError
 
+# ``_fetch_posts_batch`` requests 20 items per page. The bulk download loop
+# can in principle terminate via ``has_more=False`` or by exhausting all
+# posts, but a sticky upstream cursor (server keeps echoing the same
+# non-empty batch with ``has_more=True``) would otherwise spin the loop
+# forever after the ``+1`` cursor advance. ``MAX_PAGES_FALLBACK`` bounds
+# the loop when ``total_posts`` is unknown.
+_BATCH_PAGE_SIZE = 20
+_PAGE_SLACK = 20
+_PAGE_MULTIPLIER = 2
+_MAX_PAGES_FALLBACK = 500
+
 
 class PostService:
     """Service class for handling Douyin post operations.
@@ -261,7 +272,33 @@ class PostService:
                 )
 
             current_cursor = max_cursor
+            # Bound the outer loop so a sticky upstream cursor cannot pin a
+            # worker forever even when each page is non-empty. The
+            # ``+1`` cursor advance below keeps progress moving, but if
+            # the server keeps replying with the same ``max_cursor`` the
+            # only stop conditions become ``has_more=False`` or this cap.
+            if total_posts > 0:
+                max_pages = (
+                    total_posts // _BATCH_PAGE_SIZE
+                ) * _PAGE_MULTIPLIER + _PAGE_SLACK
+            else:
+                max_pages = _MAX_PAGES_FALLBACK
+            page_count = 0
+
             while True:
+                page_count += 1
+                if page_count > max_pages:
+                    logger.warning(
+                        "Bulk download loop exceeded max_pages; stopping",
+                        extra={
+                            "sec_user_id": sec_user_id,
+                            "cursor": current_cursor,
+                            "max_pages": max_pages,
+                            "total_downloaded": sum(download_stats.values()),
+                            "total_posts": total_posts,
+                        },
+                    )
+                    break
                 try:
                     posts = await self._fetch_posts_batch(sec_user_id, current_cursor)
                     if not posts:

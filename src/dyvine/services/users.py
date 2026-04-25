@@ -69,13 +69,23 @@ from typing import Any
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
-from ..core.background import BackgroundTaskRegistry
+from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
 from ..core.settings import settings
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
+
+# Pagination constants for ``_process_download``. ``f2`` reports up to
+# ``PAGE_SIZE`` items per page; the outer loop expects roughly
+# ``total_posts / PAGE_SIZE`` pages, so we double that plus slack for
+# upstream quirks. Likes-only runs have no known total, so they fall back
+# to ``MAX_PAGES_FALLBACK``.
+PAGE_SIZE = 100
+PAGE_SLACK = 20
+PAGE_MULTIPLIER = 2
+MAX_PAGES_FALLBACK = 500
 
 
 def sanitize_filename(filename: str) -> str:
@@ -260,17 +270,15 @@ class UserService:
             include_likes=include_likes,
             max_items=max_items,
         )
-        # Track the task through the shared registry when the container
-        # provided one so the lifespan can drain it on graceful shutdown.
-        # Fall back to a bare ``create_task`` for unit tests that
-        # instantiate ``UserService`` directly without going through the
-        # container.
-        if self._task_registry is not None:
-            self._task_registry.spawn(
-                coro, name=f"user-download-{operation.operation_id}"
-            )
-        else:
-            asyncio.create_task(coro)
+        # Route through the shared registry so the FastAPI lifespan can
+        # drain in-flight downloads before the executor pools are reaped.
+        # ``spawn_or_fallback`` falls back to ``asyncio.create_task`` for
+        # unit tests that instantiate ``UserService`` directly.
+        spawn_or_fallback(
+            self._task_registry,
+            coro,
+            name=f"user-download-{operation.operation_id}",
+        )
         return DownloadResponse(**operation.to_response())
 
     async def get_download_status(self, task_id: str) -> DownloadResponse:
@@ -427,17 +435,17 @@ class UserService:
             # the "cursor stuck" branch below can spin indefinitely if the
             # upstream API returns a sticky cursor or if every page's
             # uploads fail, because ``downloaded_count`` never catches up
-            # to ``total_posts``. ``page_counts=100`` is the request size
-            # below, so the expected page count is ``total_posts / 100``;
-            # we double that and add slack for API quirks. Likes-only runs
-            # don't report a total, so use a generous ceiling tied to
-            # ``max_items`` when available, otherwise a conservative cap.
+            # to ``total_posts``. The page-budget heuristic uses
+            # module-level constants (``PAGE_SIZE``, ``PAGE_SLACK``,
+            # ``PAGE_MULTIPLIER``, ``MAX_PAGES_FALLBACK``) so the cap can
+            # be retuned in one place if production traffic ever hits a
+            # false-positive break.
             if max_items is not None:
-                max_pages = (max_items // 100) + 20
+                max_pages = (max_items // PAGE_SIZE) + PAGE_SLACK
             elif total_posts > 0:
-                max_pages = (total_posts // 100) * 2 + 20
+                max_pages = (total_posts // PAGE_SIZE) * PAGE_MULTIPLIER + PAGE_SLACK
             else:
-                max_pages = 500
+                max_pages = MAX_PAGES_FALLBACK
             page_count = 0
 
             # ``fetch_user_like_videos`` has no ``min_cursor`` parameter,
@@ -467,7 +475,7 @@ class UserService:
                 async for aweme_data in fetcher(
                     user_id,
                     max_cursor=max_cursor,
-                    page_counts=100,  # Increased page size
+                    page_counts=PAGE_SIZE,
                     max_counts=max_items,
                     **fetcher_extra,
                 ):

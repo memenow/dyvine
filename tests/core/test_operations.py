@@ -565,6 +565,45 @@ def test_operation_store_healthcheck_swallows_rollback_errors(
         store._healthcheck_sync()
 
 
+@pytest.mark.asyncio
+async def test_operation_store_async_calls_after_shutdown_raise(tmp_path) -> None:
+    """Every async dispatch must reject calls once ``shutdown`` has run.
+
+    The container drains background tasks before calling ``shutdown``, so
+    any post-shutdown coroutine call is a programming error. Surfacing a
+    ``RuntimeError`` makes that error loud rather than returning a closed
+    sqlite handle that would later raise ``sqlite3.ProgrammingError`` deep
+    inside the executor pool.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    created = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-shutdown-guard",
+        status="pending",
+        message="scheduled",
+    )
+
+    store.shutdown()
+
+    with pytest.raises(RuntimeError, match="shut down"):
+        await store.healthcheck()
+    with pytest.raises(RuntimeError, match="shut down"):
+        await store.get_operation(created.operation_id)
+    with pytest.raises(RuntimeError, match="shut down"):
+        await store.get_latest_operation_for_subject("user-shutdown-guard")
+    with pytest.raises(RuntimeError, match="shut down"):
+        await store.update_operation(created.operation_id, status="failed")
+    with pytest.raises(RuntimeError, match="shut down"):
+        await store.create_operation(
+            operation_type="user_content_download",
+            subject_id="another",
+            status="pending",
+            message="m",
+        )
+    with pytest.raises(RuntimeError, match="shut down"):
+        await store.mark_incomplete_operations_failed()
+
+
 def test_operation_store_finalizer_closes_connections_on_gc(tmp_path) -> None:
     """GC'ing the store without calling shutdown must still close handles."""
     import gc

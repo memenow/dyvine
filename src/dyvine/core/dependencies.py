@@ -49,6 +49,12 @@ from .settings import settings
 # executor (``min(32, cpu+4)``) that every ``asyncio.to_thread`` call would
 # otherwise share.
 R2_EXECUTOR_MAX_WORKERS = 16
+# ``head_object`` fan-out runs inside ``R2StorageService._list_objects_sync``
+# while the surrounding listing already occupies a worker on
+# ``r2_executor``. A shared global pool puts a single ceiling on concurrent
+# ``head_object`` requests across every in-flight listing instead of letting
+# each listing spawn its own short-lived ``ThreadPoolExecutor``.
+R2_HEAD_EXECUTOR_MAX_WORKERS = 16
 SQLITE_EXECUTOR_MAX_WORKERS = 4
 AUDIT_EXECUTOR_MAX_WORKERS = 2
 
@@ -88,6 +94,7 @@ class ServiceContainer:
         self._services: dict[str, Any] = {}
         self._initialized = False
         self._r2_executor: ThreadPoolExecutor | None = None
+        self._r2_head_executor: ThreadPoolExecutor | None = None
         self._sqlite_executor: ThreadPoolExecutor | None = None
         self._audit_executor: ThreadPoolExecutor | None = None
         # Shared registry for long-lived background downloads. Services
@@ -112,6 +119,8 @@ class ServiceContainer:
 
         Executors created:
             - ``r2_executor`` (16 workers): R2 upload/head/delete/list
+            - ``r2_head_executor`` (16 workers): per-key ``head_object``
+              fan-out triggered inside ``R2StorageService._list_objects_sync``
             - ``sqlite_executor`` (4 workers): OperationStore writes/reads
             - ``audit_executor`` (2 workers): LifecycleManager audit writes
 
@@ -129,6 +138,10 @@ class ServiceContainer:
         self._r2_executor = ThreadPoolExecutor(
             max_workers=R2_EXECUTOR_MAX_WORKERS,
             thread_name_prefix="dyvine-r2",
+        )
+        self._r2_head_executor = ThreadPoolExecutor(
+            max_workers=R2_HEAD_EXECUTOR_MAX_WORKERS,
+            thread_name_prefix="dyvine-r2-head",
         )
         self._sqlite_executor = ThreadPoolExecutor(
             max_workers=SQLITE_EXECUTOR_MAX_WORKERS,
@@ -153,11 +166,16 @@ class ServiceContainer:
         await operation_store.mark_incomplete_operations_failed()
 
         # Initialize user service and wire its R2 client to the R2 executor.
+        # The dedicated head fan-out pool is attached separately so a burst
+        # of concurrent ``list_objects`` calls does not nest one
+        # ``ThreadPoolExecutor`` per listing inside a worker thread of
+        # ``r2_executor``.
         user_service = UserService(
             operation_store=operation_store,
             task_registry=self._background_tasks,
         )
         user_service.storage.set_executor(self._r2_executor)
+        user_service.storage.set_head_executor(self._r2_head_executor)
         self._services["user_service"] = user_service
 
         # Initialize livestream service
@@ -198,7 +216,16 @@ class ServiceContainer:
         if isinstance(operation_store, OperationStore):
             operation_store.shutdown()
 
-        for attr in ("_audit_executor", "_sqlite_executor", "_r2_executor"):
+        # Reverse of init order. ``r2_executor`` is drained before
+        # ``r2_head_executor`` so any in-flight listing finishes its
+        # ``head_object`` fan-out submissions while the head pool still
+        # accepts work; the head pool is then drained on its own.
+        for attr in (
+            "_audit_executor",
+            "_sqlite_executor",
+            "_r2_executor",
+            "_r2_head_executor",
+        ):
             executor = getattr(self, attr)
             if executor is not None:
                 executor.shutdown(wait=True)

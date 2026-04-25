@@ -87,7 +87,12 @@ class R2StorageService:
         bucket: Name of the R2 bucket
     """
 
-    def __init__(self, *, executor: Executor | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        executor: Executor | None = None,
+        head_executor: Executor | None = None,
+    ) -> None:
         """Initialize the R2 storage service.
 
         Configures the boto3 client with R2-specific settings and retry config.
@@ -98,8 +103,15 @@ class R2StorageService:
                 When ``None`` the service falls back to the default asyncio
                 executor, which keeps historical behavior for tests that
                 build the service directly.
+            head_executor: Optional dedicated executor used to fan out the
+                ``head_object`` calls inside ``_list_objects_sync``. The
+                container injects a single shared pool so concurrent
+                listings cannot each spawn their own short-lived
+                ``ThreadPoolExecutor``. When ``None`` the listing path
+                falls back to a one-off pool sized for the page.
         """
         self._executor: Executor | None = executor
+        self._head_executor: Executor | None = head_executor
 
         # Check if R2 configuration is available
         if not settings.r2.is_configured:
@@ -140,6 +152,14 @@ class R2StorageService:
         ``UserService`` constructor signature.
         """
         self._executor = executor
+
+    def set_head_executor(self, executor: Executor | None) -> None:
+        """Attach the dedicated ``head_object`` fan-out executor.
+
+        Mirrors :meth:`set_executor` so the container can wire the head
+        pool post-construction without changing ``UserService``.
+        """
+        self._head_executor = executor
 
     async def _run(self, func: Callable[..., _R], /, *args: Any, **kwargs: Any) -> _R:
         """Dispatch a blocking boto3 call to the configured executor.
@@ -526,12 +546,11 @@ class R2StorageService:
         N follow-up ``head_object`` calls that carry object metadata -- runs
         off the event loop. ``list_objects_v2`` returns objects in
         lexicographic order; this method preserves that ordering in its
-        output. The ``head_object`` fan-out is dispatched to a short-lived
-        ``ThreadPoolExecutor`` with worker count capped at
-        :data:`LIST_OBJECTS_HEAD_MAX_WORKERS` to avoid saturating the
-        boto3 connection pool on large pages. ``max_keys`` caps the single
-        page; callers that need more than one page are expected to
-        paginate themselves.
+        output. When the container has injected a shared head executor the
+        per-key fan-out reuses it so several concurrent listings share one
+        bounded thread budget; otherwise we fall back to a one-off pool
+        capped at :data:`LIST_OBJECTS_HEAD_MAX_WORKERS` to keep test and
+        ad-hoc callers parallel without wiring a container.
         """
         assert self.client is not None and self.bucket is not None
         client = self.client
@@ -565,6 +584,15 @@ class R2StorageService:
             return head.get("Metadata", {}) or {}
 
         keys: list[str | None] = [obj.get("Key") for obj in objects]
+        if self._head_executor is not None:
+            # Reuse the container-owned pool. ``Executor.map`` preserves
+            # input order, so zipping back into ``results`` keeps the
+            # lexicographic ordering ``list_objects_v2`` returned.
+            metadata_iter = self._head_executor.map(_fetch_metadata, keys)
+            for obj_data, metadata in zip(results, metadata_iter, strict=True):
+                obj_data["Metadata"] = metadata
+            return results
+
         workers = min(LIST_OBJECTS_HEAD_MAX_WORKERS, len(keys))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="r2-head"

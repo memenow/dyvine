@@ -17,7 +17,10 @@ async def test_start_download_tracks_operation(
 ) -> None:
     scheduled: list[asyncio.Future[None]] = []
 
-    def fake_create_task(coro: object) -> asyncio.Future[None]:
+    def fake_create_task(coro: object, **_kwargs: Any) -> asyncio.Future[None]:
+        # ``spawn_or_fallback`` forwards a ``name=...`` kwarg to
+        # ``asyncio.create_task``; absorb it so the mock can stand in for
+        # the real factory.
         if hasattr(coro, "close"):
             coro.close()
         future: asyncio.Future[None] = asyncio.Future()
@@ -25,7 +28,7 @@ async def test_start_download_tracks_operation(
         scheduled.append(future)
         return future
 
-    monkeypatch.setattr("dyvine.services.users.asyncio.create_task", fake_create_task)
+    monkeypatch.setattr("dyvine.core.background.asyncio.create_task", fake_create_task)
 
     service = UserService()
     monkeypatch.setattr(service, "get_user_info", AsyncMock(return_value=MagicMock()))
@@ -43,7 +46,7 @@ async def test_start_download_tracks_operation(
 async def test_get_download_status_returns_persisted_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def resolved_future(coro: object) -> asyncio.Future[None]:
+    def resolved_future(coro: object, **_kwargs: Any) -> asyncio.Future[None]:
         if hasattr(coro, "close"):
             coro.close()
         future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
@@ -52,7 +55,7 @@ async def test_get_download_status_returns_persisted_state(
 
     service = UserService()
     monkeypatch.setattr(service, "get_user_info", AsyncMock(return_value=MagicMock()))
-    monkeypatch.setattr("dyvine.services.users.asyncio.create_task", resolved_future)
+    monkeypatch.setattr("dyvine.core.background.asyncio.create_task", resolved_future)
 
     start_response = await service.start_download("user-456")
     status_response = await service.get_download_status(start_response.operation_id)

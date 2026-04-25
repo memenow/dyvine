@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from dyvine.core.background import BackgroundTaskRegistry
+from dyvine.core.background import BackgroundTaskRegistry, spawn_or_fallback
 
 
 @pytest.mark.asyncio
@@ -83,3 +83,49 @@ async def test_spawn_propagates_exceptions_to_awaiters() -> None:
         await task
     await asyncio.sleep(0)
     assert registry.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_after_drain_raises_and_closes_coroutine() -> None:
+    """Once ``drain`` has been entered, ``spawn`` must reject new work.
+
+    Otherwise a stale callback that registers another download after the
+    lifespan started shutdown would silently leak past the executor
+    teardown that ``ServiceContainer.shutdown`` performs next.
+    """
+    registry = BackgroundTaskRegistry(drain_timeout=0.5)
+
+    async def noop() -> None:
+        return None
+
+    await registry.drain()
+
+    coro = noop()
+    with pytest.raises(RuntimeError, match="closed"):
+        registry.spawn(coro)
+    # The supplied coroutine must have been closed before the raise so the
+    # ``-W error`` test runtime does not trip ``RuntimeWarning: coroutine
+    # was never awaited``.
+    assert coro.cr_frame is None
+
+
+@pytest.mark.asyncio
+async def test_spawn_or_fallback_uses_registry_when_available() -> None:
+    registry = BackgroundTaskRegistry()
+
+    async def quick() -> int:
+        return 7
+
+    task = spawn_or_fallback(registry, quick(), name="via-registry")
+    assert registry.active_count == 1
+    assert await task == 7
+
+
+@pytest.mark.asyncio
+async def test_spawn_or_fallback_falls_back_to_create_task() -> None:
+    async def quick() -> int:
+        return 11
+
+    task = spawn_or_fallback(None, quick())
+    assert isinstance(task, asyncio.Task)
+    assert await task == 11
