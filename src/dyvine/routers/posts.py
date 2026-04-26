@@ -59,7 +59,7 @@ router = APIRouter(
 
 
 async def get_post_service(
-    douyin_handler: Annotated[DouyinHandler, Depends(get_douyin_handler)]
+    douyin_handler: Annotated[DouyinHandler, Depends(get_douyin_handler)],
 ) -> PostService:
     """Create PostService instance with injected Douyin handler."""
     return PostService(douyin_handler)

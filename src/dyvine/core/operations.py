@@ -264,8 +264,7 @@ class OperationStore:
             # WAL is a database-level mode that persists across connections
             # and enables concurrent readers while a writer is active.
             connection.execute("PRAGMA journal_mode=WAL;")
-            connection.execute(
-                """
+            connection.execute("""
                 CREATE TABLE IF NOT EXISTS operations (
                     operation_id TEXT PRIMARY KEY,
                     operation_type TEXT NOT NULL,
@@ -281,14 +280,11 @@ class OperationStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
-                """
-            )
-            connection.execute(
-                """
+                """)
+            connection.execute("""
                 CREATE INDEX IF NOT EXISTS idx_operations_subject_type_updated
                 ON operations (subject_id, operation_type, updated_at DESC)
-                """
-            )
+                """)
             connection.commit()
 
     def _reader_connection(self) -> sqlite3.Connection:
