@@ -32,7 +32,10 @@ jobs:
       run: uv sync --all-extras --frozen
 
     - name: Run tests
-      run: uv run pytest --cov=src/dyvine --cov-report=xml --cov-fail-under=80 -W error
+      # ``filterwarnings = error`` lives in pytest.ini so the same rule
+      # applies to local runs and command-line ``-W`` overrides do not
+      # short-circuit the targeted ignores documented there.
+      run: uv run pytest --cov=src/dyvine --cov-report=xml --cov-fail-under=80
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4

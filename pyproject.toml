@@ -4,16 +4,16 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "black>=23.3.0",
-    "isort>=5.12.0",
-    "mypy>=1.3.0",
-    "types-psutil>=5.9.0",
-    "boto3-stubs[s3]>=1.34.0",
-    "ruff>=0.0.270",
-    "pre-commit>=3.3.3",
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
+    "black>=26.3.1",
+    "isort>=8.0.1",
+    "mypy>=1.20.2",
+    "types-psutil>=7.2.2.20260408",
+    "boto3-stubs[s3]>=1.42.96",
+    "ruff>=0.15.12",
+    "pre-commit>=4.6.0",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.1.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [project]
@@ -26,21 +26,21 @@ authors = [
 ]
 dependencies = [
     # Core dependencies
-    "fastapi>=0.109.0",
-    "uvicorn[standard]>=0.27.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "python-dotenv>=1.0.0",
-    
+    "fastapi>=0.136.1",
+    "uvicorn[standard]>=0.46.0",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
+    "python-dotenv>=1.2.2",
+
     # External integrations
-    "boto3>=1.34.0",
+    "boto3>=1.42.96",
     "f2>=0.0.1.7",
-    "httpx>=0.24.0",
-    
+    "httpx>=0.28.1",
+
     # Utilities
-    "prometheus-client>=0.19.0",
-    "psutil>=5.9.0",
-    "python-multipart>=0.0.6",
+    "prometheus-client>=0.25.0",
+    "psutil>=7.2.2",
+    "python-multipart>=0.0.26",
 ]
 
 [tool.pytest.ini_options]
@@ -49,6 +49,22 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --asyncio-mode=auto"
+# Treat every warning as an error (replaces the previous ``-W error``
+# CI flag), but allow the unavoidable upstream deprecations through.
+# ``websockets_proxy 0.1.2`` (a transitive dependency of f2) still
+# imports ``websockets.legacy.client``, which emits a DeprecationWarning
+# under websockets >= 14. Drop the targeted ignores once
+# ``websockets_proxy`` migrates to ``websockets.asyncio``.
+filterwarnings = [
+    "error",
+    "ignore:websockets\\..*:DeprecationWarning",
+    "ignore::DeprecationWarning:websockets.*",
+    "ignore::DeprecationWarning:websockets_proxy.*",
+    # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
+    # cleanup) to a warning. Older test environments did not surface
+    # these; the underlying socket is closed by the OS regardless.
+    "ignore:Exception ignored in.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
+]
 markers = [
     "asyncio: mark test as async/await test"
 ]
@@ -56,10 +72,37 @@ markers = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/dyvine"]
 
+[tool.uv]
+# f2 0.0.1.7 (the upstream Douyin SDK) pins the packages below with ``==``
+# in its packaging metadata, even though its source already targets the
+# httpx 0.28+ surface (mounts=, httpx.Proxy(url=...)) and pydantic v2
+# stable APIs (model_dump / model_validate). Without these overrides the
+# uv resolver would otherwise drag every transitive dependency back to
+# the December-2024 versions f2 was last released against. Drop a row
+# from this list once f2 ships looser metadata upstream.
+override-dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.13.3",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.1.0",
+    "websockets>=16.0",
+    "cryptography>=47.0.0",
+    "black>=26.3.1",
+    "aiofiles>=24.1.0",
+    "pyyaml>=6.0.2",
+    "protobuf>=5.28.3",
+]
+
 [tool.black]
 line-length = 88
 target-version = ['py312']
 include = '\.pyi?$'
+extend-exclude = '''
+/(
+    \.claude
+  | \.serena
+)/
+'''
 
 [tool.isort]
 profile = "black"

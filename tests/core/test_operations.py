@@ -137,12 +137,10 @@ def test_operation_store_creates_lookup_index(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
 
     with closing(sqlite3.connect(store.db_path)) as connection:
-        row = connection.execute(
-            """
+        row = connection.execute("""
             SELECT name FROM sqlite_master
             WHERE type = 'index' AND name = 'idx_operations_subject_type_updated'
-            """
-        ).fetchone()
+            """).fetchone()
 
     assert row is not None
     assert row[0] == "idx_operations_subject_type_updated"
