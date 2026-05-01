@@ -129,18 +129,28 @@ class LivestreamService:
 
     @staticmethod
     def _live_filter_to_dict(live_filter: Any) -> dict[str, Any]:
-        """Safely convert an f2 live filter to a dict.
+        """Safely convert an f2 live filter to a normalized dict.
 
         Falls back to an empty dict if the private ``_to_dict`` method is
-        unavailable or raises.
+        unavailable or raises. When the underlying object exposes a
+        ``live_status`` attribute, its value is mirrored to ``status`` so
+        callers can reliably gate on ``status == 2`` (live) without
+        having to reach back into the original object — ``_to_dict()``
+        does not surface ``live_status`` itself.
         """
         try:
-            return dict(live_filter._to_dict())
+            result: dict[str, Any] = dict(live_filter._to_dict())
         except Exception:
             logger.warning(
                 "live_filter._to_dict() unavailable; falling back to empty dict"
             )
-            return {}
+            result = {}
+
+        live_status = getattr(live_filter, "live_status", None)
+        if live_status is not None:
+            result["status"] = live_status
+
+        return result
 
     @staticmethod
     def _extract_stream_map(live_filter: Any) -> dict[str, str]:
