@@ -255,6 +255,34 @@ class TestLiveFilterToDict:
         result = LivestreamService._live_filter_to_dict(BrokenFilter())
         assert result == {}
 
+    def test_mirrors_live_status_to_status(self) -> None:
+        class FakeLiveFilter:
+            live_status = 2
+
+            def _to_dict(self) -> dict[str, str]:
+                return {"room_id": "123"}
+
+        result = LivestreamService._live_filter_to_dict(FakeLiveFilter())
+        assert result == {"room_id": "123", "status": 2}
+
+    def test_mirrors_offline_live_status(self) -> None:
+        class FakeLiveFilter:
+            live_status = 0
+
+            def _to_dict(self) -> dict[str, str]:
+                return {"room_id": "123"}
+
+        result = LivestreamService._live_filter_to_dict(FakeLiveFilter())
+        assert result["status"] == 0
+
+    def test_skips_when_live_status_absent(self) -> None:
+        class FakeLiveFilter:
+            def _to_dict(self) -> dict[str, str]:
+                return {"room_id": "123"}
+
+        result = LivestreamService._live_filter_to_dict(FakeLiveFilter())
+        assert "status" not in result
+
 
 # ---------------------------------------------------------------------------
 # _parse_url
