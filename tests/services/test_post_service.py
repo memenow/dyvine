@@ -422,9 +422,7 @@ async def test_start_bulk_download_returns_pending_response_immediately(
         scheduled.append(future)
         return future
 
-    monkeypatch.setattr(
-        "dyvine.core.background.asyncio.create_task", fake_create_task
-    )
+    monkeypatch.setattr("dyvine.core.background.asyncio.create_task", fake_create_task)
 
     response = await svc.start_bulk_download("pending-user", max_cursor=42)
 
@@ -478,7 +476,9 @@ async def test_run_bulk_download_marks_completed_for_zero_post_user(
         mock_db.return_value = mock_ctx
 
         with patch.object(svc, "_fetch_posts_batch", new=AsyncMock(return_value={})):
-            await svc._run_bulk_download(operation.operation_id, "u1", 0)
+            await svc._run_bulk_download(
+                operation.operation_id, "u1", 0, profile=profile
+            )
 
     refreshed = await store.get_operation(operation.operation_id)
     assert refreshed.status == "completed"
@@ -506,7 +506,12 @@ async def test_run_bulk_download_records_failure_when_user_disappears(
     )
 
     svc = _build_service(handler, operation_store=store)
-    await svc._run_bulk_download(operation.operation_id, "ghost-user", 0)
+    # Pass ``profile=None`` to exercise the defensive guard inside
+    # ``_run_bulk_download``: when the caller supplies an invalid profile
+    # (e.g. the user disappeared between scheduling and execution) the
+    # operation must be marked failed instead of letting the
+    # ``UserNotFoundError`` propagate uncaught.
+    await svc._run_bulk_download(operation.operation_id, "ghost-user", 0, profile=None)
 
     refreshed = await store.get_operation(operation.operation_id)
     assert refreshed.status == "failed"
@@ -590,7 +595,9 @@ async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
             }
 
         with patch.object(svc, "_fetch_posts_batch", side_effect=fake_fetch):
-            await svc._run_bulk_download(operation.operation_id, "loop-user", 0)
+            await svc._run_bulk_download(
+                operation.operation_id, "loop-user", 0, profile=profile
+            )
 
         # The first empty batch must short-circuit the loop.
         assert call_count == 1
@@ -661,7 +668,7 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
         with patch.object(svc, "_fetch_posts_batch", side_effect=sticky_fetch):
             with patch.object(svc, "_process_posts_batch", new=process_batch):
                 await svc._run_bulk_download(
-                    operation.operation_id, "sticky-user", 0
+                    operation.operation_id, "sticky-user", 0, profile=profile
                 )
 
         # max_pages = (100 // 20) * 2 + 20 = 30. The loop breaks when
@@ -728,7 +735,9 @@ async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
             raise RuntimeError("upstream flaky")
 
         with patch.object(svc, "_fetch_posts_batch", side_effect=failing_fetch):
-            await svc._run_bulk_download(operation.operation_id, "error-user", 0)
+            await svc._run_bulk_download(
+                operation.operation_id, "error-user", 0, profile=profile
+            )
 
         assert call_count == 1
 

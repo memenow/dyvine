@@ -647,9 +647,7 @@ async def health_check(request: Request) -> JSONResponse:
     # protects exotic call paths (e.g. tests instantiating ``app`` without
     # the lifespan) by returning a zero uptime instead of raising.
     start_monotonic = getattr(app.state, "start_monotonic", 0.0)
-    uptime_seconds = (
-        int(time.monotonic() - start_monotonic) if start_monotonic else 0
-    )
+    uptime_seconds = int(time.monotonic() - start_monotonic) if start_monotonic else 0
 
     # Calculate human-readable uptime
     hours = uptime_seconds // 3600

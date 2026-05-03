@@ -282,9 +282,7 @@ class PostService:
                 "Failed to validate user profile",
                 extra={"sec_user_id": sec_user_id, "error": str(e)},
             )
-            raise PostServiceError(
-                f"Failed to validate user profile: {str(e)}"
-            ) from e
+            raise PostServiceError(f"Failed to validate user profile: {str(e)}") from e
 
         if not profile or not getattr(profile, "nickname", None):
             raise UserNotFoundError(f"User not found: {sec_user_id}")
@@ -298,8 +296,13 @@ class PostService:
             metadata={"max_cursor": max_cursor},
         )
 
+        # Forward the already-fetched profile to the background coroutine so
+        # the bulk loop does not have to repeat the upstream call. A second
+        # ``fetch_user_profile`` here would double the network cost and open
+        # a small failure window where the existence check passed but the
+        # bulk loop sees a transient error.
         coro = self._run_bulk_download(
-            operation.operation_id, sec_user_id, max_cursor
+            operation.operation_id, sec_user_id, max_cursor, profile=profile
         )
         # Route through the shared registry so the FastAPI lifespan can
         # drain the in-flight bulk download before the executor pools are
@@ -328,6 +331,8 @@ class PostService:
         operation_id: str,
         sec_user_id: str,
         max_cursor: int,
+        *,
+        profile: Any,
     ) -> None:
         """Execute the bulk download loop and persist progress to the store.
 
@@ -341,10 +346,15 @@ class PostService:
             operation_id: Identifier of the persisted operation record.
             sec_user_id: Unique identifier of the user.
             max_cursor: Starting pagination cursor for fetching posts.
+            profile: The user profile already validated by
+                :meth:`start_bulk_download`. Re-using the existing payload
+                avoids a second ``fetch_user_profile`` call.
         """
         download_stats: dict[PostType, int] = dict.fromkeys(PostType, 0)
         download_path: str | None = None
-        total_posts = 0
+
+        aweme_count = getattr(profile, "aweme_count", 0)
+        total_posts = aweme_count if isinstance(aweme_count, int) else 0
 
         try:
             await self.operation_store.update_operation(
@@ -356,25 +366,20 @@ class PostService:
                 error=None,
             )
 
-            logger.info(
-                "Fetching user profile",
-                extra={
-                    "sec_user_id": sec_user_id,
-                    "operation_id": operation_id,
-                },
-            )
-            profile = await self.handler.fetch_user_profile(sec_user_id)
+            # Defensive guard: ``start_bulk_download`` already validated the
+            # profile, but ad-hoc callers (or future refactors) may invoke
+            # ``_run_bulk_download`` with an invalid payload. Reject it so the
+            # operation moves to ``failed`` instead of silently iterating
+            # through an empty profile.
             if not profile or not getattr(profile, "nickname", None):
                 raise UserNotFoundError(f"User not found: {sec_user_id}")
 
-            aweme_count = profile.aweme_count
-            total_posts = aweme_count if isinstance(aweme_count, int) else 0
-
             logger.info(
-                "User profile fetched",
+                "Bulk download starting with cached profile",
                 extra={
                     "sec_user_id": sec_user_id,
-                    "nickname": profile.nickname,
+                    "operation_id": operation_id,
+                    "nickname": getattr(profile, "nickname", None),
                     "total_posts": total_posts,
                 },
             )
@@ -407,9 +412,7 @@ class PostService:
             # the server keeps replying with the same ``max_cursor`` the
             # only stop conditions become ``has_more=False`` or this cap.
             if total_posts > 0:
-                max_pages = (
-                    (total_posts // PAGE_SIZE) * PAGE_MULTIPLIER + PAGE_SLACK
-                )
+                max_pages = (total_posts // PAGE_SIZE) * PAGE_MULTIPLIER + PAGE_SLACK
             else:
                 max_pages = MAX_PAGES_FALLBACK
             page_count = 0
@@ -456,9 +459,7 @@ class PostService:
 
                     progress: float | None
                     if total_posts > 0:
-                        progress = min(
-                            (total_downloaded / total_posts) * 100, 100.0
-                        )
+                        progress = min((total_downloaded / total_posts) * 100, 100.0)
                     else:
                         progress = None
 
@@ -559,9 +560,7 @@ class PostService:
             )
         else:
             final_status = "failed"
-            terminal_message = (
-                "Bulk download failed: no posts were downloaded"
-            )
+            terminal_message = "Bulk download failed: no posts were downloaded"
 
         progress_value: float
         if total_posts > 0:
@@ -585,9 +584,7 @@ class PostService:
             },
         )
 
-    async def get_bulk_download_status(
-        self, operation_id: str
-    ) -> BulkDownloadResponse:
+    async def get_bulk_download_status(self, operation_id: str) -> BulkDownloadResponse:
         """Get the current status of a bulk download operation.
 
         Args:
@@ -604,9 +601,7 @@ class PostService:
         try:
             op = await self.operation_store.get_operation(operation_id)
         except DownloadError as e:
-            raise DownloadError(
-                f"Bulk download task {operation_id} not found"
-            ) from e
+            raise DownloadError(f"Bulk download task {operation_id} not found") from e
 
         if op.operation_type != "user_posts_bulk_download":
             raise DownloadError(f"Bulk download task {operation_id} not found")

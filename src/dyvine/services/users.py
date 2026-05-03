@@ -471,14 +471,10 @@ class UserService:
 
         missing_error: str | None = None
         downloads_incomplete = (
-            not downloading_likes_only
-            and total_posts > 0
-            and downloaded < total_posts
+            not downloading_likes_only and total_posts > 0 and downloaded < total_posts
         )
         if downloads_incomplete:
-            missing_error = (
-                f"Only downloaded {downloaded} out of {total_posts} posts"
-            )
+            missing_error = f"Only downloaded {downloaded} out of {total_posts} posts"
 
         if missing_error and upload_error:
             combined_error: str | None = f"{missing_error}; {upload_error}"
@@ -506,7 +502,15 @@ class UserService:
                 downloaded,
             )
 
-        progress_value = 100.0 if status == "completed" else completion_percentage
+        # Clamp the partial percentage so the persisted ``progress`` field
+        # honors the implicit 0-100 contract. ``completion_percentage`` can
+        # exceed 100 when the run mixes posts and likes (``downloaded``
+        # accumulates likes while ``total_posts`` only reflects
+        # ``aweme_count``); without the clamp a single R2 upload failure
+        # could surface a 130%-style progress value to API clients.
+        progress_value = (
+            100.0 if status == "completed" else min(completion_percentage, 100.0)
+        )
         await self.operation_store.update_operation(
             task_id,
             status=status,
