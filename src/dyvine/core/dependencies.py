@@ -36,6 +36,7 @@ from typing import Any
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..services.livestreams import LivestreamService
+from ..services.posts import PostService
 from ..services.users import UserService
 from .background import BackgroundTaskRegistry
 from .operations import OperationStore
@@ -186,6 +187,15 @@ class ServiceContainer:
             task_registry=self._background_tasks,
         )
 
+        # Initialize post service. Bulk downloads are scheduled as
+        # long-running background tasks, so wire the service to the same
+        # operation store and registry the lifespan drains on shutdown.
+        self._services["post_service"] = PostService(
+            handler=self._services["douyin_handler"],
+            operation_store=operation_store,
+            task_registry=self._background_tasks,
+        )
+
         self._initialized = True
 
     async def shutdown(self) -> None:
@@ -329,6 +339,14 @@ class ServiceContainer:
             raise TypeError("livestream_service is not a LivestreamService instance")
         return service
 
+    @property
+    def post_service(self) -> PostService:
+        """Get the post management service."""
+        service = self.get_service("post_service")
+        if not isinstance(service, PostService):
+            raise TypeError("post_service is not a PostService instance")
+        return service
+
 
 @lru_cache
 def get_service_container() -> ServiceContainer:
@@ -398,3 +416,14 @@ def get_user_service() -> UserService:
 def get_livestream_service() -> LivestreamService:
     """FastAPI dependency provider for livestream service."""
     return get_service_container().livestream_service
+
+
+def get_post_service() -> PostService:
+    """FastAPI dependency provider for post service.
+
+    Returns the container-managed ``PostService`` so bulk downloads share
+    the same ``OperationStore`` and ``BackgroundTaskRegistry`` as the rest
+    of the application. Routers can depend on this provider directly via
+    ``Annotated[PostService, Depends(get_post_service)]``.
+    """
+    return get_service_container().post_service

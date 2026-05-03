@@ -62,6 +62,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import psutil
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -102,7 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Startup Sequence:
         1. Initialize structured logging system
         2. Create and configure logger instance
-        3. Record application start time for uptime tracking
+        3. Record monotonic startup baseline for uptime tracking
         4. Initialize service container with all dependencies
         5. Log successful startup with environment information
 
@@ -132,7 +133,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # === STARTUP PHASE ===
     setup_logging()
     app.state.logger = ContextLogger(__name__)
-    app.state.start_time = time.time()
+    # Use a monotonic baseline so uptime measurements stay correct across
+    # NTP step adjustments and any wall-clock skew. Wall-clock timestamps
+    # (for log records and the ``timestamp`` field in ``/health``) still go
+    # through ``time.time()`` where they are needed.
+    app.state.start_monotonic = time.monotonic()
 
     # Initialize service container with all dependencies
     container = get_service_container()
@@ -148,7 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "version": settings.version,
             "debug_mode": settings.debug,
             "api_prefix": settings.prefix,
-            "startup_time": time.time() - app.state.start_time,
+            "startup_time": time.monotonic() - app.state.start_monotonic,
         },
     )
 
@@ -157,15 +162,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     # === SHUTDOWN PHASE ===
-    shutdown_start = time.time()
-    total_uptime = shutdown_start - app.state.start_time
+    # ``total_uptime`` is computed from the monotonic baseline so the value
+    # is stable even if the system clock jumped during the lifetime of the
+    # process. ``shutdown_initiated_at`` keeps a wall-clock stamp because
+    # operators correlate it with external log streams.
+    total_uptime = time.monotonic() - app.state.start_monotonic
+    shutdown_initiated_at = time.time()
 
     app.state.logger.info(
         "Dyvine application shutting down gracefully",
         extra={
             "total_uptime_seconds": round(total_uptime, 2),
             "total_uptime_hours": round(total_uptime / 3600, 2),
-            "shutdown_initiated_at": shutdown_start,
+            "shutdown_initiated_at": shutdown_initiated_at,
         },
     )
     app.state.startup_complete = False
@@ -315,8 +324,11 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
     logger = app.state.logger
     logger.set_correlation_id(correlation_id)
 
-    # Record request start time for duration measurement
-    start_time = time.time()
+    # Record request start time for duration measurement. ``perf_counter``
+    # is monotonic and provides the highest available resolution, which is
+    # the right primitive for an elapsed-time pair where both endpoints are
+    # taken in the same process.
+    start_time = time.perf_counter()
 
     # Log request initiation with metadata
     logger.info(
@@ -335,8 +347,9 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
     # Process request through application stack
     response = await call_next(request)
 
-    # Calculate total processing duration
-    duration = time.time() - start_time
+    # Calculate total processing duration on the same monotonic clock that
+    # captured ``start_time`` above.
+    duration = time.perf_counter() - start_time
 
     # Log request completion with performance metrics
     route = request.scope.get("route")
@@ -553,39 +566,54 @@ async def startup_probe(request: Request) -> JSONResponse:
 @app.get(
     "/health",
     summary="Application health summary",
-    description="Returns detailed health and performance metrics for monitoring",
-    response_description="Health status with system metrics and uptime information",
+    description="Returns aggregated runtime metrics for ops dashboards",
+    response_description="Aggregated metrics and informational dependency state",
     tags=["System"],
 )
 async def health_check(request: Request) -> JSONResponse:
-    """Comprehensive health check endpoint for monitoring and diagnostics.
+    """Aggregate runtime metrics for operational monitoring dashboards.
 
-    This endpoint provides detailed health information about the Dyvine API
-    including system metrics, resource usage, and operational status. It's
-    designed for use by monitoring systems, load balancers, and operational
-    dashboards.
+    ``/health`` is intentionally an informational endpoint: it exists so
+    operators, dashboards, and ad-hoc monitoring tools can scrape a single
+    URL for uptime, memory, and CPU figures. It always returns ``200 OK``
+    and never gates on dependency availability.
 
-    Health Metrics Included:
-        - Application status and version
-        - System uptime since last restart
-        - Memory usage (RSS) in megabytes
-        - CPU utilization percentage
-        - Service dependencies status
+    Probe responsibilities are split across dedicated endpoints so each
+    Kubernetes probe type maps to a single concern and can be tuned
+    independently:
+
+    - Liveness probe: ``GET /livez`` reflects only process health.
+    - Readiness probe: ``GET /readyz`` returns ``503`` when a required
+      dependency (Douyin cookie, service container, operation store, R2)
+      is unavailable so traffic is steered away from a Pod that cannot
+      serve real requests.
+    - Startup probe: ``GET /startupz`` reports whether the lifespan
+      startup sequence finished.
 
     Returns:
-        Dict[str, Any]: Comprehensive health information including:
-            - status: Overall health status ("healthy", "degraded", "unhealthy")
-            - version: Current application version
-            - uptime_seconds: Seconds since application startup
-            - uptime_human: Human-readable uptime string
-            - memory_mb: Current memory usage in MB
-            - cpu_percent: Current CPU usage percentage
-            - dependencies: Status of external dependencies
-            - correlation_id: Correlated request identifier for tracking
+        JSONResponse: The response body always carries ``status == "ok"``
+        plus the following fields:
+            - version: Current application version.
+            - environment: ``"development"`` or ``"production"``.
+            - uptime_seconds: Seconds since the lifespan startup hook ran,
+              measured on a monotonic clock so NTP adjustments cannot
+              produce negative or jumping values.
+            - uptime_human: Human-readable rendering of ``uptime_seconds``.
+            - memory_mb: Resident memory of the current process in MiB.
+            - cpu_percent: Instantaneous CPU usage percentage.
+            - timestamp: Wall-clock timestamp (``time.time()``) of the
+              snapshot, intended for log correlation.
+            - api_prefix: Configured API prefix.
+            - correlation_id: Request correlation ID, mirrored to the
+              ``X-Correlation-ID`` response header.
+            - dependencies: Informational dependency snapshot. Surfaced
+              for ops visibility only; values here never change the HTTP
+              status code.
+            - memory_pressure: ``"high"`` when RSS exceeds 1 GiB, else
+              ``"normal"``. Informational only.
 
     Status Codes:
-        - 200: Service is healthy and operational
-        - 503: Service is degraded or unhealthy
+        - 200: Always.
 
     Example:
         ```bash
@@ -595,76 +623,68 @@ async def health_check(request: Request) -> JSONResponse:
         Response:
         ```json
         {
-            "status": "healthy",
+            "status": "ok",
             "version": "1.0.0",
             "uptime_seconds": 3600,
-            "uptime_human": "1 hour, 0 minutes",
+            "uptime_human": "1 hours, 0 minutes",
             "memory_mb": 245.67,
             "cpu_percent": 12.5,
+            "memory_pressure": "normal",
             "dependencies": {
-                "douyin_api": "connected",
-                "r2_storage": "available"
+                "douyin_api": "configured",
+                "r2_storage": "configured",
+                "logging_system": "operational"
             },
+            "timestamp": 1714723200.123,
             "correlation_id": "550e8400-e29b-41d4-a716-446655440000"
         }
         ```
-
-    Note:
-        This endpoint is used by:
-        - Kubernetes liveness and readiness probes
-        - Load balancer health checks
-        - Monitoring systems (Prometheus, Grafana, etc.)
-        - Operational dashboards and alerting
     """
-    import psutil
-
     # Get current process information
     process = psutil.Process()
-    uptime_seconds = int(time.time() - app.state.start_time)
+    # ``start_monotonic`` is set at the top of the lifespan startup hook,
+    # which always runs before any HTTP request. The ``getattr`` fallback
+    # protects exotic call paths (e.g. tests instantiating ``app`` without
+    # the lifespan) by returning a zero uptime instead of raising.
+    start_monotonic = getattr(app.state, "start_monotonic", 0.0)
+    uptime_seconds = (
+        int(time.monotonic() - start_monotonic) if start_monotonic else 0
+    )
 
     # Calculate human-readable uptime
     hours = uptime_seconds // 3600
     minutes = (uptime_seconds % 3600) // 60
     uptime_human = f"{hours} hours, {minutes} minutes"
 
-    # Check dependency status (can be expanded for real health checks)
+    # Informational dependency snapshot. Values here document the current
+    # configuration but never affect the HTTP status code. Use ``/readyz``
+    # if you need the dependency-aware gate.
+    douyin_status = "configured" if settings.douyin.cookie else "missing_credentials"
+    r2_status = "configured" if settings.r2.is_configured else "missing_credentials"
     dependencies = {
-        "douyin_api": "configured" if settings.douyin.cookie else "missing_credentials",
-        "r2_storage": "available" if settings.r2.is_configured else "not_configured",
+        "douyin_api": douyin_status,
+        "r2_storage": r2_status,
         "logging_system": "operational",
     }
 
-    # Determine overall health status
-    health_status = "healthy"
-    if not settings.douyin.cookie:
-        health_status = "unhealthy"
-    elif not settings.r2.is_configured:
-        health_status = "degraded"
-
-    if process.memory_info().rss > 1024 * 1024 * 1024:  # > 1GB RAM
-        if health_status != "unhealthy":
-            health_status = "degraded"
+    rss_bytes = process.memory_info().rss
+    memory_pressure = "high" if rss_bytes > 1024 * 1024 * 1024 else "normal"
 
     correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
 
     response_body = {
-        "status": health_status,
+        "status": "ok",
         "version": settings.version,
         "environment": "development" if settings.debug else "production",
         "uptime_seconds": uptime_seconds,
         "uptime_human": uptime_human,
-        "memory_mb": round(process.memory_info().rss / 1024 / 1024, 2),
+        "memory_mb": round(rss_bytes / 1024 / 1024, 2),
         "cpu_percent": round(process.cpu_percent(), 2),
+        "memory_pressure": memory_pressure,
         "dependencies": dependencies,
         "timestamp": time.time(),
         "api_prefix": settings.prefix,
         "correlation_id": correlation_id,
     }
 
-    status_code = (
-        status.HTTP_503_SERVICE_UNAVAILABLE
-        if health_status == "unhealthy"
-        else status.HTTP_200_OK
-    )
-
-    return JSONResponse(status_code=status_code, content=response_body)
+    return JSONResponse(status_code=status.HTTP_200_OK, content=response_body)

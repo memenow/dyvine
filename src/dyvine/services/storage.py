@@ -353,8 +353,11 @@ class R2StorageService:
 
         file_size = file_path.stat().st_size
 
-        # Start upload metrics
-        start_time = time.time()
+        # Start upload metrics. ``perf_counter`` is monotonic and immune to
+        # NTP step adjustments or wall-clock drift, which is exactly what we
+        # want when measuring an elapsed duration paired with a single end
+        # call below.
+        start_time = time.perf_counter()
         try:
             logger.info(
                 "Starting R2 upload",
@@ -377,7 +380,7 @@ class R2StorageService:
                 metadata=metadata,
             )
 
-            duration = time.time() - start_time
+            duration = time.perf_counter() - start_time
 
             logger.info(
                 "Successfully uploaded file to R2",

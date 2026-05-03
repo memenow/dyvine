@@ -33,11 +33,10 @@ Example Usage:
 
 from typing import Annotated
 
-from f2.apps.douyin.handler import DouyinHandler  # type: ignore
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from ..core.decorators import handle_errors
-from ..core.dependencies import get_douyin_handler
+from ..core.dependencies import get_post_service
 from ..core.exceptions import DownloadError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..schemas.posts import BulkDownloadResponse, PostDetail
@@ -56,13 +55,6 @@ router = APIRouter(
         500: {"description": "Internal server error"},
     },
 )
-
-
-async def get_post_service(
-    douyin_handler: Annotated[DouyinHandler, Depends(get_douyin_handler)],
-) -> PostService:
-    """Create PostService instance with injected Douyin handler."""
-    return PostService(douyin_handler)
 
 
 @router.get(
@@ -266,16 +258,27 @@ async def list_user_posts(
 
 @router.post(
     "/users/{user_id}/posts:download",
+    status_code=status.HTTP_202_ACCEPTED,
     response_model=BulkDownloadResponse,
-    summary="Download user posts",
-    description="Downloads all available posts from a specific user",
+    summary="Schedule user posts bulk download",
+    description=(
+        "Schedules an asynchronous bulk download of every available post from "
+        "a specific user and returns an operation_id clients can poll for "
+        "progress"
+    ),
 )
 async def download_user_posts(
     service: Annotated[PostService, Depends(get_post_service)],
     user_id: str = Path(..., description="The unique identifier of the user"),
     max_cursor: int = Query(0, description="Starting pagination cursor"),
 ) -> BulkDownloadResponse:
-    """Downloads all available posts from a user.
+    """Schedule a bulk download of every available post from a user.
+
+    The endpoint validates that the user exists, persists a pending
+    operation record, and dispatches the long-running pagination plus
+    download loop onto the shared background task registry. The response
+    carries the ``operation_id`` clients can use to poll
+    ``/posts/operations/{operation_id}`` for progress.
 
     Args:
         user_id: The unique identifier of the user.
@@ -283,18 +286,19 @@ async def download_user_posts(
         service: An instance of PostService for handling the request.
 
     Returns:
-        BulkDownloadResponse: A response containing download operation results.
+        BulkDownloadResponse: Pending bulk download response with the
+        operation tracking identifier and initial status.
 
     Raises:
-        HTTPException: If the user is not found, the download fails, or an
-            unexpected error occurs.
+        HTTPException: If the user is not found, the bulk download cannot
+            be scheduled, or an unexpected error occurs.
     """
     try:
         logger.info(
             "Processing download_user_posts request",
             extra={"user_id": user_id, "max_cursor": max_cursor},
         )
-        return await service.download_all_user_posts(user_id, max_cursor)
+        return await service.start_bulk_download(user_id, max_cursor)
 
     except UserNotFoundError as e:
         logger.warning("User not found", extra={"user_id": user_id})
@@ -307,5 +311,57 @@ async def download_user_posts(
     except Exception as e:
         logger.exception(
             "Error processing download_user_posts request", extra={"user_id": user_id}
+        )
+        raise HTTPException(status_code=500, detail="Internal server error") from e
+
+
+@router.get(
+    "/operations/{operation_id}",
+    response_model=BulkDownloadResponse,
+    summary="Get bulk download operation status",
+    description=(
+        "Retrieves the current status of a bulk posts download operation, "
+        "including per-PostType counts and the destination download path "
+        "once available"
+    ),
+)
+async def get_bulk_download_operation(
+    service: Annotated[PostService, Depends(get_post_service)],
+    operation_id: str = Path(
+        ..., description="The unique identifier of the bulk download operation"
+    ),
+) -> BulkDownloadResponse:
+    """Retrieve the status of a bulk posts download operation.
+
+    Args:
+        operation_id: The unique identifier of the bulk download operation
+            returned by :func:`download_user_posts`.
+        service: An instance of PostService for handling the request.
+
+    Returns:
+        BulkDownloadResponse: Snapshot of the current bulk download state.
+
+    Raises:
+        HTTPException: If the operation is unknown (404) or an unexpected
+            error occurs (500).
+    """
+    try:
+        logger.info(
+            "Processing get_bulk_download_operation request",
+            extra={"operation_id": operation_id},
+        )
+        return await service.get_bulk_download_status(operation_id)
+
+    except DownloadError as e:
+        logger.warning(
+            "Bulk download operation not found",
+            extra={"operation_id": operation_id},
+        )
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    except Exception as e:
+        logger.exception(
+            "Error processing get_bulk_download_operation request",
+            extra={"operation_id": operation_id},
         )
         raise HTTPException(status_code=500, detail="Internal server error") from e
