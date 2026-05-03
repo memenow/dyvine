@@ -25,6 +25,7 @@ from typing import Any
 from f2.apps.douyin.db import AsyncUserDB  # type: ignore
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
+from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
     DownloadError,
     PostNotFoundError,
@@ -32,6 +33,7 @@ from ..core.exceptions import (
     UserNotFoundError,
 )
 from ..core.logging import ContextLogger
+from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..schemas.posts import (
     BulkDownloadResponse,
@@ -70,13 +72,34 @@ class PostService:
     - Type safety through type annotations
     """
 
-    def __init__(self, handler: DouyinHandler) -> None:
+    # Class-level default mirrors the pattern used by ``LivestreamService`` so
+    # tests that build the service via ``object.__new__`` (bypassing
+    # ``__init__``) still see a ``None`` registry and fall through to the bare
+    # ``asyncio.create_task`` branch in :func:`spawn_or_fallback`.
+    _task_registry: BackgroundTaskRegistry | None = None
+
+    def __init__(
+        self,
+        handler: DouyinHandler,
+        *,
+        operation_store: OperationStore | None = None,
+        task_registry: BackgroundTaskRegistry | None = None,
+    ) -> None:
         """Initialize the PostService instance.
 
         Args:
             handler: Configured DouyinHandler instance for Douyin operations.
+            operation_store: Persistent operation record store. A private
+                ``OperationStore`` is created when not provided, which is the
+                path unit tests take.
+            task_registry: Optional registry that owns long-lived bulk
+                download tasks. When omitted (e.g. in tests) the service
+                falls back to ``asyncio.create_task`` so the public API
+                remains testable without a full service container.
         """
         self.handler = handler
+        self.operation_store = operation_store or OperationStore()
+        self._task_registry = task_registry
         logger.info("PostService initialized", extra={"handler_config": handler.kwargs})
 
     async def get_post_detail(self, aweme_id: str) -> PostDetail:
@@ -219,50 +242,152 @@ class PostService:
             )
             raise PostServiceError(f"Failed to fetch user posts: {str(e)}") from e
 
-    async def download_all_user_posts(
+    async def start_bulk_download(
         self,
         sec_user_id: str,
         max_cursor: int = 0,
     ) -> BulkDownloadResponse:
-        """Download all available posts from a Douyin user.
+        """Schedule an asynchronous bulk download of every post from a user.
+
+        Validates the user profile up front so the caller receives a 404
+        immediately when the account does not exist, then persists a
+        ``pending`` operation record and dispatches the long-running
+        pagination + download loop onto the shared background task
+        registry. The HTTP layer can poll
+        :meth:`get_bulk_download_status` with the returned ``operation_id``
+        to observe progress.
 
         Args:
             sec_user_id: Unique identifier of the user.
             max_cursor: Starting pagination cursor for fetching posts.
 
         Returns:
-            BulkDownloadResponse: Object containing the results of the bulk download
-                operation.
+            BulkDownloadResponse: Pending response carrying the
+                ``operation_id`` clients can use to poll for progress.
 
         Raises:
             UserNotFoundError: If the requested user cannot be found.
-            DownloadError: If the download operation fails.
-            PostServiceError: If an error occurs during the operation.
+            PostServiceError: If the profile lookup itself fails.
         """
-        download_stats = dict.fromkeys(PostType, 0)
-        download_path = None
-        total_posts = 0
+        try:
+            logger.info(
+                "Validating user before scheduling bulk download",
+                extra={"sec_user_id": sec_user_id, "max_cursor": max_cursor},
+            )
+            profile = await self.handler.fetch_user_profile(sec_user_id)
+        except UserNotFoundError:
+            raise
+        except Exception as e:
+            logger.exception(
+                "Failed to validate user profile",
+                extra={"sec_user_id": sec_user_id, "error": str(e)},
+            )
+            raise PostServiceError(f"Failed to validate user profile: {str(e)}") from e
+
+        if not profile or not getattr(profile, "nickname", None):
+            raise UserNotFoundError(f"User not found: {sec_user_id}")
+
+        operation = await self.operation_store.create_operation(
+            operation_type="user_posts_bulk_download",
+            subject_id=sec_user_id,
+            status="pending",
+            message="Bulk download scheduled",
+            progress=0.0,
+            metadata={"max_cursor": max_cursor},
+        )
+
+        # Forward the already-fetched profile to the background coroutine so
+        # the bulk loop does not have to repeat the upstream call. A second
+        # ``fetch_user_profile`` here would double the network cost and open
+        # a small failure window where the existence check passed but the
+        # bulk loop sees a transient error.
+        coro = self._run_bulk_download(
+            operation.operation_id, sec_user_id, max_cursor, profile=profile
+        )
+        # Route through the shared registry so the FastAPI lifespan can
+        # drain the in-flight bulk download before the executor pools are
+        # reaped. ``spawn_or_fallback`` falls back to ``asyncio.create_task``
+        # for unit tests that instantiate ``PostService`` directly.
+        spawn_or_fallback(
+            self._task_registry,
+            coro,
+            name=f"posts-bulk-{operation.operation_id}",
+        )
+
+        return BulkDownloadResponse(
+            operation_id=operation.operation_id,
+            sec_user_id=sec_user_id,
+            download_path=None,
+            total_posts=0,
+            downloaded_count=dict.fromkeys(PostType, 0),
+            total_downloaded=0,
+            status=DownloadStatus.PENDING,
+            message="Bulk download scheduled",
+            error_details=None,
+        )
+
+    async def _run_bulk_download(
+        self,
+        operation_id: str,
+        sec_user_id: str,
+        max_cursor: int,
+        *,
+        profile: Any,
+    ) -> None:
+        """Execute the bulk download loop and persist progress to the store.
+
+        Mirrors the orchestration shape used by
+        ``UserService._process_download``: the operation row is moved to
+        ``running`` on entry, refreshed after each successful batch with
+        the running tally, and finalized via ``completed`` / ``partial`` /
+        ``failed`` once the loop terminates.
+
+        Args:
+            operation_id: Identifier of the persisted operation record.
+            sec_user_id: Unique identifier of the user.
+            max_cursor: Starting pagination cursor for fetching posts.
+            profile: The user profile already validated by
+                :meth:`start_bulk_download`. Re-using the existing payload
+                avoids a second ``fetch_user_profile`` call.
+        """
+        download_stats: dict[PostType, int] = dict.fromkeys(PostType, 0)
+        download_path: str | None = None
+
+        aweme_count = getattr(profile, "aweme_count", 0)
+        total_posts = aweme_count if isinstance(aweme_count, int) else 0
 
         try:
-            # Get user profile
-            logger.info("Fetching user profile", extra={"sec_user_id": sec_user_id})
-            profile = await self.handler.fetch_user_profile(sec_user_id)
-            if not profile:
+            await self.operation_store.update_operation(
+                operation_id,
+                status="running",
+                message="Bulk download in progress",
+                progress=0.0,
+                completed_items=0,
+                error=None,
+            )
+
+            # Defensive guard: ``start_bulk_download`` already validated the
+            # profile, but ad-hoc callers (or future refactors) may invoke
+            # ``_run_bulk_download`` with an invalid payload. Reject it so the
+            # operation moves to ``failed`` instead of silently iterating
+            # through an empty profile.
+            if not profile or not getattr(profile, "nickname", None):
                 raise UserNotFoundError(f"User not found: {sec_user_id}")
 
-            aweme_count = profile.aweme_count
-            if isinstance(aweme_count, int):
-                total_posts = aweme_count
-            else:
-                total_posts = 0
-
             logger.info(
-                "User profile fetched",
+                "Bulk download starting with cached profile",
                 extra={
                     "sec_user_id": sec_user_id,
-                    "nickname": profile.nickname,
+                    "operation_id": operation_id,
+                    "nickname": getattr(profile, "nickname", None),
                     "total_posts": total_posts,
                 },
+            )
+
+            await self.operation_store.update_operation(
+                operation_id,
+                total_items=total_posts,
+                message="Bulk download in progress",
             )
 
             # Set up user directory
@@ -272,8 +397,13 @@ class PostService:
                 )
                 download_path = str(user_path)
                 logger.info(
-                    "Download directory created", extra={"download_path": download_path}
+                    "Download directory created",
+                    extra={"download_path": download_path},
                 )
+            await self.operation_store.update_operation(
+                operation_id,
+                download_path=download_path,
+            )
 
             current_cursor = max_cursor
             # Bound the outer loop so a sticky upstream cursor cannot pin a
@@ -294,6 +424,7 @@ class PostService:
                         "Bulk download loop exceeded max_pages; stopping",
                         extra={
                             "sec_user_id": sec_user_id,
+                            "operation_id": operation_id,
                             "cursor": current_cursor,
                             "max_pages": max_pages,
                             "total_downloaded": sum(download_stats.values()),
@@ -324,6 +455,24 @@ class PostService:
                         break
 
                     await self._process_posts_batch(posts, download_stats, user_path)
+                    total_downloaded = sum(download_stats.values())
+
+                    progress: float | None
+                    if total_posts > 0:
+                        progress = min((total_downloaded / total_posts) * 100, 100.0)
+                    else:
+                        progress = None
+
+                    update_fields: dict[str, Any] = {
+                        "completed_items": total_downloaded,
+                        "total_items": total_posts,
+                        "message": "Bulk download in progress",
+                    }
+                    if progress is not None:
+                        update_fields["progress"] = progress
+                    await self.operation_store.update_operation(
+                        operation_id, **update_fields
+                    )
 
                     # Handle pagination
                     has_more = posts.get("has_more", False)
@@ -345,24 +494,141 @@ class PostService:
                     # the error instead of spinning indefinitely.
                     logger.error(
                         "Error processing batch; ending pagination",
-                        extra={"error": str(batch_error), "cursor": current_cursor},
+                        extra={
+                            "error": str(batch_error),
+                            "cursor": current_cursor,
+                            "operation_id": operation_id,
+                        },
                     )
                     break
 
-        except UserNotFoundError:
-            raise
+        except UserNotFoundError as e:
+            logger.warning(
+                "User not found during bulk download",
+                extra={"sec_user_id": sec_user_id, "operation_id": operation_id},
+            )
+            await self.operation_store.update_operation(
+                operation_id,
+                status="failed",
+                message="Bulk download failed",
+                error=str(e),
+                metadata={
+                    "max_cursor": max_cursor,
+                    "download_stats": _serialize_download_stats(download_stats),
+                    "download_path": download_path,
+                    "total_posts": total_posts,
+                },
+            )
+            return
         except Exception as e:
             logger.exception(
-                "Error in download process",
-                extra={"sec_user_id": sec_user_id, "error": str(e)},
+                "Error in bulk download process",
+                extra={
+                    "sec_user_id": sec_user_id,
+                    "operation_id": operation_id,
+                    "error": str(e),
+                },
             )
-            raise DownloadError(f"Download failed: {str(e)}") from e
+            await self.operation_store.update_operation(
+                operation_id,
+                status="failed",
+                message="Bulk download failed",
+                error=str(e),
+                metadata={
+                    "max_cursor": max_cursor,
+                    "download_stats": _serialize_download_stats(download_stats),
+                    "download_path": download_path,
+                    "total_posts": total_posts,
+                },
+            )
+            return
 
-        return self._create_download_response(
-            sec_user_id,
-            download_path,
-            total_posts,
-            download_stats,
+        # Success / partial-success classification matches
+        # :meth:`_create_download_response` so the polling response surfaces
+        # the same status the synchronous implementation used to return.
+        total_downloaded = sum(download_stats.values())
+        if total_downloaded == total_posts:
+            final_status = "completed"
+            terminal_message = (
+                f"Bulk download completed: {total_downloaded}/{total_posts} posts"
+            )
+        elif total_downloaded > 0:
+            final_status = "partial"
+            terminal_message = (
+                "Bulk download completed with missing items: "
+                f"{total_downloaded}/{total_posts} posts"
+            )
+        else:
+            final_status = "failed"
+            terminal_message = "Bulk download failed: no posts were downloaded"
+
+        progress_value: float
+        if total_posts > 0:
+            progress_value = min((total_downloaded / total_posts) * 100, 100.0)
+        else:
+            progress_value = 100.0 if final_status == "completed" else 0.0
+
+        await self.operation_store.update_operation(
+            operation_id,
+            status=final_status,
+            message=terminal_message,
+            progress=progress_value,
+            completed_items=total_downloaded,
+            total_items=total_posts,
+            download_path=download_path,
+            metadata={
+                "max_cursor": max_cursor,
+                "download_stats": _serialize_download_stats(download_stats),
+                "download_path": download_path,
+                "total_posts": total_posts,
+            },
+        )
+
+    async def get_bulk_download_status(self, operation_id: str) -> BulkDownloadResponse:
+        """Get the current status of a bulk download operation.
+
+        Args:
+            operation_id: The unique identifier of the bulk download operation.
+
+        Returns:
+            BulkDownloadResponse: Snapshot of the operation including the
+                per-PostType counts persisted in the operation metadata.
+
+        Raises:
+            DownloadError: If no bulk download operation matches the
+                provided identifier.
+        """
+        try:
+            op = await self.operation_store.get_operation(operation_id)
+        except DownloadError as e:
+            raise DownloadError(f"Bulk download task {operation_id} not found") from e
+
+        if op.operation_type != "user_posts_bulk_download":
+            raise DownloadError(f"Bulk download task {operation_id} not found")
+
+        download_stats = _deserialize_download_stats(op.metadata)
+        total_posts = int(op.total_items or op.metadata.get("total_posts") or 0)
+        total_downloaded = sum(download_stats.values())
+        if op.completed_items is not None:
+            total_downloaded = max(total_downloaded, int(op.completed_items))
+
+        download_path = op.download_path or op.metadata.get("download_path")
+
+        status = _operation_status_to_download_status(op.status)
+        message = op.message or _build_bulk_message(
+            total_downloaded, total_posts, download_stats, download_path
+        )
+
+        return BulkDownloadResponse(
+            operation_id=op.operation_id,
+            sec_user_id=op.subject_id,
+            download_path=download_path,
+            total_posts=total_posts,
+            downloaded_count=download_stats,
+            total_downloaded=total_downloaded,
+            status=status,
+            message=message,
+            error_details=op.error,
         )
 
     async def _fetch_posts_batch(
@@ -635,3 +901,74 @@ class PostService:
             message=message,
             error_details=error_details,
         )
+
+
+# ----------------------------------------------------------------------
+# Module-level helpers shared between ``_run_bulk_download`` and
+# ``get_bulk_download_status``. Keeping them at module scope makes the
+# serialization shape easy to unit test and avoids leaking sqlite-aware
+# logic into the response model.
+# ----------------------------------------------------------------------
+
+
+def _serialize_download_stats(stats: dict[PostType, int]) -> dict[str, int]:
+    """Convert the per-PostType counter into JSON-friendly metadata."""
+    return {post_type.value: int(count) for post_type, count in stats.items()}
+
+
+def _deserialize_download_stats(
+    metadata: dict[str, Any],
+) -> dict[PostType, int]:
+    """Rebuild the per-PostType counter from operation metadata.
+
+    Missing or partial dictionaries default to zero counts so callers can
+    rely on every ``PostType`` member being present in the result.
+    """
+    raw = metadata.get("download_stats") or {}
+    counts: dict[PostType, int] = dict.fromkeys(PostType, 0)
+    if not isinstance(raw, dict):
+        return counts
+    for key, value in raw.items():
+        try:
+            post_type = PostType(key)
+        except ValueError:
+            # Unknown values are skipped silently so the response stays
+            # well-formed even after a future ``PostType`` change.
+            continue
+        try:
+            counts[post_type] = int(value)
+        except (TypeError, ValueError):
+            counts[post_type] = 0
+    return counts
+
+
+def _operation_status_to_download_status(status: str) -> DownloadStatus:
+    """Translate persisted operation status to public download status."""
+    mapping = {
+        "pending": DownloadStatus.PENDING,
+        "running": DownloadStatus.IN_PROGRESS,
+        "completed": DownloadStatus.SUCCESS,
+        "partial": DownloadStatus.PARTIAL_SUCCESS,
+        "failed": DownloadStatus.FAILED,
+    }
+    return mapping.get(status, DownloadStatus.FAILED)
+
+
+def _build_bulk_message(
+    total_downloaded: int,
+    total_posts: int,
+    download_stats: dict[PostType, int],
+    download_path: str | None,
+) -> str:
+    """Render a human-readable summary for the bulk download response."""
+    location = download_path or "(pending)"
+    return (
+        f"Downloaded {total_downloaded} out of {total_posts} posts. "
+        f"(Videos: {download_stats[PostType.VIDEO]}, "
+        f"Images: {download_stats[PostType.IMAGES]}, "
+        f"Mixed: {download_stats[PostType.MIXED]}, "
+        f"Lives: {download_stats[PostType.LIVE]}, "
+        f"Collections: {download_stats[PostType.COLLECTION]}, "
+        f"Stories: {download_stats[PostType.STORY]}) "
+        f"Files saved to {location}"
+    )

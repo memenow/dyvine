@@ -96,3 +96,28 @@ def test_service_container_requires_initialization(
     container = dependencies.ServiceContainer()
     with pytest.raises(RuntimeError, match="ServiceContainer has not been initialized"):
         _ = container.douyin_handler
+
+
+@pytest.mark.asyncio
+async def test_service_container_exposes_post_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The container must expose the bulk-download-aware ``PostService``.
+
+    The post service shares the operation store and background task
+    registry with the user and livestream services so the lifespan can
+    drain in-flight bulk downloads alongside the other long-running
+    workflows.
+    """
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
+
+    container = dependencies.ServiceContainer()
+    await container.initialize()
+
+    post_service = container.post_service
+    assert isinstance(post_service, dependencies.PostService)
+    assert post_service.operation_store is container.operation_store
+    assert post_service._task_registry is container._background_tasks
+    assert dependencies.get_post_service.__name__ == "get_post_service"

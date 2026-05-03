@@ -1,19 +1,33 @@
 from __future__ import annotations
 
+import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dyvine.core.exceptions import PostNotFoundError, ServiceError
+from dyvine.core.exceptions import DownloadError, PostNotFoundError, ServiceError
+from dyvine.core.operations import OperationStore
 from dyvine.schemas.posts import DownloadStatus, PostType
 from dyvine.services.posts import PostService
 
 
-def _build_service(handler: MagicMock | None = None) -> PostService:
-    """Create PostService without calling __init__ (avoids DouyinHandler)."""
+def _build_service(
+    handler: MagicMock | None = None,
+    *,
+    operation_store: OperationStore | None = None,
+) -> PostService:
+    """Create PostService without calling __init__ (avoids DouyinHandler).
+
+    Tests that exercise the bulk download paths must pass an
+    ``operation_store`` so the service can persist progress; the simple
+    helper-coverage tests only touch private helpers and can omit it.
+    """
     svc = object.__new__(PostService)  # type: ignore[return-value]
     if handler is not None:
         svc.handler = handler  # type: ignore[attr-defined]
+    if operation_store is not None:
+        svc.operation_store = operation_store  # type: ignore[attr-defined]
     return svc
 
 
@@ -365,49 +379,143 @@ async def test_download_post_content_success() -> None:
     handler.downloader.create_download_tasks.assert_awaited_once()
 
 
-# ── download_all_user_posts (async, mocked) ─────────────────────────────
+# ── start_bulk_download (async, mocked) ─────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_download_all_user_posts_user_not_found() -> None:
+async def test_start_bulk_download_user_not_found(tmp_path) -> None:
     from dyvine.core.exceptions import UserNotFoundError
 
     handler = MagicMock()
     handler.fetch_user_profile = AsyncMock(return_value=None)
 
-    svc = _build_service(handler)
+    store = OperationStore(str(tmp_path / "operations.db"))
+    svc = _build_service(handler, operation_store=store)
+
     with pytest.raises(UserNotFoundError):
-        await svc.download_all_user_posts("missing-user")
+        await svc.start_bulk_download("missing-user")
 
 
 @pytest.mark.asyncio
-async def test_download_all_user_posts_no_posts() -> None:
+async def test_start_bulk_download_returns_pending_response_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """``start_bulk_download`` must persist the operation and return without
+    awaiting the long-running download loop."""
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 0
+    profile.nickname = "PendingUser"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+
+    store = OperationStore(str(tmp_path / "operations.db"))
+    svc = _build_service(handler, operation_store=store)
+
+    scheduled: list[asyncio.Future[None]] = []
+
+    def fake_create_task(coro: Any, **_kwargs: Any) -> asyncio.Future[None]:
+        if hasattr(coro, "close"):
+            coro.close()
+        future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
+        future.set_result(None)
+        scheduled.append(future)
+        return future
+
+    monkeypatch.setattr("dyvine.core.background.asyncio.create_task", fake_create_task)
+
+    response = await svc.start_bulk_download("pending-user", max_cursor=42)
+
+    assert response.status == DownloadStatus.PENDING
+    assert response.operation_id
+    assert response.sec_user_id == "pending-user"
+    assert response.total_posts == 0
+    assert response.total_downloaded == 0
+    assert response.message == "Bulk download scheduled"
+    assert scheduled, "Expected the bulk download loop to be scheduled"
+
+    persisted = await store.get_operation(response.operation_id)
+    assert persisted.operation_type == "user_posts_bulk_download"
+    assert persisted.status == "pending"
+    assert persisted.metadata == {"max_cursor": 42}
+
+
+# ── _run_bulk_download (async, awaited inline) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_bulk_download_marks_completed_for_zero_post_user(
+    tmp_path,
+) -> None:
+    """A user with no posts walks through ``_run_bulk_download`` cleanly."""
     handler = MagicMock()
     profile = MagicMock()
     profile.aweme_count = 0
     profile.nickname = "EmptyUser"
     handler.fetch_user_profile = AsyncMock(return_value=profile)
 
-    # Mock the db context manager
     from pathlib import Path
     from unittest.mock import patch
+
+    handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/user"))
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="u1",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
+    svc = _build_service(handler, operation_store=store)
 
     with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_db.return_value = mock_ctx
-        handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/user"))
 
-        # No posts to fetch
-        svc = _build_service(handler)
-        mock_fetch = AsyncMock(return_value={})
-        with patch.object(svc, "_fetch_posts_batch", new=mock_fetch):
-            svc.handler = handler
-            result = await svc.download_all_user_posts("u1")
-            assert result.total_downloaded == 0
-            # total_downloaded == total_posts (both 0) → SUCCESS
-            assert result.status == DownloadStatus.SUCCESS
+        with patch.object(svc, "_fetch_posts_batch", new=AsyncMock(return_value={})):
+            await svc._run_bulk_download(
+                operation.operation_id, "u1", 0, profile=profile
+            )
+
+    refreshed = await store.get_operation(operation.operation_id)
+    assert refreshed.status == "completed"
+    # ``total_downloaded == total_posts == 0`` is treated as a clean run.
+    assert refreshed.completed_items == 0
+    assert refreshed.total_items == 0
+
+
+@pytest.mark.asyncio
+async def test_run_bulk_download_records_failure_when_user_disappears(
+    tmp_path,
+) -> None:
+    """If the user disappears between scheduling and execution, the operation
+    is marked failed rather than letting ``UserNotFoundError`` propagate."""
+    handler = MagicMock()
+    handler.fetch_user_profile = AsyncMock(return_value=None)
+
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="ghost-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
+    svc = _build_service(handler, operation_store=store)
+    # Pass ``profile=None`` to exercise the defensive guard inside
+    # ``_run_bulk_download``: when the caller supplies an invalid profile
+    # (e.g. the user disappeared between scheduling and execution) the
+    # operation must be marked failed instead of letting the
+    # ``UserNotFoundError`` propagate uncaught.
+    await svc._run_bulk_download(operation.operation_id, "ghost-user", 0, profile=None)
+
+    refreshed = await store.get_operation(operation.operation_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error and "ghost-user" in refreshed.error
 
 
 @pytest.mark.asyncio
@@ -427,11 +535,11 @@ async def test_download_post_content_error() -> None:
         )
 
 
-# ── download_all_user_posts pagination guards ───────────────────────────
+# ── _run_bulk_download pagination guards ────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_download_all_user_posts_breaks_on_empty_aweme_list() -> None:
+async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
     """An empty ``aweme_list`` with ``has_more=True`` must not spin the loop.
 
     Before the fix, a page with ``aweme_list=[]`` but ``has_more=True``
@@ -450,14 +558,22 @@ async def test_download_all_user_posts_breaks_on_empty_aweme_list() -> None:
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/loop-user"))
 
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="loop-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
     with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_db.return_value = mock_ctx
 
-        svc = _build_service(handler)
-        svc.handler = handler
+        svc = _build_service(handler, operation_store=store)
 
         # Each invocation returns ``has_more=True`` and a fresh cursor, so
         # without the empty-batch guard the outer ``while True`` would
@@ -479,15 +595,21 @@ async def test_download_all_user_posts_breaks_on_empty_aweme_list() -> None:
             }
 
         with patch.object(svc, "_fetch_posts_batch", side_effect=fake_fetch):
-            result = await svc.download_all_user_posts("loop-user")
+            await svc._run_bulk_download(
+                operation.operation_id, "loop-user", 0, profile=profile
+            )
 
         # The first empty batch must short-circuit the loop.
         assert call_count == 1
-        assert result.total_downloaded == 0
+
+    refreshed = await svc.get_bulk_download_status(operation.operation_id)
+    assert refreshed.total_downloaded == 0
 
 
 @pytest.mark.asyncio
-async def test_download_all_user_posts_caps_pagination_under_sticky_cursor() -> None:
+async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
+    tmp_path,
+) -> None:
     """A non-empty batch with a sticky cursor must terminate via ``max_pages``.
 
     Without the cap, the ``+1`` cursor advance keeps the loop running
@@ -505,14 +627,22 @@ async def test_download_all_user_posts_caps_pagination_under_sticky_cursor() -> 
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/sticky-user"))
 
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="sticky-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
     with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_db.return_value = mock_ctx
 
-        svc = _build_service(handler)
-        svc.handler = handler
+        svc = _build_service(handler, operation_store=store)
 
         call_count = 0
 
@@ -537,7 +667,9 @@ async def test_download_all_user_posts_caps_pagination_under_sticky_cursor() -> 
         process_batch = AsyncMock()
         with patch.object(svc, "_fetch_posts_batch", side_effect=sticky_fetch):
             with patch.object(svc, "_process_posts_batch", new=process_batch):
-                result = await svc.download_all_user_posts("sticky-user")
+                await svc._run_bulk_download(
+                    operation.operation_id, "sticky-user", 0, profile=profile
+                )
 
         # max_pages = (100 // 20) * 2 + 20 = 30. The loop breaks when
         # ``page_count > max_pages``, so call_count should be at most 31.
@@ -546,15 +678,17 @@ async def test_download_all_user_posts_caps_pagination_under_sticky_cursor() -> 
         ), f"max_pages cap failed; loop ran {call_count} iterations"
         # Forward progress was made before the cap kicked in.
         assert process_batch.await_count == call_count
-        # ``total_downloaded`` is computed from ``download_stats`` which
-        # the patched ``_process_posts_batch`` never increments, so the
-        # response status must be FAILED. The important contract for
-        # this test is termination, not the stats.
-        assert result.total_downloaded == 0
+
+    refreshed = await svc.get_bulk_download_status(operation.operation_id)
+    # ``total_downloaded`` is computed from ``download_stats`` which the
+    # patched ``_process_posts_batch`` never increments, so the response
+    # status must be FAILED. The important contract for this test is
+    # termination, not the stats.
+    assert refreshed.total_downloaded == 0
 
 
 @pytest.mark.asyncio
-async def test_download_all_user_posts_stops_on_batch_error() -> None:
+async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
     """A persistent batch-level exception must not busy-loop.
 
     The previous ``except Exception: continue`` path swallowed the error
@@ -572,14 +706,22 @@ async def test_download_all_user_posts_stops_on_batch_error() -> None:
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/error-user"))
 
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="error-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
     with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
         mock_db.return_value = mock_ctx
 
-        svc = _build_service(handler)
-        svc.handler = handler
+        svc = _build_service(handler, operation_store=store)
 
         call_count = 0
 
@@ -593,8 +735,80 @@ async def test_download_all_user_posts_stops_on_batch_error() -> None:
             raise RuntimeError("upstream flaky")
 
         with patch.object(svc, "_fetch_posts_batch", side_effect=failing_fetch):
-            result = await svc.download_all_user_posts("error-user")
+            await svc._run_bulk_download(
+                operation.operation_id, "error-user", 0, profile=profile
+            )
 
         assert call_count == 1
-        assert result.total_downloaded == 0
-        assert result.status == DownloadStatus.FAILED
+
+    refreshed = await svc.get_bulk_download_status(operation.operation_id)
+    assert refreshed.total_downloaded == 0
+    # The loop terminated with no successful downloads but did not raise,
+    # so the operation lands in ``failed`` status (mapped to FAILED).
+    assert refreshed.status == DownloadStatus.FAILED
+
+
+# ── get_bulk_download_status (async) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_download_status_returns_persisted_state(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="poll-user",
+        status="running",
+        message="Bulk download in progress",
+        progress=42.5,
+        total_items=100,
+        completed_items=42,
+        download_path="/tmp/poll-user",
+        metadata={
+            "download_stats": {
+                "video": 30,
+                "images": 10,
+                "mixed": 2,
+            },
+            "download_path": "/tmp/poll-user",
+        },
+    )
+
+    svc = _build_service(operation_store=store)
+
+    response = await svc.get_bulk_download_status(operation.operation_id)
+    assert response.operation_id == operation.operation_id
+    assert response.status == DownloadStatus.IN_PROGRESS
+    assert response.sec_user_id == "poll-user"
+    assert response.download_path == "/tmp/poll-user"
+    assert response.total_posts == 100
+    assert response.downloaded_count[PostType.VIDEO] == 30
+    assert response.downloaded_count[PostType.IMAGES] == 10
+    assert response.downloaded_count[PostType.MIXED] == 2
+    # ``completed_items`` always wins when it exceeds the per-PostType sum.
+    assert response.total_downloaded == 42
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_download_status_raises_for_unknown_id(tmp_path) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    svc = _build_service(operation_store=store)
+
+    with pytest.raises(DownloadError):
+        await svc.get_bulk_download_status("missing-id")
+
+
+@pytest.mark.asyncio
+async def test_get_bulk_download_status_rejects_non_post_operation(
+    tmp_path,
+) -> None:
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="livestream_download",
+        subject_id="room-1",
+        status="pending",
+        message="scheduled",
+    )
+
+    svc = _build_service(operation_store=store)
+    with pytest.raises(DownloadError):
+        await svc.get_bulk_download_status(operation.operation_id)

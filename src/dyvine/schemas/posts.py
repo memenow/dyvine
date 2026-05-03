@@ -40,11 +40,15 @@ class DownloadStatus(StrEnum):
     """Enumeration of possible download operation statuses.
 
     Attributes:
+        PENDING: Bulk download has been scheduled but not yet started
+        IN_PROGRESS: Bulk download is currently executing
         SUCCESS: All content downloaded successfully
         PARTIAL_SUCCESS: Some content downloaded successfully
         FAILED: No content downloaded successfully
     """
 
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
     SUCCESS = "success"
     PARTIAL_SUCCESS = "partial_success"
     FAILED = "failed"
@@ -120,6 +124,7 @@ class BulkDownloadResponse(BaseModel):
     """Response model for bulk download operations.
 
     Attributes:
+        operation_id: Identifier for tracking the asynchronous bulk download
         sec_user_id: Target user's identifier
         download_path: Local path where content was saved
         total_posts: Total number of posts available
@@ -130,9 +135,15 @@ class BulkDownloadResponse(BaseModel):
         error_details: Details of any errors encountered
     """
 
+    operation_id: str | None = Field(
+        default=None, description="Operation tracking identifier"
+    )
     sec_user_id: str = Field(..., description="Target user's identifier")
-    download_path: str = Field(..., description="Local path where content was saved")
-    total_posts: int = Field(..., description="Total number of posts available")
+    download_path: str | None = Field(
+        default=None,
+        description="Local path where content was saved",
+    )
+    total_posts: int = Field(default=0, description="Total number of posts available")
     downloaded_count: dict[PostType, int] = Field(
         default_factory=lambda: {
             PostType.VIDEO: 0,

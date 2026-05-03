@@ -185,9 +185,16 @@ def test_invalid_request_id_is_regenerated(monkeypatch: pytest.MonkeyPatch) -> N
         uuid.UUID(response.headers["X-Correlation-ID"])
 
 
-def test_health_check_degraded_when_r2_missing(
+def test_health_check_returns_200_when_r2_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``/health`` must stay informational and never gate on dependencies.
+
+    The dependency-aware gate lives on ``/readyz``; ``/health`` is a
+    metrics aggregator for ops dashboards and is required to return
+    ``200 OK`` with ``status == "ok"`` even when optional dependency
+    credentials (Douyin cookie, R2 settings) are not configured.
+    """
     with TestClient(app) as client:
         monkeypatch.setattr(settings.douyin, "cookie", "cookie")
         _configure_r2(
@@ -203,10 +210,35 @@ def test_health_check_degraded_when_r2_missing(
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "degraded"
+        assert data["status"] == "ok"
+        # Dependency snapshot is informational only.
+        assert data["dependencies"]["r2_storage"] == "missing_credentials"
         correlation_id = data["correlation_id"]
         assert correlation_id == response.headers["X-Correlation-ID"]
         uuid.UUID(correlation_id)
+
+
+def test_health_check_returns_200_when_douyin_cookie_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/health`` must remain a metrics aggregator that returns 200.
+
+    Even with no Douyin cookie configured (which previously flipped the
+    legacy status to ``"unhealthy"`` and forced a 503), the endpoint now
+    surfaces the missing credential through the informational
+    ``dependencies`` map while keeping the HTTP contract at ``200 OK``.
+    """
+    with TestClient(app) as client:
+        monkeypatch.setattr(settings.douyin, "cookie", "")
+        _configure_r2(monkeypatch)
+
+        response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["dependencies"]["douyin_api"] == "missing_credentials"
+        assert data["memory_pressure"] in {"normal", "high"}
 
 
 def test_metrics_endpoint_exposed() -> None:

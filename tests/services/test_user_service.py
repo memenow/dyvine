@@ -505,3 +505,211 @@ async def test_process_download_likes_reports_progress_as_indeterminate(
     refreshed = await service.get_download_status(operation.operation_id)
     assert refreshed.status == "completed"
     assert refreshed.completed_items == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_directory_to_r2_counts_partial_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Three files, one upload error: helper must report (2 uploaded, 1 failed).
+
+    The new ``_upload_directory_to_r2`` helper centralises R2 upload
+    accounting so ``_finalize_status`` can downgrade to ``partial`` when
+    the loop completes with any failed uploads. Verifies the return tuple
+    matches the success/failure split and that failed local files stay on
+    disk while successful ones are unlinked.
+    """
+    from dyvine.services import users as users_mod
+
+    user_dir = tmp_path / "nick"
+    user_dir.mkdir()
+    file_ok_one = user_dir / "video1.mp4"
+    file_ok_one.write_bytes(b"a")
+    file_failing = user_dir / "video2.mp4"
+    file_failing.write_bytes(b"b")
+    file_ok_two = user_dir / "image1.jpg"
+    file_ok_two.write_bytes(b"c")
+
+    # Force the storage layer to raise on the second file only.
+    failing_target = file_failing.resolve()
+
+    async def fake_upload_file(
+        local_path: Path,
+        _r2_path: str,
+        _metadata: dict[str, str],
+        _content_type: str,
+    ) -> None:
+        if Path(local_path).resolve() == failing_target:
+            raise users_mod.ServiceError("simulated upload outage")
+
+    service = UserService()
+    service.storage.generate_ugc_path = MagicMock(return_value="r2/path")
+    service.storage.generate_metadata = MagicMock(return_value={"category": "posts"})
+    monkeypatch.setattr(service.storage, "upload_file", fake_upload_file)
+
+    user_data = MagicMock()
+    user_data.nickname = "nick"
+
+    uploaded, failed = await service._upload_directory_to_r2(
+        user_dir, user_id="user-123", user_data=user_data
+    )
+
+    assert (uploaded, failed) == (2, 1)
+    # Successfully uploaded files are unlinked; the failed one remains so
+    # the cleanup step can pick it up.
+    assert not file_ok_one.exists()
+    assert not file_ok_two.exists()
+    assert file_failing.exists()
+
+
+def test_cleanup_temp_dir_only_removes_target_subdirectory(tmp_path: Path) -> None:
+    """Cleanup must isolate per-task workspaces from sibling tasks.
+
+    The helper is invoked from a ``finally`` block so it has to be safe
+    against concurrent tasks owning their own siblings under the shared
+    ``temp_downloads`` parent. Verifies that wiping one task's directory
+    leaves the parent and the other task's workspace untouched.
+    """
+    from dyvine.services import users as users_mod
+
+    parent = tmp_path / "temp_downloads"
+    parent.mkdir()
+    target = parent / "task-target"
+    target.mkdir()
+    (target / "nested").mkdir()
+    (target / "nested" / "file.bin").write_bytes(b"x")
+
+    sibling = parent / "task-sibling"
+    sibling.mkdir()
+    sibling_file = sibling / "keep.bin"
+    sibling_file.write_bytes(b"y")
+
+    users_mod.UserService._cleanup_temp_dir(target)
+
+    assert not target.exists()
+    assert parent.exists(), "shared parent must survive cleanup"
+    assert sibling.exists(), "sibling task workspace must not be touched"
+    assert sibling_file.read_bytes() == b"y"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_downloads_use_isolated_temp_directories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two concurrent ``_process_download`` runs must not share files.
+
+    Schedules two downloads through ``asyncio.gather`` with distinct
+    ``user_id`` values and a stub fetcher that records which directory
+    f2 was asked to write into. Both invocations must see workspaces
+    rooted at ``temp_downloads/<task_id>`` and the cleanup branch must
+    leave neither task's files behind.
+    """
+    from dyvine.services import users as users_mod
+
+    monkeypatch.chdir(tmp_path)
+
+    seen_dirs: list[Path] = []
+
+    aweme_batch = MagicMock()
+    aweme_batch.has_aweme = True
+    aweme_batch.aweme_id = ["aw1"]
+    aweme_batch.has_more = False
+    aweme_batch.max_cursor = 0
+    aweme_batch._to_list = MagicMock(return_value=[])
+
+    async def fake_fetch_posts(*_args: Any, **_kwargs: Any) -> Any:
+        yield aweme_batch
+
+    class FakeDownloader:
+        async def create_download_tasks(
+            self,
+            _kwargs: dict[str, Any],
+            _items: list[Any],
+            user_dir: Path,
+        ) -> None:
+            # Record which workspace we were handed and drop a sentinel
+            # file so the test can later assert per-task isolation.
+            seen_dirs.append(Path(user_dir).parent)
+            (Path(user_dir) / f"file-{Path(user_dir).parent.name}.txt").write_text("x")
+
+    def make_handler(user_data: MagicMock) -> type:
+        class FakeHandler:
+            def __init__(self, _kwargs: dict) -> None:
+                self.downloader = FakeDownloader()
+
+            fetch_user_profile = AsyncMock(return_value=user_data)
+            fetch_user_post_videos = staticmethod(fake_fetch_posts)
+
+        return FakeHandler
+
+    user_data_a = MagicMock()
+    user_data_a.nickname = "alpha"
+    user_data_a.aweme_count = 1
+
+    user_data_b = MagicMock()
+    user_data_b.nickname = "bravo"
+    user_data_b.aweme_count = 1
+
+    handlers = iter([make_handler(user_data_a), make_handler(user_data_b)])
+
+    def handler_factory(kwargs: dict) -> Any:
+        return next(handlers)(kwargs)
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", handler_factory)
+    monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
+
+    service = UserService()
+    # Avoid contacting R2 in the concurrency test; the helper is unit
+    # tested directly above.
+    monkeypatch.setattr(
+        service,
+        "_upload_directory_to_r2",
+        AsyncMock(return_value=(0, 0)),
+    )
+
+    op_a = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="alpha",
+        status="pending",
+        message="scheduled",
+    )
+    op_b = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="bravo",
+        status="pending",
+        message="scheduled",
+    )
+
+    await asyncio.gather(
+        service._process_download(
+            op_a.operation_id,
+            user_id="alpha",
+            include_posts=True,
+            include_likes=False,
+            max_items=1,
+        ),
+        service._process_download(
+            op_b.operation_id,
+            user_id="bravo",
+            include_posts=True,
+            include_likes=False,
+            max_items=1,
+        ),
+    )
+
+    # The downloader was handed two distinct per-task workspaces, each
+    # rooted at ``temp_downloads/<task_id>``. ``TEMP_DOWNLOAD_ROOT`` is a
+    # relative path, so resolve both sides against the cwd before
+    # comparing.
+    assert len(seen_dirs) == 2
+    assert seen_dirs[0] != seen_dirs[1]
+    workspace_root = (tmp_path / users_mod.TEMP_DOWNLOAD_ROOT).resolve()
+    for directory in seen_dirs:
+        assert directory.resolve().parent == workspace_root
+        assert directory.name in {op_a.operation_id, op_b.operation_id}
+
+    # Cleanup ran for both tasks: each per-task workspace is gone, but
+    # the shared parent is preserved.
+    assert workspace_root.exists()
+    assert not (workspace_root / op_a.operation_id).exists()
+    assert not (workspace_root / op_b.operation_id).exists()

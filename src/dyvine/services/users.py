@@ -83,6 +83,20 @@ from .storage import ContentType, R2StorageService
 # to bound the number of pages we will walk before giving up.
 PAGE_SIZE = 100
 
+# Cool-down between successive page fetches inside ``_process_download``.
+# Douyin throttles aggressive callers, so the loop sleeps before pulling
+# the next cursor to keep the request cadence below their anti-scrape
+# threshold. Centralised here so the value can be tuned without touching
+# the loop body.
+PAGE_FETCH_DELAY_SECONDS = 5.0
+
+# Parent directory that holds per-task download workspaces. Each running
+# ``_process_download`` invocation gets its own ``TEMP_DOWNLOAD_ROOT /
+# <task_id>`` subdirectory so two concurrent tasks cannot stomp on each
+# other's files or have the cleanup branch in one task delete the other's
+# in-flight downloads.
+TEMP_DOWNLOAD_ROOT = Path("temp_downloads")
+
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename for cross-platform filesystem compatibility.
@@ -294,6 +308,245 @@ class UserService:
             raise DownloadError(f"Download task {task_id} not found")
         return DownloadResponse(**operation.to_response())
 
+    def _build_handler_kwargs(
+        self,
+        user_id: str,
+        max_items: int | None,
+        mode_label: str,
+        downloading_likes_only: bool,
+        include_likes: bool,
+        temp_dir: Path,
+    ) -> dict[str, Any]:
+        """Assemble the keyword arguments forwarded to ``DouyinHandler``.
+
+        Centralising the payload keeps ``_process_download`` focused on the
+        state-machine flow and keeps the f2-specific knobs (mode, favorite
+        toggle, naming template) in a single auditable place.
+
+        Args:
+            user_id: Target Douyin user identifier.
+            max_items: Optional cap on the number of items to download.
+            mode_label: ``"post"`` or ``"like"``; selects the f2 fetch mode.
+            downloading_likes_only: ``True`` when the run targets the
+                liked-items feed exclusively.
+            include_likes: Original API flag from the caller; preserved so
+                the ``download_favorite`` rule below stays correct.
+            temp_dir: Per-task download workspace directory.
+
+        Returns:
+            Dict[str, Any]: Keyword payload suitable for ``DouyinHandler``.
+        """
+        return {
+            "url": f"https://www.douyin.com/user/{user_id}",
+            "cookie": settings.douyin_cookie,
+            "headers": {
+                "User-Agent": settings.douyin_user_agent,
+                "Referer": settings.douyin_referer,
+            },
+            "proxy": settings.douyin_proxy_http,
+            "download_path": str(temp_dir),
+            "max_counts": max_items,
+            # ``download_favorite`` only means "also fetch likes" when the
+            # loop is already walking the posts feed. In the dedicated
+            # likes path we point the fetcher at the likes endpoint
+            # directly, so keep the flag off to avoid f2's implicit
+            # dual-fetch behavior.
+            "download_favorite": (include_likes and not downloading_likes_only),
+            "timeout": 5,
+            "folderize": True,
+            "mode": mode_label,
+            "naming": "{create}_{desc}",
+            "download_image": True,
+            "filename_filter": sanitize_filename,
+        }
+
+    @staticmethod
+    def _resolve_total_posts(user_data: Any, downloading_likes_only: bool) -> int:
+        """Return the expected total post count for the run.
+
+        Likes-only runs leave the total at zero because the profile
+        endpoint does not expose a liked-items count, so progress has to
+        be tracked as an indeterminate counter. For the posts path the
+        value is the profile's ``aweme_count`` coerced to ``int``; any
+        non-int payload is treated as zero so the caller can short-circuit
+        the empty-profile case.
+
+        Args:
+            user_data: The profile payload returned by ``DouyinHandler``.
+            downloading_likes_only: ``True`` when the run targets the
+                liked-items feed exclusively.
+
+        Returns:
+            int: Resolved total post count, or ``0`` if unknown.
+        """
+        if downloading_likes_only:
+            return 0
+        aweme_count = user_data.aweme_count
+        return int(aweme_count) if isinstance(aweme_count, int) else 0
+
+    async def _upload_directory_to_r2(
+        self, user_dir: Path, user_id: str, user_data: Any
+    ) -> tuple[int, int]:
+        """Upload every file under ``user_dir`` to R2 storage.
+
+        Walks the directory recursively, derives a content type from each
+        file extension, generates the corresponding R2 path/metadata, and
+        uploads. Local files are deleted only after a successful upload so
+        a failed upload leaves the file on disk for the cleanup step to
+        sweep -- this keeps the download workspace empty between batches
+        without losing the file when the user retries.
+
+        Args:
+            user_dir: Local directory holding files just produced by f2.
+            user_id: Douyin user identifier used to derive R2 paths.
+            user_data: Profile payload supplying the author name for
+                metadata.
+
+        Returns:
+            Tuple of ``(uploaded_count, failed_count)`` so the caller can
+            promote partial-success states without re-walking the tree.
+        """
+        uploaded_count = 0
+        failed_count = 0
+        for file_path in user_dir.glob("**/*"):
+            if not file_path.is_file():
+                continue
+            try:
+                if file_path.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
+                    content_type = "image/" + file_path.suffix.lower().lstrip(".")
+                else:
+                    content_type = "video/mp4"
+                r2_path = self.storage.generate_ugc_path(
+                    user_id, file_path.name, content_type
+                )
+                metadata = self.storage.generate_metadata(
+                    author=user_data.nickname,
+                    category=ContentType.POSTS,
+                    content_type=content_type,
+                    source="douyin",
+                )
+                await self.storage.upload_file(
+                    file_path, r2_path, metadata, content_type
+                )
+                file_path.unlink()
+                uploaded_count += 1
+            except Exception as e:
+                failed_count += 1
+                logger.error(f"Failed to upload {file_path} to R2: {str(e)}")
+        return uploaded_count, failed_count
+
+    async def _finalize_status(
+        self,
+        task_id: str,
+        downloaded: int,
+        total_posts: int,
+        failed_uploads: int,
+        downloading_likes_only: bool,
+    ) -> None:
+        """Persist the terminal state for a finished download loop.
+
+        Resolves the final status by combining download completeness with
+        R2 upload outcomes. The status is downgraded to ``partial`` when
+        any upload failed even if every post was fetched, so the operation
+        record stays observable instead of silently reporting success.
+
+        Args:
+            task_id: Operation identifier to update.
+            downloaded: Number of posts the loop successfully fetched.
+            total_posts: Expected total from the profile, or ``0`` when
+                unknown (likes-only runs).
+            failed_uploads: Count of files that failed to upload to R2.
+            downloading_likes_only: ``True`` when the run targets the
+                liked-items feed exclusively; suppresses the missing-items
+                error string because there is no authoritative total.
+        """
+        if total_posts > 0:
+            completion_percentage = (downloaded / total_posts) * 100.0
+        else:
+            completion_percentage = 100.0
+
+        upload_error: str | None = None
+        if failed_uploads > 0:
+            upload_error = f"R2 upload failed for {failed_uploads} file(s)"
+
+        missing_error: str | None = None
+        downloads_incomplete = (
+            not downloading_likes_only and total_posts > 0 and downloaded < total_posts
+        )
+        if downloads_incomplete:
+            missing_error = f"Only downloaded {downloaded} out of {total_posts} posts"
+
+        if missing_error and upload_error:
+            combined_error: str | None = f"{missing_error}; {upload_error}"
+        else:
+            combined_error = missing_error or upload_error
+
+        if downloads_incomplete or failed_uploads > 0:
+            status = "partial"
+            message = "Download completed with missing items"
+            logger.warning(
+                "Finalising download with partial status",
+                extra={
+                    "task_id": task_id,
+                    "downloaded": downloaded,
+                    "total_posts": total_posts,
+                    "failed_uploads": failed_uploads,
+                    "completion_percentage": completion_percentage,
+                },
+            )
+        else:
+            status = "completed"
+            message = "Download completed"
+            logger.info(
+                "Successfully downloaded %s posts (100%% complete)",
+                downloaded,
+            )
+
+        # Clamp the partial percentage so the persisted ``progress`` field
+        # honors the implicit 0-100 contract. ``completion_percentage`` can
+        # exceed 100 when the run mixes posts and likes (``downloaded``
+        # accumulates likes while ``total_posts`` only reflects
+        # ``aweme_count``); without the clamp a single R2 upload failure
+        # could surface a 130%-style progress value to API clients.
+        progress_value = (
+            100.0 if status == "completed" else min(completion_percentage, 100.0)
+        )
+        await self.operation_store.update_operation(
+            task_id,
+            status=status,
+            message=message,
+            error=combined_error,
+            progress=progress_value,
+            completed_items=downloaded,
+            total_items=total_posts,
+        )
+
+    @staticmethod
+    def _cleanup_temp_dir(temp_dir: Path | None) -> None:
+        """Remove a per-task download workspace and all of its contents.
+
+        Only the workspace itself is touched; the shared
+        ``TEMP_DOWNLOAD_ROOT`` parent is preserved so concurrent tasks
+        keep their own ``temp_downloads/<task_id>`` siblings intact.
+
+        Args:
+            temp_dir: Per-task workspace path. ``None`` and missing
+                directories are tolerated so the caller can invoke the
+                helper from a ``finally`` block without checking state.
+        """
+        if temp_dir is None or not temp_dir.exists():
+            return
+        try:
+            for file in sorted(temp_dir.glob("**/*"), reverse=True):
+                if file.is_file():
+                    file.unlink()
+            for sub_dir in sorted(temp_dir.glob("**/*"), reverse=True):
+                if sub_dir.is_dir():
+                    sub_dir.rmdir()
+            temp_dir.rmdir()
+        except Exception as e:
+            logger.error(f"Failed to clean up temp directory: {str(e)}")
+
     async def _process_download(
         self,
         task_id: str,
@@ -336,7 +589,13 @@ class UserService:
         downloading_likes_only = not include_posts and include_likes
         mode_label = "like" if downloading_likes_only else "post"
 
-        temp_dir = None
+        # Each task gets its own workspace under ``TEMP_DOWNLOAD_ROOT`` so
+        # concurrent downloads cannot share files, and the cleanup branch
+        # only ever touches one task's directory.
+        temp_dir: Path | None = None
+        downloaded_count = 0
+        total_posts = 0
+        failed_uploads = 0
         try:
             await self.operation_store.update_operation(
                 task_id,
@@ -347,34 +606,18 @@ class UserService:
                 error=None,
             )
 
-            temp_dir = Path("temp_downloads")
-            temp_dir.mkdir(exist_ok=True)
+            TEMP_DOWNLOAD_ROOT.mkdir(exist_ok=True)
+            temp_dir = TEMP_DOWNLOAD_ROOT / task_id
+            temp_dir.mkdir(parents=True, exist_ok=True)
 
-            # Initialize f2 handler with temporary directory
-            handler_kwargs = {
-                "url": f"https://www.douyin.com/user/{user_id}",
-                "cookie": settings.douyin_cookie,
-                "headers": {
-                    "User-Agent": settings.douyin_user_agent,
-                    "Referer": settings.douyin_referer,
-                },
-                "proxy": settings.douyin_proxy_http,
-                "download_path": str(temp_dir),
-                "max_counts": max_items,
-                # ``download_favorite`` only means "also fetch likes" when
-                # the loop is already walking the posts feed. In the
-                # dedicated likes path we point the fetcher at the likes
-                # endpoint directly, so keep the flag off to avoid f2's
-                # implicit dual-fetch behavior.
-                "download_favorite": (include_likes and not downloading_likes_only),
-                "timeout": 5,
-                "folderize": True,
-                "mode": mode_label,
-                "naming": "{create}_{desc}",
-                "download_image": True,
-                "filename_filter": sanitize_filename,  # Add filename sanitization
-            }
-
+            handler_kwargs = self._build_handler_kwargs(
+                user_id=user_id,
+                max_items=max_items,
+                mode_label=mode_label,
+                downloading_likes_only=downloading_likes_only,
+                include_likes=include_likes,
+                temp_dir=temp_dir,
+            )
             handler = DouyinHandler(handler_kwargs)
 
             # Get user profile to create user directory and verify post count
@@ -382,27 +625,18 @@ class UserService:
             if not user_data.nickname:
                 raise UserNotFoundError(f"User {user_id} not found")
 
-            if downloading_likes_only:
-                # The profile endpoint does not expose a total liked-items
-                # count. Leave ``total_posts`` unset and let the operation
-                # store track a running count; the completion branch at the
-                # bottom will record the final tally once the loop drains.
-                total_posts = 0
-            else:
-                # Get total posts count from profile
-                aweme_count = user_data.aweme_count
-                total_posts = int(aweme_count) if isinstance(aweme_count, int) else 0
-                if total_posts == 0:
-                    logger.info("User %s has no posts", user_id)
-                    await self.operation_store.update_operation(
-                        task_id,
-                        status="completed",
-                        message="Download completed",
-                        progress=100.0,
-                        total_items=0,
-                        completed_items=0,
-                    )
-                    return
+            total_posts = self._resolve_total_posts(user_data, downloading_likes_only)
+            if not downloading_likes_only and total_posts == 0:
+                logger.info("User %s has no posts", user_id)
+                await self.operation_store.update_operation(
+                    task_id,
+                    status="completed",
+                    message="Download completed",
+                    progress=100.0,
+                    total_items=0,
+                    completed_items=0,
+                )
+                return
 
             if downloading_likes_only:
                 logger.info("User %s requested likes-only download", user_data.nickname)
@@ -418,14 +652,13 @@ class UserService:
                     message="Download in progress",
                 )
 
-            # Create user directory in temp
+            # Create user directory inside the per-task workspace.
             user_dir = temp_dir / user_data.nickname
             user_dir.mkdir(exist_ok=True)
 
-            # Use the handler to download user posts
+            # Use the handler to download user posts.
             max_cursor = 0
             has_more = True
-            downloaded_count = 0
 
             # Guard against an unbounded outer loop. ``max_cursor += 1`` in
             # the "cursor stuck" branch below can spin indefinitely if the
@@ -518,54 +751,26 @@ class UserService:
                             progress,
                         )
 
-                    # Download files to temp directory
+                    # Download files to the per-task workspace.
                     await handler.downloader.create_download_tasks(
                         handler_kwargs, aweme_data._to_list(), user_dir
                     )
 
-                    # Upload downloaded files to R2 (search recursively)
-                    for file_path in user_dir.glob("**/*"):
-                        if file_path.is_file():
-                            try:
-                                # Generate R2 storage path
-                                if file_path.suffix.lower() in [
-                                    ".jpg",
-                                    ".jpeg",
-                                    ".png",
-                                    ".webp",
-                                ]:
-                                    content_type = (
-                                        "image/" + file_path.suffix.lower().lstrip(".")
-                                    )
-                                    r2_path = self.storage.generate_ugc_path(
-                                        user_id, file_path.name, content_type
-                                    )
-                                else:
-                                    content_type = "video/mp4"
-                                    r2_path = self.storage.generate_ugc_path(
-                                        user_id, file_path.name, content_type
-                                    )
-
-                                # Generate metadata
-                                metadata = self.storage.generate_metadata(
-                                    author=user_data.nickname,
-                                    category=ContentType.POSTS,
-                                    content_type=content_type,
-                                    source="douyin",
-                                )
-
-                                # Upload to R2
-                                await self.storage.upload_file(
-                                    file_path, r2_path, metadata, content_type
-                                )
-
-                                # Delete local file after upload
-                                file_path.unlink()
-
-                            except Exception as e:
-                                logger.error(
-                                    f"Failed to upload {file_path} to R2: {str(e)}"
-                                )
+                    # Push the freshly downloaded files to R2 and track
+                    # any failures so the final status can be downgraded.
+                    batch_uploaded, batch_failed = await self._upload_directory_to_r2(
+                        user_dir, user_id, user_data
+                    )
+                    failed_uploads += batch_failed
+                    logger.debug(
+                        "R2 upload batch finished",
+                        extra={
+                            "task_id": task_id,
+                            "user_id": user_id,
+                            "uploaded": batch_uploaded,
+                            "failed": batch_failed,
+                        },
+                    )
 
                     # Update cursor for next page
                     if (
@@ -590,7 +795,7 @@ class UserService:
                         break
 
                     # Add delay between pages
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(PAGE_FETCH_DELAY_SECONDS)
 
                 if not iterated:
                     # The fetcher produced no items (either because the
@@ -599,49 +804,14 @@ class UserService:
                     # bail-out ``has_more`` stays True and the outer while
                     # loop spins.
                     has_more = False
-            # Verify download completion
-            if total_posts > 0:
-                completion_percentage = (downloaded_count / total_posts) * 100
-            else:
-                completion_percentage = 100.0
 
-            if completion_percentage >= 100:
-                # Consider anything >= 100% as complete success
-                logger.info(
-                    "Successfully downloaded %s posts (100%% complete)",
-                    downloaded_count,
-                )
-                await self.operation_store.update_operation(
-                    task_id,
-                    status="completed",
-                    message="Download completed",
-                    progress=100.0,
-                    completed_items=downloaded_count,
-                    total_items=total_posts,
-                )
-            else:
-                # Less than 100% means we missed some posts
-                logger.warning(
-                    (
-                        "Only downloaded %s/%s posts (%.1f%%). "
-                        "Some posts may have been missed."
-                    ),
-                    downloaded_count,
-                    total_posts,
-                    completion_percentage,
-                )
-                await self.operation_store.update_operation(
-                    task_id,
-                    status="partial",
-                    message="Download completed with missing items",
-                    error=(
-                        f"Only downloaded {downloaded_count} "
-                        f"out of {total_posts} posts"
-                    ),
-                    progress=completion_percentage,
-                    completed_items=downloaded_count,
-                    total_items=total_posts,
-                )
+            await self._finalize_status(
+                task_id=task_id,
+                downloaded=downloaded_count,
+                total_posts=total_posts,
+                failed_uploads=failed_uploads,
+                downloading_likes_only=downloading_likes_only,
+            )
 
         except Exception as e:
             logger.exception(
@@ -656,14 +826,4 @@ class UserService:
             )
 
         finally:
-            try:
-                if temp_dir and temp_dir.exists():
-                    for file in sorted(temp_dir.glob("**/*"), reverse=True):
-                        if file.is_file():
-                            file.unlink()
-                    for dir in sorted(temp_dir.glob("**/*"), reverse=True):
-                        if dir.is_dir():
-                            dir.rmdir()
-                    temp_dir.rmdir()
-            except Exception as e:
-                logger.error(f"Failed to clean up temp directory: {str(e)}")
+            self._cleanup_temp_dir(temp_dir)

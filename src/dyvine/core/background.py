@@ -140,7 +140,18 @@ def spawn_or_fallback(
     unit tests (with no registry). Keeping the branch in one place stops
     each new long-lived service from hand-rolling the same ``if registry is
     not None`` pattern.
+
+    The fallback path is intended for unit tests that exercise services in
+    isolation. Production services constructed via ``ServiceContainer`` always
+    receive a real registry; a missing registry there means the spawned task
+    will not be drained on shutdown and may be cancelled mid-flight. Logging
+    a warning makes the misconfiguration observable instead of silent.
     """
     if registry is not None:
         return registry.spawn(coro, name=name)
+    logger.warning(
+        "spawn_or_fallback invoked without a BackgroundTaskRegistry; the "
+        "task will not be drained on shutdown",
+        extra={"task_name": name},
+    )
     return asyncio.create_task(coro, name=name)
