@@ -467,6 +467,12 @@ class PostService:
                         "completed_items": total_downloaded,
                         "total_items": total_posts,
                         "message": "Bulk download in progress",
+                        "metadata": {
+                            "max_cursor": max_cursor,
+                            "download_stats": _serialize_download_stats(download_stats),
+                            "download_path": download_path,
+                            "total_posts": total_posts,
+                        },
                     }
                     if progress is not None:
                         update_fields["progress"] = progress

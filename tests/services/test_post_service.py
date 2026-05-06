@@ -748,6 +748,93 @@ async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
     assert refreshed.status == DownloadStatus.FAILED
 
 
+# ── runtime polling consistency ─────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_bulk_download_persists_runtime_download_stats(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Runtime progress updates include the per-type counters clients poll."""
+    from pathlib import Path
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 2
+    profile.nickname = "RuntimeUser"
+    user_path = tmp_path / "runtime-user"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    handler.get_or_add_user_data = AsyncMock(return_value=user_path)
+
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="runtime-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
+    runtime_metadata_samples: list[dict[str, Any] | None] = []
+    original_update = store.update_operation
+
+    async def capture_update(operation_id: str, **fields: Any) -> Any:
+        if (
+            fields.get("message") == "Bulk download in progress"
+            and fields.get("completed_items", 0) > 0
+        ):
+            runtime_metadata_samples.append(fields.get("metadata"))
+        return await original_update(operation_id, **fields)
+
+    async def process_batch(
+        posts: dict[str, Any],
+        download_stats: dict[PostType, int],
+        path: Path,
+    ) -> None:
+        assert path == user_path
+        download_stats[PostType.VIDEO] += 1
+        download_stats[PostType.IMAGES] += 1
+
+    monkeypatch.setattr(store, "update_operation", capture_update)
+
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+
+        svc = _build_service(handler, operation_store=store)
+        batch = {
+            "aweme_list": [
+                {"aweme_id": "video-1", "aweme_type": 0},
+                {"aweme_id": "image-1", "aweme_type": 0},
+            ],
+            "has_more": False,
+            "max_cursor": 0,
+        }
+        with patch.object(svc, "_fetch_posts_batch", new=AsyncMock(return_value=batch)):
+            with patch.object(svc, "_process_posts_batch", side_effect=process_batch):
+                await svc._run_bulk_download(
+                    operation.operation_id, "runtime-user", 0, profile=profile
+                )
+
+    assert runtime_metadata_samples
+    runtime_metadata = runtime_metadata_samples[-1]
+    assert runtime_metadata is not None
+    assert runtime_metadata["max_cursor"] == 0
+    assert runtime_metadata["download_path"] == str(user_path)
+    assert runtime_metadata["total_posts"] == 2
+    assert runtime_metadata["download_stats"]["video"] == 1
+    assert runtime_metadata["download_stats"]["images"] == 1
+
+    refreshed = await svc.get_bulk_download_status(operation.operation_id)
+    assert refreshed.total_downloaded == 2
+    assert refreshed.downloaded_count[PostType.VIDEO] == 1
+    assert refreshed.downloaded_count[PostType.IMAGES] == 1
+
+
 # ── get_bulk_download_status (async) ────────────────────────────────────
 
 
