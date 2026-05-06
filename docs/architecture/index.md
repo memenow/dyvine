@@ -1,6 +1,6 @@
 # Architecture Diagrams Overview
 
-_Last Updated: 2026-04-17_
+_Last Updated: 2026-05-06_
 
 ## Summary
 
@@ -18,6 +18,9 @@ These diagrams describe the current production architecture and must be updated 
 
 - Layered architecture with explicit operation tracking for asynchronous downloads
 - Async/await request handling with persistent operation state
+- Background post bulk downloads persist per-PostType counters in operation metadata
+  during progress updates so polling clients receive consistent totals while work
+  is still running.
 - Dedicated liveness, readiness, and startup probes
 - Prometheus metrics exposed through an ASGI application
 - Structured error handling and request-scoped correlation tracking
