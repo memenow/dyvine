@@ -634,6 +634,54 @@ def test_cleanup_temp_dir_only_removes_target_subdirectory(tmp_path: Path) -> No
     assert sibling_file.read_bytes() == b"y"
 
 
+def test_cleanup_temp_dir_logs_failures_without_propagating(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cleanup failures must surface in logs but never raise.
+
+    The helper is invoked from a ``finally`` block, so a permission or
+    transient FS error during cleanup must not mask the original failure
+    by raising. At the same time, silently swallowing the error would
+    leave production volumes accumulating orphaned files with no signal
+    — so the ``onexc`` callback must record a warning per failed entry.
+    """
+    import logging
+    import types
+
+    from dyvine.services import users as users_mod
+
+    target = tmp_path / "doomed-task"
+    target.mkdir()
+    (target / "leftover.bin").write_bytes(b"x")
+
+    def fake_rmtree(path: Path, *, onexc: Any) -> None:
+        # Simulate ``shutil.rmtree`` encountering a permission error on a
+        # nested file; the helper must invoke ``onexc`` with the offending
+        # callable, the path, and the exception itself.
+        onexc(Path.unlink, str(target / "leftover.bin"), PermissionError("EACCES"))
+
+    # Replace only the ``shutil`` reference inside ``users_mod`` to avoid
+    # mutating the global ``shutil`` module for the duration of the test.
+    fake_shutil = types.SimpleNamespace(rmtree=fake_rmtree)
+    monkeypatch.setattr(users_mod, "shutil", fake_shutil)
+
+    with caplog.at_level(logging.WARNING, logger="dyvine.services.users"):
+        # Must not raise even though the patched ``rmtree`` reports an error.
+        users_mod.UserService._cleanup_temp_dir(target)
+
+    matching = [
+        record
+        for record in caplog.records
+        if "workspace cleanup" in record.getMessage()
+    ]
+    assert matching, "cleanup failure must produce a warning log entry"
+    assert matching[0].levelno == logging.WARNING
+    assert getattr(matching[0], "path", None) == str(target / "leftover.bin")
+    assert getattr(matching[0], "error", None) == "EACCES"
+
+
 @pytest.mark.asyncio
 async def test_concurrent_downloads_use_isolated_temp_directories(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -537,13 +537,26 @@ class UserService:
         """
         if temp_dir is None or not temp_dir.exists():
             return
-        # ``shutil.rmtree`` walks the tree atomically (single OS call per
-        # entry) so a file created mid-cleanup cannot strand a non-empty
-        # subdirectory the way a hand-rolled two-pass glob walker would.
-        # ``ignore_errors=True`` keeps the helper safe to call from a
-        # ``finally`` block when partial state may already have been torn
-        # down by another task.
-        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # ``shutil.rmtree`` handles nested files in a single walk so a file
+        # created mid-cleanup cannot strand a non-empty subdirectory the
+        # way a hand-rolled two-pass glob walker would. The ``onexc``
+        # callback (Python 3.12+) keeps the helper safe to call from a
+        # ``finally`` block — a cleanup failure must never mask the
+        # original error — but records each failed entry so a permission
+        # issue on a production volume is still observable in logs
+        # instead of silently leaving orphaned files behind.
+        def _on_rmtree_error(func: Any, path: str, exc: BaseException) -> None:
+            logger.warning(
+                "Failed to remove temp file during workspace cleanup",
+                extra={
+                    "path": path,
+                    "operation": getattr(func, "__name__", str(func)),
+                    "error": str(exc),
+                },
+            )
+
+        shutil.rmtree(temp_dir, onexc=_on_rmtree_error)
 
     async def _process_download(
         self,

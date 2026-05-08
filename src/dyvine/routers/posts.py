@@ -304,17 +304,17 @@ async def download_user_posts(
         logger.warning("User not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail=str(e)) from e
 
-    except DownloadError as e:
-        logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
     except ServiceError as e:
-        # ``PostServiceError`` (a ``ServiceError`` that is not a
-        # ``DownloadError``) is raised when the upstream profile fetch fails
-        # before the operation record can be created. Surface the service-
-        # level message so clients can distinguish "upstream unavailable"
-        # from a generic crash, instead of the opaque ``Internal server error``
-        # the bare ``Exception`` branch would emit.
+        # ``start_bulk_download`` raises ``PostServiceError`` (an alias for
+        # ``ServiceError``) when the upstream profile fetch fails before
+        # the operation record can be created. 502 surfaces the upstream
+        # nature of the failure to clients instead of the opaque
+        # ``Internal server error`` the bare ``Exception`` branch would
+        # emit, while still letting the response body carry the original
+        # message for debugging. ``DownloadError`` is also a
+        # ``ServiceError``, so any future download-layer failure routed
+        # through this handler is mapped to the same status — keep it
+        # there until a finer mapping is justified.
         logger.error(
             "Bulk download scheduling failed",
             extra={"user_id": user_id, "error": str(e)},
