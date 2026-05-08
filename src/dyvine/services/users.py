@@ -63,6 +63,7 @@ Performance Considerations:
 """
 
 import asyncio
+import json
 import re
 import shutil
 from pathlib import Path
@@ -71,7 +72,12 @@ from typing import Any
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
-from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
+from ..core.exceptions import (
+    DownloadError,
+    OperationNotFoundError,
+    ServiceError,
+    UserNotFoundError,
+)
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
@@ -153,6 +159,60 @@ def sanitize_filename(filename: str) -> str:
     return filename or "untitled"
 
 
+def _parse_room_data(raw: Any) -> dict[str, Any] | None:
+    """Decode the upstream ``room_data`` payload into a plain dict.
+
+    Douyin returns ``room_data`` as a JSON-encoded string for active
+    livestreams and ``None`` otherwise. The schema layer now expects a
+    structured object so callers can reason about live metadata without
+    rerunning the JSON parser. Malformed payloads are dropped rather
+    than surfaced as a parsing error because the field is auxiliary.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, dict) else None
+    return None
+
+
+async def _safely_close_handler(handler: DouyinHandler) -> None:
+    """Best-effort close of a DouyinHandler instance.
+
+    The upstream ``f2`` SDK does not document a stable ``close`` API: some
+    revisions expose ``aclose`` on the wrapped httpx client, others rely
+    on garbage collection. Trying every common shape lets us release file
+    descriptors today while keeping the helper safe to call against
+    future SDK revisions that change the surface again.
+    """
+    for attr in ("aclose", "close"):
+        target = getattr(handler, attr, None)
+        if callable(target):
+            try:
+                result = target()
+                if asyncio.iscoroutine(result):
+                    await result
+                return
+            except Exception:  # pragma: no cover - defensive cleanup
+                logger.debug(
+                    "DouyinHandler close raised; ignoring",
+                    extra={"close_method": attr},
+                )
+                return
+    client = getattr(handler, "client", None)
+    aclose = getattr(client, "aclose", None)
+    if callable(aclose):
+        try:
+            await aclose()
+        except Exception:  # pragma: no cover - defensive cleanup
+            logger.debug("Underlying httpx client close raised; ignoring")
+
+
 logger = ContextLogger(__name__)
 
 # Alias for backward compatibility
@@ -192,6 +252,13 @@ class UserService:
     async def get_user_info(self, user_id: str) -> UserResponse:
         """Retrieve user information from Douyin.
 
+        The DouyinHandler instance is closed in a ``finally`` block so the
+        underlying httpx client does not leak file descriptors when the
+        endpoint is polled (livestream availability, profile refreshes,
+        etc.). Older revisions instantiated a fresh handler per call and
+        relied on garbage collection, which under sustained polling
+        eventually exhausted the per-process FD limit.
+
         Args:
             user_id: The Douyin user ID.
 
@@ -202,44 +269,47 @@ class UserService:
             UserNotFoundError: If the requested user cannot be found.
             UserServiceError: If an error occurs during the operation.
         """
-        try:
-            handler_kwargs = {
-                "url": f"https://www.douyin.com/user/{user_id}",
-                "cookie": settings.douyin_cookie,
-                "headers": {
-                    "User-Agent": settings.douyin_user_agent,
-                    "Referer": settings.douyin_referer,
-                },
-                "proxy": settings.douyin_proxy_http,
-                "mode": "post",
-            }
+        handler_kwargs = {
+            "url": f"https://www.douyin.com/user/{user_id}",
+            "cookie": settings.douyin_cookie,
+            "headers": {
+                "User-Agent": settings.douyin_user_agent,
+                "Referer": settings.douyin_referer,
+            },
+            "proxy": settings.douyin_proxy_http,
+            "mode": "post",
+        }
 
-            handler = DouyinHandler(handler_kwargs)
+        handler = DouyinHandler(handler_kwargs)
+        try:
             user_data = await handler.fetch_user_profile(user_id)
 
             if not user_data.nickname:
                 raise UserNotFoundError(f"User {user_id} not found")
 
             raw_user = user_data._to_raw()
-            room_data = raw_user.get("user", {}).get("room_data")
+            raw_room_data = raw_user.get("user", {}).get("room_data")
+            room_data = _parse_room_data(raw_room_data)
 
             return UserResponse(
                 user_id=user_id,
                 nickname=user_data.nickname,
-                avatar_url=str(user_data.avatar_url or ""),
+                avatar_url=str(user_data.avatar_url) if user_data.avatar_url else None,
                 signature=str(user_data.signature or ""),
                 following_count=int(user_data.following_count or 0),  # type: ignore
                 follower_count=int(user_data.follower_count or 0),  # type: ignore
                 total_favorited=int(user_data.total_favorited or 0),  # type: ignore
                 is_living=bool(user_data.room_id),  # type: ignore
                 room_id=int(user_data.room_id) if user_data.room_id else None,  # type: ignore
-                room_data=room_data if isinstance(room_data, str) else None,
+                room_data=room_data,
             )
         except UserNotFoundError:
             raise
         except Exception as e:
             logger.exception("Failed to get user info", extra={"user_id": user_id})
             raise UserServiceError(f"Failed to get user info: {str(e)}") from e
+        finally:
+            await _safely_close_handler(handler)
 
     async def start_download(
         self,
@@ -302,11 +372,11 @@ class UserService:
             DownloadResponse: Object containing the current status of the download task.
 
         Raises:
-            DownloadError: If the specified download task is not found.
+            OperationNotFoundError: If the specified download task is not found.
         """
         operation = await self.operation_store.get_operation(task_id)
         if operation.operation_type != "user_content_download":
-            raise DownloadError(f"Download task {task_id} not found")
+            raise OperationNotFoundError(f"Download task {task_id} not found")
         return DownloadResponse(**operation.to_response())
 
     def _build_handler_kwargs(
@@ -433,7 +503,10 @@ class UserService:
                 uploaded_count += 1
             except Exception as e:
                 failed_count += 1
-                logger.error(f"Failed to upload {file_path} to R2: {str(e)}")
+                logger.error(
+                    "Failed to upload file to R2",
+                    extra={"file_path": str(file_path), "error": str(e)},
+                )
         return uploaded_count, failed_count
 
     async def _finalize_status(
@@ -797,13 +870,21 @@ class UserService:
                         max_cursor = aweme_data.max_cursor
                         has_more = aweme_data.has_more
                     else:
-                        # If cursor didn't change but we haven't got all posts,
-                        # increment it
-                        if downloaded_count < total_posts:
-                            max_cursor += 1
-                            has_more = True
-                        else:
-                            has_more = False
+                        # Sticky upstream cursor: previously this branch
+                        # did ``max_cursor += 1`` and kept going, but the
+                        # synthetic value is not recognised upstream and
+                        # the same window keeps being re-fetched, leading
+                        # to duplicate downloads. Treat a stuck cursor as
+                        # the end of the feed so the loop terminates.
+                        logger.info(
+                            "Upstream cursor stuck during user download; ending loop",
+                            extra={
+                                "task_id": task_id,
+                                "user_id": user_id,
+                                "cursor": max_cursor,
+                            },
+                        )
+                        has_more = False
 
                     # If max_items is set and we've reached it, stop
                     if max_items and downloaded_count >= max_items:

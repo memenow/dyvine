@@ -543,26 +543,49 @@ class R2StorageService:
             raise StorageError(f"List objects failed: {str(e)}") from e
 
     def _list_objects_sync(self, *, prefix: str, max_keys: int) -> list[dict[str, Any]]:
-        """Run one ``list_objects_v2`` plus a bounded parallel ``head_object`` fan-out.
+        """Run paginated ``list_objects_v2`` plus bounded ``head_object`` fan-out.
 
-        Kept in a private sync method so the whole listing -- including the
-        N follow-up ``head_object`` calls that carry object metadata -- runs
-        off the event loop. ``list_objects_v2`` returns objects in
-        lexicographic order; this method preserves that ordering in its
-        output. When the container has injected a shared head executor the
-        per-key fan-out reuses it so several concurrent listings share one
-        bounded thread budget; otherwise we fall back to a one-off pool
-        capped at :data:`LIST_OBJECTS_HEAD_MAX_WORKERS` to keep test and
-        ad-hoc callers parallel without wiring a container.
+        Walks every page returned for ``prefix`` (following
+        ``IsTruncated`` / ``NextContinuationToken``) so that buckets with
+        more than 1000 objects under a prefix are evaluated in full.
+        ``list_objects_v2`` returns objects in lexicographic order; this
+        method preserves that ordering across pages. When the container
+        has injected a shared head executor the per-key fan-out reuses
+        it so several concurrent listings share one bounded thread
+        budget; otherwise a one-off pool is built and a warning is
+        logged because every call in the missing-pool path keeps the
+        calling executor slot occupied for the full ``shutdown(wait=True)``
+        window.
         """
         assert self.client is not None and self.bucket is not None
         client = self.client
         bucket = self.bucket
-        response = client.list_objects_v2(
-            Bucket=bucket, Prefix=prefix, MaxKeys=max_keys
-        )
 
-        objects = response.get("Contents", [])
+        objects: list[dict[str, Any]] = []
+        continuation_token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "Bucket": bucket,
+                "Prefix": prefix,
+                "MaxKeys": max_keys,
+            }
+            if continuation_token is not None:
+                kwargs["ContinuationToken"] = continuation_token
+            response = client.list_objects_v2(**kwargs)
+            objects.extend(response.get("Contents", []))
+            if not response.get("IsTruncated"):
+                break
+            continuation_token = response.get("NextContinuationToken")
+            if continuation_token is None:
+                # Defensive: a truncated response without a token is a
+                # bug in the upstream API but breaking the loop here
+                # avoids an infinite request fan-out.
+                logger.warning(
+                    "list_objects_v2 reported IsTruncated without a continuation token",
+                    extra={"prefix": prefix, "fetched": len(objects)},
+                )
+                break
+
         if not objects:
             return []
 
@@ -596,6 +619,12 @@ class R2StorageService:
                 obj_data["Metadata"] = metadata
             return results
 
+        logger.warning(
+            "R2 head executor not attached; falling back to a one-off pool. "
+            "Each call holds the calling executor slot for the full fan-out; "
+            "wire ``set_head_executor`` from the service container.",
+            extra={"prefix": prefix, "object_count": len(keys)},
+        )
         workers = min(LIST_OBJECTS_HEAD_MAX_WORKERS, len(keys))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="r2-head"

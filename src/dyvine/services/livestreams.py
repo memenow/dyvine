@@ -13,16 +13,23 @@ from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
     DownloadError,
     LivestreamError,
+    OperationNotFoundError,
 )
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
+from ..core.path_safety import relative_to_download_root, resolve_within_root
 from ..core.settings import settings
 from ..schemas.livestreams import LiveStreamDownloadResponse
 from .users import UserService
 
 logger = ContextLogger(__name__)
 
-__all__ = ["LivestreamService", "LivestreamError", "DownloadError"]
+__all__ = [
+    "DownloadError",
+    "LivestreamError",
+    "LivestreamService",
+    "OperationNotFoundError",
+]
 
 
 class LivestreamService:
@@ -515,9 +522,13 @@ class LivestreamService:
         room_id = str(room_info.get("room_id", webcast_id) or webcast_id)
 
         status_code = room_info.get("status")
+        if status_code is None:
+            raise LivestreamError(
+                "Unable to resolve livestream status from upstream metadata"
+            )
         if status_code != 2:
             raise LivestreamError(
-                f"User is not currently streaming (status code: {status_code})"
+                f"User is not currently streaming (status: {status_code})"
             )
 
         resolved_stream_map, resolved_flv_map = self._resolve_streams(
@@ -531,10 +542,11 @@ class LivestreamService:
         if not self._select_stream_url(resolved_stream_map):
             raise LivestreamError("No suitable quality stream found")
 
-        if output_path:
-            output_dir = Path(output_path)
-        else:
-            output_dir = Path("data/douyin/downloads/livestreams")
+        # ``resolve_within_root`` rejects absolute paths and traversal
+        # segments before the service touches the filesystem so an
+        # attacker-controlled string cannot escape the configured
+        # download root and create directories elsewhere.
+        output_dir = resolve_within_root(output_path, default_subdir="livestreams")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         webcast_payload = {
@@ -565,11 +577,15 @@ class LivestreamService:
         target_file = output_dir / f"{room_id}_live.flv"
 
         # Hold the dedupe lock across the check/register window so two
-        # concurrent callers for the same ``room_id`` cannot both observe an
-        # empty ``download_jobs`` and double-schedule a background task that
-        # writes to the same target file.
+        # concurrent callers for the same ``room_id`` cannot both observe
+        # an empty ``download_jobs`` and double-schedule a background
+        # task that writes to the same target file. A just-completed task
+        # is treated as cleared even if the ``finally`` finalizer has not
+        # popped it from ``download_jobs`` yet, so back-to-back calls do
+        # not spuriously raise ``Already downloading``.
         async with self._get_dedupe_lock():
-            if room_id in self.download_jobs:
+            existing = self.download_jobs.get(room_id)
+            if existing is not None and not existing.done():
                 raise LivestreamError("Already downloading this stream")
 
             operation = await self.operation_store.create_operation(
@@ -578,7 +594,7 @@ class LivestreamService:
                 status="pending",
                 message="Livestream download scheduled",
                 progress=0.0,
-                download_path=str(target_file),
+                download_path=relative_to_download_root(target_file),
                 metadata={
                     "source_url": normalized,
                     "webcast_id": webcast_id,
@@ -639,13 +655,12 @@ class LivestreamService:
                 )
                 return
 
-            final_path = str(target_file)
             await self.operation_store.update_operation(
                 operation_id,
                 status="completed",
                 message="Livestream download completed",
                 progress=100.0,
-                download_path=final_path,
+                download_path=relative_to_download_root(target_file),
             )
         except Exception as error:
             logger.error(
@@ -679,11 +694,13 @@ class LivestreamService:
         """
         try:
             operation = await self.operation_store.get_operation(operation_id)
-        except DownloadError:
+        except OperationNotFoundError:
             operation = await self.operation_store.get_latest_operation_for_subject(
                 operation_id,
                 operation_type="livestream_download",
             )
         if operation.operation_type != "livestream_download":
-            raise DownloadError("Operation not found or status unknown.")
+            raise OperationNotFoundError(
+                "Operation not found or status unknown."
+            )
         return LiveStreamDownloadResponse(**operation.to_response())
