@@ -41,11 +41,13 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     VIRTUAL_ENV="/app/.venv"
 
-# Apply pending security patches in the runtime stage too, then install
-# only the runtime packages we actually need.
+# Apply pending security patches in the runtime stage too. ``curl`` is
+# intentionally NOT installed: Kubernetes deployments use the
+# ``httpGet`` probes defined on the Pod spec, so the Dockerfile's
+# ``HEALTHCHECK`` is redundant and would only force a curl binary
+# (CVE-prone) into the runtime image for plain ``docker run`` usage.
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -64,9 +66,14 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/livez || exit 1
-
-# Run the application
-CMD ["/app/.venv/bin/python", "-m", "uvicorn", "src.dyvine.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run the application. ``--timeout-graceful-shutdown`` keeps the
+# container draining in-flight requests up to 25 seconds after SIGTERM,
+# which fits inside the default Kubernetes
+# ``terminationGracePeriodSeconds=30`` window so polling clients of the
+# operation status endpoints do not see truncated responses on a
+# rolling restart.
+CMD ["/app/.venv/bin/python", "-m", "uvicorn", \
+     "src.dyvine.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--timeout-graceful-shutdown", "25"]

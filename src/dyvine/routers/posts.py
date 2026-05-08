@@ -13,8 +13,9 @@ The endpoints support various post types including:
 - Story posts and collections
 
 Authentication:
-    All endpoints require valid Douyin cookies for authentication.
-    The cookie should be configured in the application settings.
+    All endpoints require a valid ``X-API-Key`` header that matches
+    ``settings.security.api_key``. The dependency is applied at the
+    router level so individual handlers cannot opt out by accident.
 
 Rate Limiting:
     Endpoints are subject to API rate limiting to prevent abuse.
@@ -31,30 +32,156 @@ Example Usage:
         POST /api/v1/posts/users/MS4wLjABAAAA.../posts:download
 """
 
+import base64
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, Path, Query, status
 
 from ..core.decorators import handle_errors
-from ..core.dependencies import get_post_service
-from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
+from ..core.dependencies import get_post_service, require_api_key
 from ..core.logging import ContextLogger
-from ..schemas.posts import BulkDownloadResponse, PostDetail
+from ..schemas.posts import BulkDownloadResponse, ListPostsResponse, PostDetail
 from ..services.posts import PostService
 
 # Initialize logger for this module
 logger = ContextLogger(__name__)
 
+_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]{6,128}$"
+_POST_ID_PATTERN = r"^[0-9]{6,32}$"
+_OPERATION_ID_PATTERN = r"^[A-Za-z0-9_\-]{8,128}$"
+
 # Create router with posts prefix and OpenAPI tags
 router = APIRouter(
     prefix="/posts",
     tags=["posts"],
+    dependencies=[Depends(require_api_key)],
     responses={
+        401: {"description": "Missing or invalid API key"},
         404: {"description": "Post or user not found"},
         422: {"description": "Validation error"},
         500: {"description": "Internal server error"},
     },
 )
+
+
+# Static-segment routes (``/operations/...``, ``/users/...``) must be
+# registered before the catch-all ``/{post_id}`` so FastAPI's order-aware
+# matcher routes them to the dedicated handlers instead of treating
+# ``operations`` or ``users`` as a literal post id.
+
+
+@router.get(
+    "/operations/{operation_id}",
+    response_model=BulkDownloadResponse,
+    summary="Get bulk download operation status",
+    description=(
+        "Retrieves the current status of a bulk posts download operation, "
+        "including per-PostType counts and the destination download path "
+        "once available"
+    ),
+)
+@handle_errors(logger=logger)
+async def get_bulk_download_operation(
+    service: Annotated[PostService, Depends(get_post_service)],
+    operation_id: str = Path(
+        ...,
+        pattern=_OPERATION_ID_PATTERN,
+        description="The unique identifier of the bulk download operation",
+    ),
+) -> BulkDownloadResponse:
+    """Retrieve the status of a bulk posts download operation."""
+    logger.info(
+        "Processing get_bulk_download_operation request",
+        extra={"operation_id": operation_id},
+    )
+    return await service.get_bulk_download_status(operation_id)
+
+
+@router.get(
+    "/users/{user_id}/posts",
+    response_model=ListPostsResponse,
+    summary="List posts from a specific user with pagination",
+    description=(
+        "Retrieves a paginated list of posts from a specific Douyin user, "
+        "ordered by creation time"
+    ),
+    response_description="Paginated list of post details with opaque next-page token",
+)
+@handle_errors(logger=logger)
+async def list_user_posts(
+    service: Annotated[PostService, Depends(get_post_service)],
+    user_id: str = Path(
+        ...,
+        pattern=_USER_ID_PATTERN,
+        description="Unique Douyin user identifier (sec_user_id)",
+    ),
+    page_token: str | None = Query(
+        None,
+        description=(
+            "Opaque pagination token returned by a previous response. "
+            "Omit on the first request."
+        ),
+    ),
+    count: int = Query(
+        20,
+        ge=1,
+        le=100,
+        description="Number of posts to return per page. Must be between 1 and 100",
+    ),
+) -> ListPostsResponse:
+    """Retrieve a paginated list of posts from a specific Douyin user."""
+    cursor = _decode_page_token(page_token)
+    logger.info(
+        "Processing list_user_posts request",
+        extra={"user_id": user_id, "page_token": page_token, "count": count},
+    )
+    page = await service.get_user_posts(user_id, cursor, count)
+    # The upstream Douyin ``max_cursor`` is an opaque sentinel — not an
+    # offset — so the next page token must echo it back verbatim.
+    # Synthesising a token from ``cursor + len(posts)`` would resolve to
+    # a window the upstream API does not recognise, repeating or
+    # skipping posts.
+    next_token = (
+        _encode_page_token(page.next_cursor) if page.next_cursor is not None else None
+    )
+    return ListPostsResponse(
+        posts=page.posts, next_page_token=next_token, total_size=None
+    )
+
+
+@router.post(
+    "/users/{user_id}/posts:download",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=BulkDownloadResponse,
+    summary="Schedule user posts bulk download",
+    description=(
+        "Schedules an asynchronous bulk download of every available post from "
+        "a specific user and returns an operation_id clients can poll for "
+        "progress"
+    ),
+)
+@handle_errors(logger=logger)
+async def download_user_posts(
+    service: Annotated[PostService, Depends(get_post_service)],
+    user_id: str = Path(
+        ...,
+        pattern=_USER_ID_PATTERN,
+        description="The unique identifier of the user",
+    ),
+    page_token: str | None = Query(
+        None,
+        description=(
+            "Optional starting cursor token. Omit to begin at the newest " "post."
+        ),
+    ),
+) -> BulkDownloadResponse:
+    """Schedule a bulk download of every available post from a user."""
+    cursor = _decode_page_token(page_token)
+    logger.info(
+        "Processing download_user_posts request",
+        extra={"user_id": user_id, "page_token": page_token},
+    )
+    return await service.start_bulk_download(user_id, cursor)
 
 
 @router.get(
@@ -72,60 +199,11 @@ async def get_post(
     service: Annotated[PostService, Depends(get_post_service)],
     post_id: str = Path(
         ...,
+        pattern=_POST_ID_PATTERN,
         description="Unique Douyin post identifier (aweme_id)",
-        examples=[
-            {"summary": "Sample post identifier", "value": "7123456789012345678"}
-        ],
     ),
 ) -> PostDetail:
-    """Retrieve detailed information about a specific Douyin post.
-
-    This endpoint fetches comprehensive information about a single Douyin post
-    including metadata, media content URLs, user information, and engagement
-    statistics like likes, comments, and shares.
-
-    Args:
-        post_id: The unique Douyin post identifier (aweme_id). This is typically
-                a long numeric string that uniquely identifies the post.
-        service: PostService instance for handling the request (dependency injected).
-
-    Returns:
-        PostDetail: Complete post information including:
-            - Basic metadata (title, description, creation time)
-            - Media content (video URLs, image URLs, thumbnails)
-            - User information (author details)
-            - Engagement statistics (likes, comments, shares)
-            - Content classification and tags
-
-    Raises:
-        HTTPException:
-            - 404: Post not found or inaccessible
-            - 422: Invalid post ID format
-            - 500: Internal server error during processing
-
-    Example:
-        ```bash
-        curl -X GET "https://api.example.com/api/v1/posts/7123456789012345678"
-        ```
-
-        Response:
-        ```json
-        {
-            "aweme_id": "7123456789012345678",
-            "desc": "Amazing video content!",
-            "create_time": 1678886400,
-            "post_type": "video",
-            "video_info": {
-                "play_addr": "https://example.com/video.mp4",
-                "duration": 60
-            },
-            "statistics": {
-                "digg_count": 1000,
-                "comment_count": 50
-            }
-        }
-        ```
-    """
+    """Retrieve detailed information about a specific Douyin post."""
     logger.info(
         "Fetching post details",
         extra={"post_id": post_id, "operation": "get_post_detail"},
@@ -133,248 +211,26 @@ async def get_post(
     return await service.get_post_detail(post_id)
 
 
-@router.get(
-    "/users/{user_id}/posts",
-    response_model=list[PostDetail],
-    summary="List posts from a specific user with pagination",
-    description=(
-        "Retrieves a paginated list of posts from a specific Douyin user, "
-        "ordered by creation time"
-    ),
-    response_description="List of post details with pagination support",
-)
-async def list_user_posts(
-    service: Annotated[PostService, Depends(get_post_service)],
-    user_id: str = Path(
-        ...,
-        description="Unique Douyin user identifier (sec_user_id)",
-        examples=[
-            {
-                "summary": "Sample sec_user_id",
-                "value": "MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc",
-            }
-        ],
-    ),
-    max_cursor: int = Query(
-        0,
-        description=(
-            "Pagination cursor for fetching next page. Use 0 for first page, "
-            "then use the cursor from previous response"
-        ),
-        examples=[
-            {"summary": "First page", "value": 0},
-            {"summary": "Subsequent page cursor", "value": 1678886400},
-        ],
-    ),
-    count: int = Query(
-        20,
-        ge=1,
-        le=100,
-        description="Number of posts to return per page. Must be between 1 and 100",
-        examples=[
-            {"summary": "Default page size", "value": 20},
-            {"summary": "Maximum per request", "value": 100},
-        ],
-    ),
-) -> list[PostDetail]:
-    """Retrieve a paginated list of posts from a specific Douyin user.
+def _encode_page_token(cursor: int) -> str:
+    """Render a numeric cursor as an opaque base64 token."""
+    payload = str(int(cursor)).encode("ascii")
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
 
-    This endpoint fetches posts from a user's profile in reverse chronological
-    order (newest first) with support for pagination. Each post includes complete
-    metadata, media URLs, and engagement statistics.
 
-    Args:
-        user_id: The unique Douyin user identifier (sec_user_id). This is typically
-                a long encoded string that uniquely identifies the user.
-        max_cursor: Pagination cursor indicating where to start fetching results.
-                   Use 0 for the first page, then use the cursor value returned
-                   in the response for subsequent pages.
-        count: Number of posts to return per page. Must be between 1 and 100.
-              Larger values may increase response time and memory usage.
-        service: PostService instance for handling the request (dependency injected).
+def _decode_page_token(token: str | None) -> int:
+    """Decode an opaque page token back into the numeric upstream cursor.
 
-    Returns:
-        List[PostDetail]: Ordered list of post details including:
-            - Post metadata (ID, description, creation time)
-            - Media content (videos, images, thumbnails)
-            - User information (author details)
-            - Engagement metrics (likes, comments, shares)
-            - Content type and classification
-
-    Raises:
-        HTTPException:
-            - 404: User not found or profile is private/inaccessible
-            - 422: Invalid user ID format or parameter validation error
-            - 500: Internal server error during data fetching
-
-    Example:
-        ```bash
-        # Get first page of posts
-        curl -X GET "https://api.example.com/api/v1/posts/users/MS4wLjABAAAA.../posts?count=10&max_cursor=0"
-
-        # Get next page using cursor from previous response
-        curl -X GET "https://api.example.com/api/v1/posts/users/MS4wLjABAAAA.../posts?count=10&max_cursor=1678886400"
-        ```
-
-        Response:
-        ```json
-        [
-            {
-                "aweme_id": "7123456789012345678",
-                "desc": "User's latest post",
-                "create_time": 1678886400,
-                "post_type": "video",
-                "statistics": {
-                    "digg_count": 1000,
-                    "comment_count": 50
-                }
-            }
-        ]
-        ```
-
-    Note:
-        - Results are ordered by creation time (newest first)
-        - Empty list is returned if no more posts are available
-        - Some posts may be excluded if they're private or restricted
-        - Rate limiting applies to prevent API abuse
+    Invalid tokens fall back to ``0`` so a client retry with corrupted
+    state still serves the first page rather than failing the whole
+    request. ``ValidationError`` is intentionally not raised because the
+    cursor is opaque to clients and they cannot debug a structured
+    rejection.
     """
+    if not token:
+        return 0
     try:
-        logger.info(
-            "Processing list_user_posts request",
-            extra={"user_id": user_id, "max_cursor": max_cursor, "count": count},
-        )
-        return await service.get_user_posts(user_id, max_cursor, count)
-
-    except UserNotFoundError as e:
-        logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except Exception as e:
-        logger.exception(
-            "Error processing list_user_posts request", extra={"user_id": user_id}
-        )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
-
-
-@router.post(
-    "/users/{user_id}/posts:download",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=BulkDownloadResponse,
-    summary="Schedule user posts bulk download",
-    description=(
-        "Schedules an asynchronous bulk download of every available post from "
-        "a specific user and returns an operation_id clients can poll for "
-        "progress"
-    ),
-)
-async def download_user_posts(
-    service: Annotated[PostService, Depends(get_post_service)],
-    user_id: str = Path(..., description="The unique identifier of the user"),
-    max_cursor: int = Query(0, description="Starting pagination cursor"),
-) -> BulkDownloadResponse:
-    """Schedule a bulk download of every available post from a user.
-
-    The endpoint validates that the user exists, persists a pending
-    operation record, and dispatches the long-running pagination plus
-    download loop onto the shared background task registry. The response
-    carries the ``operation_id`` clients can use to poll
-    ``/posts/operations/{operation_id}`` for progress.
-
-    Args:
-        user_id: The unique identifier of the user.
-        max_cursor: Starting point for pagination, 0 for beginning.
-        service: An instance of PostService for handling the request.
-
-    Returns:
-        BulkDownloadResponse: Pending bulk download response with the
-        operation tracking identifier and initial status.
-
-    Raises:
-        HTTPException: If the user is not found, the bulk download cannot
-            be scheduled, or an unexpected error occurs.
-    """
-    try:
-        logger.info(
-            "Processing download_user_posts request",
-            extra={"user_id": user_id, "max_cursor": max_cursor},
-        )
-        return await service.start_bulk_download(user_id, max_cursor)
-
-    except UserNotFoundError as e:
-        logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except ServiceError as e:
-        # ``start_bulk_download`` raises ``PostServiceError`` (an alias for
-        # ``ServiceError``) when the upstream profile fetch fails before
-        # the operation record can be created. 502 surfaces the upstream
-        # nature of the failure to clients instead of the opaque
-        # ``Internal server error`` the bare ``Exception`` branch would
-        # emit, while still letting the response body carry the original
-        # message for debugging. ``DownloadError`` is also a
-        # ``ServiceError``, so any future download-layer failure routed
-        # through this handler is mapped to the same status — keep it
-        # there until a finer mapping is justified.
-        logger.error(
-            "Bulk download scheduling failed",
-            extra={"user_id": user_id, "error": str(e)},
-        )
-        raise HTTPException(status_code=502, detail=str(e)) from e
-
-    except Exception as e:
-        logger.exception(
-            "Error processing download_user_posts request", extra={"user_id": user_id}
-        )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
-
-
-@router.get(
-    "/operations/{operation_id}",
-    response_model=BulkDownloadResponse,
-    summary="Get bulk download operation status",
-    description=(
-        "Retrieves the current status of a bulk posts download operation, "
-        "including per-PostType counts and the destination download path "
-        "once available"
-    ),
-)
-async def get_bulk_download_operation(
-    service: Annotated[PostService, Depends(get_post_service)],
-    operation_id: str = Path(
-        ..., description="The unique identifier of the bulk download operation"
-    ),
-) -> BulkDownloadResponse:
-    """Retrieve the status of a bulk posts download operation.
-
-    Args:
-        operation_id: The unique identifier of the bulk download operation
-            returned by :func:`download_user_posts`.
-        service: An instance of PostService for handling the request.
-
-    Returns:
-        BulkDownloadResponse: Snapshot of the current bulk download state.
-
-    Raises:
-        HTTPException: If the operation is unknown (404) or an unexpected
-            error occurs (500).
-    """
-    try:
-        logger.info(
-            "Processing get_bulk_download_operation request",
-            extra={"operation_id": operation_id},
-        )
-        return await service.get_bulk_download_status(operation_id)
-
-    except DownloadError as e:
-        logger.warning(
-            "Bulk download operation not found",
-            extra={"operation_id": operation_id},
-        )
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except Exception as e:
-        logger.exception(
-            "Error processing get_bulk_download_operation request",
-            extra={"operation_id": operation_id},
-        )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
+        padding = "=" * (-len(token) % 4)
+        decoded = base64.urlsafe_b64decode(token + padding).decode("ascii")
+        return max(int(decoded), 0)
+    except (ValueError, UnicodeDecodeError):
+        return 0

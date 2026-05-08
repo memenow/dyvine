@@ -11,10 +11,11 @@ and includes comprehensive error handling and logging.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Body, Depends, Path, status
 
-from ..core.dependencies import get_livestream_service
-from ..core.exceptions import DownloadError, LivestreamError, UserNotFoundError
+from ..core.decorators import handle_errors
+from ..core.dependencies import get_livestream_service, require_api_key
+from ..core.exceptions import LivestreamError
 from ..core.logging import ContextLogger
 from ..schemas.livestreams import (
     LiveStreamDownloadResponse,
@@ -22,8 +23,25 @@ from ..schemas.livestreams import (
 )
 from ..services.livestreams import LivestreamService
 
-router = APIRouter(prefix="/livestreams", tags=["livestreams"])
+router = APIRouter(
+    prefix="/livestreams",
+    tags=["livestreams"],
+    dependencies=[Depends(require_api_key)],
+)
 logger = ContextLogger(__name__)
+
+_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]{6,128}$"
+_OPERATION_ID_PATTERN = r"^[A-Za-z0-9_\-]{8,128}$"
+
+# ``LivestreamError`` is raised whenever the upstream room is offline,
+# unreachable, or already being downloaded. The historical contract
+# returns 404 for those cases (the resource is not "available"); the
+# global ``ServiceError → 500`` mapping would otherwise reclassify a
+# user-visible "not streaming" condition as an internal error.
+# The annotation pins the dict to the broader ``type[Exception]`` key
+# type the decorator declares so mypy does not reject this constant
+# under invariant generic key types.
+_LIVESTREAM_ERROR_MAPPING: dict[type[Exception], int] = {LivestreamError: 404}
 
 
 @router.post(
@@ -31,57 +49,32 @@ logger = ContextLogger(__name__)
     status_code=status.HTTP_202_ACCEPTED,
     response_model=LiveStreamDownloadResponse,
     responses={
+        401: {"description": "Missing or invalid API key"},
         404: {"description": "User not found or no active livestream"},
+        422: {"description": "Invalid user_id or output_path"},
         500: {"description": "Download failed"},
     },
 )
+@handle_errors(logger=logger, error_mapping=_LIVESTREAM_ERROR_MAPPING)
 async def download_livestream(
     service: Annotated[LivestreamService, Depends(get_livestream_service)],
-    user_id: str = Path(..., description="The unique identifier of the user"),
+    user_id: str = Path(
+        ...,
+        pattern=_USER_ID_PATTERN,
+        description="The unique identifier of the user",
+    ),
     output_path: str | None = Body(None, embed=True),
 ) -> LiveStreamDownloadResponse:
-    """Downloads an active livestream from a specific user.
+    """Downloads an active livestream from a specific user."""
+    logger.info(
+        "Processing download_livestream request",
+        extra={"user_id": user_id, "output_path": output_path},
+    )
 
-    Args:
-        user_id: The unique identifier of the user whose stream to download.
-        output_path: Optional custom path where the stream should be saved.
-        service: Injected LiveStreamService instance.
-
-    Returns:
-        LiveStreamDownloadResponse: Contains download status and path information.
-
-    Raises:
-        HTTPException: If user not found (404), livestream not found (404) or
-            download fails (500).
-    """
-    try:
-        logger.info(
-            "Processing download_livestream request",
-            extra={"user_id": user_id, "output_path": output_path},
+    async with logger.track_time("download_livestream"):
+        return await service.download_stream(
+            url=f"https://www.douyin.com/user/{user_id}", output_path=output_path
         )
-
-        async with logger.track_time("download_livestream"):
-            return await service.download_stream(
-                url=f"https://www.douyin.com/user/{user_id}", output_path=output_path
-            )
-
-    except DownloadError as e:
-        logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-    except UserNotFoundError as e:
-        logger.warning("User not found", extra={"user_id": user_id})
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except LivestreamError as e:
-        logger.warning("Livestream error", extra={"user_id": user_id, "error": str(e)})
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except Exception as e:
-        logger.exception(
-            "Error processing download_livestream request", extra={"user_id": user_id}
-        )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post(
@@ -89,87 +82,50 @@ async def download_livestream(
     status_code=status.HTTP_202_ACCEPTED,
     response_model=LiveStreamDownloadResponse,
     responses={
+        401: {"description": "Missing or invalid API key"},
         404: {"description": "Livestream not found"},
+        422: {"description": "Invalid url or output_path"},
         500: {"description": "Download failed"},
     },
 )
+@handle_errors(logger=logger, error_mapping=_LIVESTREAM_ERROR_MAPPING)
 async def download_livestream_url(
     request: LiveStreamURLDownloadRequest,
     service: Annotated[LivestreamService, Depends(get_livestream_service)],
 ) -> LiveStreamDownloadResponse:
-    """Downloads a livestream from a direct URL.
+    """Downloads a livestream from a direct URL."""
+    logger.info(
+        "Processing download_livestream_url request", extra={"url": str(request.url)}
+    )
 
-    Args:
-        request: The download request containing the livestream URL.
-        service: Injected LiveStreamService instance.
-
-    Returns:
-        LiveStreamDownloadResponse: Contains download status and path information.
-
-    Raises:
-        HTTPException: If livestream not found (404) or download fails (500).
-    """
-    try:
-        logger.info(
-            "Processing download_livestream_url request", extra={"url": request.url}
+    async with logger.track_time("download_livestream_url"):
+        return await service.download_stream(
+            url=str(request.url), output_path=request.output_path
         )
 
-        async with logger.track_time("download_livestream_url"):
-            return await service.download_stream(
-                url=request.url, output_path=request.output_path
-            )
 
-    except DownloadError as e:
-        logger.error("Download failed", extra={"url": request.url, "error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e)) from e
-
-    except LivestreamError as e:
-        logger.warning("Livestream error", extra={"url": request.url, "error": str(e)})
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except Exception as e:
-        logger.exception(
-            "Error processing download_livestream_url request",
-            extra={"url": request.url},
-        )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
-
-
-@router.get("/operations/{operation_id}", response_model=LiveStreamDownloadResponse)
+@router.get(
+    "/operations/{operation_id}",
+    response_model=LiveStreamDownloadResponse,
+    responses={
+        401: {"description": "Missing or invalid API key"},
+        404: {"description": "Operation not found"},
+    },
+)
+@handle_errors(logger=logger)
 async def get_download_status(
     service: Annotated[LivestreamService, Depends(get_livestream_service)],
     operation_id: str = Path(
-        ..., description="The unique identifier of the download operation"
+        ...,
+        pattern=_OPERATION_ID_PATTERN,
+        description="The unique identifier of the download operation",
     ),
 ) -> LiveStreamDownloadResponse:
-    """Retrieves the status of a livestream download operation.
+    """Retrieves the status of a livestream download operation."""
+    logger.info(
+        "Processing get_download_status request",
+        extra={"operation_id": operation_id},
+    )
 
-    Args:
-        operation_id: The unique identifier of the operation to check.
-        service: Injected LiveStreamService instance.
-
-    Returns:
-        LiveStreamDownloadResponse: Contains operation status and download path.
-
-    Raises:
-        HTTPException: If operation not found (404) or status check fails (500).
-    """
-    try:
-        logger.info(
-            "Processing get_download_status request",
-            extra={"operation_id": operation_id},
-        )
-
-        async with logger.track_time("get_download_status"):
-            return await service.get_download_status(operation_id)
-
-    except DownloadError as e:
-        logger.warning("Operation not found", extra={"operation_id": operation_id})
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except Exception as e:
-        logger.exception(
-            "Error processing get_download_status request",
-            extra={"operation_id": operation_id},
-        )
-        raise HTTPException(status_code=500, detail="Internal server error") from e
+    async with logger.track_time("get_download_status"):
+        return await service.get_download_status(operation_id)

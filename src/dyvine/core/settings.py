@@ -23,9 +23,12 @@ Example:
 """
 
 from functools import lru_cache
+from typing import Self
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEFAULT_SECRET_SENTINEL = "change-me-in-production"
 
 
 class APISettings(BaseSettings):
@@ -83,57 +86,44 @@ class APISettings(BaseSettings):
 class SecuritySettings(BaseSettings):
     """Security and authentication configuration settings.
 
-    Contains security-related settings including API keys, tokens, and
-    authentication parameters with production safety validations.
-
     Attributes:
         secret_key: Secret key for cryptographic operations.
-        api_key: API authentication key.
+        api_key: API authentication key. Required in production unless
+            ``require_api_key`` is explicitly set to ``False``.
         access_token_expire_minutes: JWT token expiration time in minutes.
+        require_api_key: When ``True`` (the default), every router request
+            must carry the ``X-API-Key`` header set to ``api_key``.
 
     Environment Variables:
-        SECURITY_SECRET_KEY: Override default secret key.
-        SECURITY_API_KEY: Override default API key.
-        SECURITY_ACCESS_TOKEN_EXPIRE_MINUTES: Token expiration time.
+        SECURITY_SECRET_KEY, SECURITY_API_KEY,
+        SECURITY_ACCESS_TOKEN_EXPIRE_MINUTES, SECURITY_REQUIRE_API_KEY.
 
     Note:
-        Default values must be changed in production environments.
-        The validator will raise an error if defaults are used in non-debug mode.
+        Default values must be replaced before any production deployment.
+        The composite :class:`Settings` validator below cross-checks the
+        secret values against ``API_DEBUG`` so a non-debug build that ships
+        with the placeholder secrets fails to boot.
     """
 
     secret_key: str = Field(
-        default="change-me-in-production",
+        default=_DEFAULT_SECRET_SENTINEL,
         description="Secret key for cryptographic operations",
     )
     api_key: str = Field(
-        default="change-me-in-production", description="API authentication key"
+        default=_DEFAULT_SECRET_SENTINEL,
+        description="API authentication key matched against ``X-API-Key``",
     )
     access_token_expire_minutes: int = Field(
         default=60, ge=1, description="JWT token expiration time in minutes"
     )
-
-    @field_validator("secret_key", "api_key")
-    def validate_not_default(cls, v: str, info: ValidationInfo) -> str:
-        """Validate that production secrets are not using default values.
-
-        Args:
-            v: The field value to validate.
-            info: Field information from pydantic.
-
-        Returns:
-            The validated field value.
-
-        Raises:
-            ValueError: If default values are used in production.
-        """
-        import os
-
-        if (
-            v == "change-me-in-production"
-            and os.getenv("API_DEBUG", "false").lower() != "true"
-        ):
-            raise ValueError(f"{info.field_name} must be changed in production")
-        return v
+    require_api_key: bool = Field(
+        default=True,
+        description=(
+            "Reject router requests that do not present a matching "
+            "``X-API-Key`` header. Set to ``false`` only when fronting the "
+            "API with another authenticated layer (mTLS, mesh policy)."
+        ),
+    )
 
     model_config = SettingsConfigDict(env_prefix="SECURITY_")
 
@@ -208,13 +198,12 @@ class DouyinSettings(BaseSettings):
         referer: HTTP Referer header for requests.
         proxy_http: HTTP proxy URL (optional).
         proxy_https: HTTPS proxy URL (optional).
+        download_root: Filesystem root that bounds every user-supplied
+            output path.
 
     Environment Variables:
-        DOUYIN_COOKIE: Authentication cookie string.
-        DOUYIN_USER_AGENT: Custom User-Agent header.
-        DOUYIN_REFERER: Custom Referer header.
-        DOUYIN_PROXY_HTTP: HTTP proxy URL.
-        DOUYIN_PROXY_HTTPS: HTTPS proxy URL.
+        DOUYIN_COOKIE, DOUYIN_USER_AGENT, DOUYIN_REFERER,
+        DOUYIN_PROXY_HTTP, DOUYIN_PROXY_HTTPS, DOUYIN_DOWNLOAD_ROOT.
 
     Note:
         A valid cookie is required for most Douyin API operations.
@@ -235,6 +224,14 @@ class DouyinSettings(BaseSettings):
     )
     proxy_https: str | None = Field(
         default=None, description="HTTPS proxy URL (optional)"
+    )
+    download_root: str = Field(
+        default="data/douyin/downloads",
+        description=(
+            "Filesystem root used to jail user-supplied output paths. "
+            "Requests whose ``output_path`` resolves outside this root are "
+            "rejected at the schema layer."
+        ),
     )
     # Livestream-specific headers sent to live.douyin.com.
     # Extract the CSRF token from browser DevTools (Network tab ->
@@ -315,6 +312,45 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     r2: R2Settings = Field(default_factory=R2Settings)
     douyin: DouyinSettings = Field(default_factory=DouyinSettings)
+
+    @model_validator(mode="after")
+    def _validate_security_in_production(self) -> Self:
+        """Reject placeholder secret values when ``api.debug`` is False.
+
+        The cross-field check lives on the composite container so the
+        validator sees ``api.debug`` from the same parsed payload that
+        populated ``security``. Reading ``API_DEBUG`` straight off
+        ``os.environ`` (the previous approach) silently disagreed with
+        ``api.debug`` whenever the value lived in a ``.env`` file rather
+        than a real environment variable.
+
+        ``api_key`` is only validated when ``require_api_key`` is on, so
+        deployments that delegate authentication to mTLS or a service
+        mesh (and therefore set ``SECURITY_REQUIRE_API_KEY=false``) do
+        not need to mint a never-used key just to satisfy a startup
+        check. ``secret_key`` is always validated because it backs
+        cryptographic operations that are not gated by the API-key
+        dependency.
+        """
+        if self.api.debug:
+            return self
+
+        sentinel = _DEFAULT_SECRET_SENTINEL
+        candidates: list[tuple[str, str]] = [
+            ("secret_key", self.security.secret_key),
+        ]
+        if self.security.require_api_key:
+            candidates.append(("api_key", self.security.api_key))
+
+        offenders = [name for name, value in candidates if value in {"", sentinel}]
+        if not offenders:
+            return self
+
+        joined = ", ".join(f"security.{name}" for name in offenders)
+        raise ValueError(
+            f"{joined} must be set to a non-default value when API_DEBUG is "
+            "false; rotate the placeholder before deploying."
+        )
 
     # Convenience properties for frequently accessed settings
     @property

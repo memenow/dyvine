@@ -172,7 +172,15 @@ class LifecycleManager:
             Optional[Dict[str, Any]]: Action taken, if any
         """
         now = datetime.now(UTC)
-        last_modified = obj.get("LastModified", now).replace(tzinfo=UTC)
+        raw_ts = obj.get("LastModified", now)
+        # ``boto3`` already attaches UTC tzinfo for S3-compatible APIs,
+        # but a tz-aware payload that uses a non-UTC offset must be
+        # converted (not stamped over). ``replace(tzinfo=UTC)`` would
+        # silently corrupt the age calculation in that case.
+        if raw_ts.tzinfo is None:
+            last_modified = raw_ts.replace(tzinfo=UTC)
+        else:
+            last_modified = raw_ts.astimezone(UTC)
         age_days = (now - last_modified).days
 
         # Check for deletion
@@ -228,12 +236,14 @@ class LifecycleManager:
     def _write_audit_log_sync(self, summary: dict[str, Any]) -> None:
         """Perform the blocking file write and log rotation off the loop.
 
-        Keeping ``open``/``write`` together with ``_rotate_audit_logs`` in a
-        single sync helper means the caller pays for exactly one thread
-        hand-off instead of one per IO operation.
+        The audit log filename embeds the UTC date so each day starts a
+        fresh file (``r2_lifecycle_audit.YYYYMMDD.log``). The active file
+        therefore matches the rotation glob; without the date stamp the
+        legacy ``r2_lifecycle_audit.log`` was never rotated and grew
+        unbounded on long-running deployments.
         """
         now = datetime.now(UTC)
-        log_path = Path("logs/r2_lifecycle_audit.log")
+        log_path = Path("logs") / f"r2_lifecycle_audit.{now:%Y%m%d}.log"
         log_path.parent.mkdir(exist_ok=True)
 
         with open(log_path, "a") as f:
@@ -252,7 +262,7 @@ class LifecycleManager:
         self._rotate_audit_logs()
 
     def _rotate_audit_logs(self) -> None:
-        """Rotate audit logs based on retention policy."""
+        """Delete dated audit logs older than the configured retention."""
         try:
             retention_days = self.audit_config["log_retention_days"]
             log_dir = Path("logs")
@@ -263,7 +273,6 @@ class LifecycleManager:
 
             for log_file in log_dir.glob("r2_lifecycle_audit.*.log"):
                 try:
-                    # Parse timestamp from filename
                     timestamp_str = log_file.stem.split(".")[-1]
                     timestamp = datetime.strptime(timestamp_str, "%Y%m%d").replace(
                         tzinfo=UTC
@@ -271,12 +280,34 @@ class LifecycleManager:
 
                     if timestamp < cutoff:
                         log_file.unlink()
-                        logger.info("Rotated audit log", extra={"file": str(log_file)})
+                        logger.info(
+                            "Rotated audit log",
+                            extra={"file": str(log_file)},
+                        )
 
                 except (ValueError, OSError) as e:
                     logger.error(
                         "Error rotating log file",
                         extra={"file": str(log_file), "error": str(e)},
+                    )
+
+            # Migrate the legacy un-dated ``r2_lifecycle_audit.log`` if
+            # present so existing deployments do not strand a file the
+            # rotation glob no longer matches.
+            legacy = log_dir / "r2_lifecycle_audit.log"
+            if legacy.exists():
+                stamp = datetime.now(UTC).strftime("%Y%m%d")
+                target = log_dir / f"r2_lifecycle_audit.{stamp}.legacy.log"
+                try:
+                    legacy.rename(target)
+                    logger.info(
+                        "Migrated legacy audit log",
+                        extra={"src": str(legacy), "dst": str(target)},
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to migrate legacy audit log",
+                        extra={"file": str(legacy), "error": str(exc)},
                     )
 
         except Exception as e:

@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dyvine.core.exceptions import DownloadError, PostNotFoundError, ServiceError
+from dyvine.core.exceptions import (
+    OperationNotFoundError,
+    PostNotFoundError,
+    ServiceError,
+)
 from dyvine.core.operations import OperationStore
 from dyvine.schemas.posts import DownloadStatus, PostType
 from dyvine.services.posts import PostService
@@ -247,7 +251,8 @@ async def test_get_user_posts_success() -> None:
                 "video": {"play_addr": {"url_list": ["https://example.com/v.mp4"]}},
             }
         ],
-        "has_more": False,
+        "has_more": True,
+        "max_cursor": 9999,
     }
 
     async def _iter(*a, **kw):
@@ -255,9 +260,13 @@ async def test_get_user_posts_success() -> None:
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)
-    result = await svc.get_user_posts("user1")
-    assert len(result) == 1
-    assert result[0].aweme_id == "p1"
+    page = await svc.get_user_posts("user1")
+    assert len(page.posts) == 1
+    assert page.posts[0].aweme_id == "p1"
+    # The router wraps ``next_cursor`` into an opaque token; the
+    # service surfaces the raw upstream sentinel verbatim.
+    assert page.next_cursor == 9999
+    assert page.has_more is True
 
 
 @pytest.mark.asyncio
@@ -270,23 +279,60 @@ async def test_get_user_posts_empty() -> None:
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)
-    result = await svc.get_user_posts("user-empty")
-    assert result == []
+    page = await svc.get_user_posts("user-empty")
+    assert page.posts == []
+    assert page.next_cursor is None
+    assert page.has_more is False
 
 
 @pytest.mark.asyncio
 async def test_get_user_posts_empty_aweme_list() -> None:
     handler = MagicMock()
     posts_filter = MagicMock()
-    posts_filter._to_raw.return_value = {"aweme_list": [], "has_more": False}
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [],
+        "has_more": False,
+        "max_cursor": 0,
+    }
 
     async def _iter(*a, **kw):
         yield posts_filter
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)
-    result = await svc.get_user_posts("user-no-posts")
-    assert result == []
+    page = await svc.get_user_posts("user-no-posts")
+    assert page.posts == []
+    assert page.next_cursor is None
+    assert page.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_get_user_posts_returns_none_cursor_on_stuck_upstream() -> None:
+    """A sticky upstream cursor (``raw_next == max_cursor``) must not be echoed.
+
+    Returning the synthetic value as ``next_cursor`` would invite the
+    caller to re-fetch the same window forever; the service collapses
+    the case to ``next_cursor=None`` so the router renders no page
+    token and the client knows the feed is exhausted.
+    """
+    handler = MagicMock()
+    posts_filter = MagicMock()
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [
+            {"aweme_id": "p1", "create_time": 0, "aweme_type": 0},
+        ],
+        "has_more": True,
+        "max_cursor": 100,
+    }
+
+    async def _iter(*a, **kw):
+        yield posts_filter
+
+    handler.fetch_user_post_videos = _iter
+    svc = _build_service(handler)
+    page = await svc.get_user_posts("user-stuck", max_cursor=100)
+    assert page.next_cursor is None
+    assert page.has_more is False
 
 
 # ── _fetch_posts_batch (async) ──────────────────────────────────────────
@@ -627,19 +673,21 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
                 "max_cursor": 0,
             }
 
-        process_batch = AsyncMock()
+        process_batch = AsyncMock(return_value=0)
         with patch.object(svc, "_fetch_posts_batch", side_effect=sticky_fetch):
             with patch.object(svc, "_process_posts_batch", new=process_batch):
                 await svc._run_bulk_download(
                     operation.operation_id, "sticky-user", 0, profile=profile
                 )
 
-        # max_pages = (100 // 20) * 2 + 20 = 30. The loop breaks when
-        # ``page_count > max_pages``, so call_count should be at most 31.
+        # The sticky cursor short-circuits the loop on the second
+        # iteration: page 1 is processed and persists progress, page 2
+        # detects ``next_cursor == current_cursor`` and breaks before
+        # ``_process_posts_batch`` is called again. Termination — not the
+        # batch count — is the contract we are asserting here.
         assert (
-            call_count <= 31
-        ), f"max_pages cap failed; loop ran {call_count} iterations"
-        # Forward progress was made before the cap kicked in.
+            call_count <= 2
+        ), f"sticky cursor cap failed; loop ran {call_count} iterations"
         assert process_batch.await_count == call_count
 
     refreshed = await svc.get_bulk_download_status(operation.operation_id)
@@ -773,8 +821,9 @@ async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
                 }
             raise RuntimeError("upstream blew up on page 2")
 
-        async def fake_process(posts: dict, stats: dict, _user_path: Path) -> None:
+        async def fake_process(posts: dict, stats: dict, _user_path: Path) -> int:
             stats[PostType.VIDEO] += len(posts.get("aweme_list", []))
+            return 0
 
         with patch.object(svc, "_fetch_posts_batch", side_effect=flaky_fetch):
             with patch.object(svc, "_process_posts_batch", side_effect=fake_process):
@@ -783,7 +832,7 @@ async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
                 )
 
     refreshed = await svc.get_bulk_download_status(operation.operation_id)
-    assert refreshed.status == DownloadStatus.PARTIAL_SUCCESS
+    assert refreshed.status == DownloadStatus.PARTIAL
     assert refreshed.total_downloaded == 3
     assert refreshed.error_details == "upstream blew up on page 2"
     assert refreshed.message == (
@@ -900,10 +949,11 @@ async def test_run_bulk_download_persists_runtime_download_stats(
         posts: dict[str, Any],
         download_stats: dict[PostType, int],
         path: Path,
-    ) -> None:
+    ) -> int:
         assert path == user_path
         download_stats[PostType.VIDEO] += 1
         download_stats[PostType.IMAGES] += 1
+        return 0
 
     monkeypatch.setattr(store, "update_operation", capture_update)
 
@@ -932,7 +982,9 @@ async def test_run_bulk_download_persists_runtime_download_stats(
     runtime_metadata = runtime_metadata_samples[-1]
     assert runtime_metadata is not None
     assert runtime_metadata["max_cursor"] == 0
-    assert runtime_metadata["download_path"] == str(user_path)
+    # ``download_path`` is now persisted relative to the configured
+    # download root so the public surface never leaks the absolute path.
+    assert runtime_metadata["download_path"] == user_path.name
     assert runtime_metadata["total_posts"] == 2
     assert runtime_metadata["download_stats"]["video"] == 1
     assert runtime_metadata["download_stats"]["images"] == 1
@@ -972,7 +1024,7 @@ async def test_get_bulk_download_status_returns_persisted_state(tmp_path) -> Non
 
     response = await svc.get_bulk_download_status(operation.operation_id)
     assert response.operation_id == operation.operation_id
-    assert response.status == DownloadStatus.IN_PROGRESS
+    assert response.status == DownloadStatus.RUNNING
     assert response.sec_user_id == "poll-user"
     assert response.download_path == "/tmp/poll-user"
     assert response.total_posts == 100
@@ -988,7 +1040,7 @@ async def test_get_bulk_download_status_raises_for_unknown_id(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
     svc = _build_service(operation_store=store)
 
-    with pytest.raises(DownloadError):
+    with pytest.raises(OperationNotFoundError):
         await svc.get_bulk_download_status("missing-id")
 
 
@@ -1005,5 +1057,62 @@ async def test_get_bulk_download_status_rejects_non_post_operation(
     )
 
     svc = _build_service(operation_store=store)
-    with pytest.raises(DownloadError):
+    with pytest.raises(OperationNotFoundError):
         await svc.get_bulk_download_status(operation.operation_id)
+
+
+# ── _process_posts_batch (real dispatch) ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_process_posts_batch_dispatches_by_type_and_counts_failures(
+    tmp_path,
+) -> None:
+    """The real ``_process_posts_batch`` must update counters and surface failures.
+
+    Most bulk-download tests stub ``_process_posts_batch`` out so the
+    dispatch / counter logic is unexercised. This test runs the real
+    implementation with only ``_download_post_content`` mocked so a
+    regression in per-type counting or failure accounting is caught.
+    """
+    handler = MagicMock()
+    handler.kwargs = {"mode": "all"}
+    handler.downloader = MagicMock()
+    handler.downloader.create_download_tasks = AsyncMock()
+
+    svc = _build_service(handler=handler)
+
+    download_stats: dict[PostType, int] = dict.fromkeys(PostType, 0)
+    user_path = tmp_path / "user"
+    user_path.mkdir()
+
+    posts = {
+        "aweme_list": [
+            {"aweme_id": "1", "aweme_type": 1},  # LIVE
+            {
+                "aweme_id": "2",
+                "video": {"play_addr": {"url_list": ["https://e/x"]}},
+            },  # VIDEO
+            {"aweme_id": "3", "images": [{"url_list": ["https://e/y"]}]},  # IMAGES
+            {"aweme_id": "4", "aweme_type": 1},  # LIVE that will fail
+        ]
+    }
+
+    call_count = {"n": 0}
+
+    async def fake_download(
+        post: dict[str, Any], post_type: PostType, target: Any
+    ) -> None:
+        call_count["n"] += 1
+        if post.get("aweme_id") == "4":
+            raise RuntimeError("simulated upstream failure")
+
+    svc._download_post_content = fake_download  # type: ignore[method-assign]
+
+    failed = await svc._process_posts_batch(posts, download_stats, user_path)
+
+    assert failed == 1
+    assert download_stats[PostType.LIVE] == 1
+    assert download_stats[PostType.VIDEO] == 1
+    assert download_stats[PostType.IMAGES] == 1
+    assert call_count["n"] == 4

@@ -15,10 +15,12 @@ wait for active downloads before reaping the executor pools.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import uuid
 from collections.abc import Coroutine
 from typing import Any
 
-from .logging import ContextLogger
+from .logging import ContextLogger, _correlation_id_var
 
 logger = ContextLogger(__name__)
 
@@ -51,12 +53,20 @@ class BackgroundTaskRegistry:
         coro: Coroutine[Any, Any, Any],
         *,
         name: str | None = None,
+        context: contextvars.Context | None = None,
     ) -> asyncio.Task[Any]:
         """Schedule ``coro`` on the running loop and track the resulting task.
 
         The task is auto-removed from the registry on completion via a
         done-callback, so the registry never retains a handle to a finished
         task.
+
+        Args:
+            coro: Coroutine to schedule.
+            name: Optional task name surfaced through ``Task.get_name``.
+            context: Optional ``contextvars.Context`` to pin the task to.
+                Used by :func:`spawn_or_fallback` to assign a fresh
+                correlation ID without mutating the caller's context.
 
         Raises:
             RuntimeError: If the registry has already been drained. The
@@ -69,7 +79,7 @@ class BackgroundTaskRegistry:
                 "BackgroundTaskRegistry is closed; cannot spawn new tasks "
                 "after drain has been entered"
             )
-        task = asyncio.create_task(coro, name=name)
+        task = asyncio.create_task(coro, name=name, context=context)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
@@ -127,6 +137,22 @@ class BackgroundTaskRegistry:
         return self._closed
 
 
+def _make_task_context(correlation_id: str) -> contextvars.Context:
+    """Return a snapshot of the current context with a fresh correlation ID.
+
+    ``asyncio.create_task(..., context=ctx)`` runs the task inside ``ctx``,
+    which keeps the spawning request's context untouched while giving the
+    background task its own correlation ID for log aggregation. Using a
+    context object avoids wrapping the coroutine in a second
+    ``async def`` whose own coroutine handle could trigger an
+    ``unawaited coroutine`` warning if the task is GC'd before the loop
+    schedules it.
+    """
+    ctx = contextvars.copy_context()
+    ctx.run(_correlation_id_var.set, correlation_id)
+    return ctx
+
+
 def spawn_or_fallback(
     registry: BackgroundTaskRegistry | None,
     coro: Coroutine[Any, Any, Any],
@@ -141,17 +167,18 @@ def spawn_or_fallback(
     each new long-lived service from hand-rolling the same ``if registry is
     not None`` pattern.
 
-    The fallback path is intended for unit tests that exercise services in
-    isolation. Production services constructed via ``ServiceContainer`` always
-    receive a real registry; a missing registry there means the spawned task
-    will not be drained on shutdown and may be cancelled mid-flight. Logging
-    a warning makes the misconfiguration observable instead of silent.
+    Each spawned task gets its own correlation ID so background work does
+    not pollute the spawning request's log timeline. The ID lives in a
+    cloned ``contextvars.Context`` passed to ``asyncio.create_task`` so
+    the spawning request's context is left untouched.
     """
+    correlation_id = name or f"task-{uuid.uuid4()}"
+    task_context = _make_task_context(correlation_id)
     if registry is not None:
-        return registry.spawn(coro, name=name)
+        return registry.spawn(coro, name=name, context=task_context)
     logger.warning(
         "spawn_or_fallback invoked without a BackgroundTaskRegistry; the "
         "task will not be drained on shutdown",
         extra={"task_name": name},
     )
-    return asyncio.create_task(coro, name=name)
+    return asyncio.create_task(coro, name=name, context=task_context)

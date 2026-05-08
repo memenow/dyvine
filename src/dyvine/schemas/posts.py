@@ -13,6 +13,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from .operations import OperationStatus
+
 
 class PostType(StrEnum):
     """Enumeration of possible post content types.
@@ -36,22 +38,11 @@ class PostType(StrEnum):
     UNKNOWN = "unknown"
 
 
-class DownloadStatus(StrEnum):
-    """Enumeration of possible download operation statuses.
-
-    Attributes:
-        PENDING: Bulk download has been scheduled but not yet started
-        IN_PROGRESS: Bulk download is currently executing
-        SUCCESS: All content downloaded successfully
-        PARTIAL_SUCCESS: Some content downloaded successfully
-        FAILED: No content downloaded successfully
-    """
-
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    SUCCESS = "success"
-    PARTIAL_SUCCESS = "partial_success"
-    FAILED = "failed"
+# Backwards-compatible alias for the canonical operation status enum. The
+# router/service layers stored these values as raw strings before the
+# ``OperationStatus`` consolidation; keeping the alias avoids touching
+# every import site while still routing through one source of truth.
+DownloadStatus = OperationStatus
 
 
 class PostBase(BaseModel):
@@ -120,6 +111,36 @@ class PostDetail(PostBase):
     )
 
 
+class ListPostsResponse(BaseModel):
+    """Paginated wrapper for ``GET /posts/users/{user_id}/posts``.
+
+    The shape follows Google AIP-158: callers iterate by passing the
+    opaque ``next_page_token`` back into the request, and stop when the
+    field is ``None``. ``total_size`` is best-effort metadata sourced
+    from the upstream profile and is not authoritative for hidden or
+    geo-blocked posts.
+    """
+
+    posts: list[PostDetail] = Field(
+        default_factory=list, description="Post records on this page"
+    )
+    next_page_token: str | None = Field(
+        None,
+        description=(
+            "Opaque cursor for the next page. ``None`` when the feed is " "exhausted."
+        ),
+    )
+    total_size: int | None = Field(
+        None,
+        description=(
+            "Best-effort total number of posts available, when the upstream "
+            "profile provides a count."
+        ),
+    )
+
+    model_config = ConfigDict()
+
+
 class BulkDownloadResponse(BaseModel):
     """Response model for bulk download operations.
 
@@ -129,6 +150,7 @@ class BulkDownloadResponse(BaseModel):
         download_path: Local path where content was saved
         total_posts: Total number of posts available
         downloaded_count: Count of downloads by post type
+        failed_count: Count of posts that failed to download
         total_downloaded: Total number of successful downloads
         status: Overall download operation status
         message: Human-readable status message
@@ -139,7 +161,10 @@ class BulkDownloadResponse(BaseModel):
     sec_user_id: str = Field(..., description="Target user's identifier")
     download_path: str | None = Field(
         default=None,
-        description="Local path where content was saved",
+        description=(
+            "Path to the downloaded artefacts, expressed relative to the "
+            "configured download root."
+        ),
     )
     total_posts: int = Field(default=0, description="Total number of posts available")
     downloaded_count: dict[PostType, int] = Field(
@@ -154,10 +179,16 @@ class BulkDownloadResponse(BaseModel):
         },
         description="Count of downloads by post type",
     )
+    failed_count: int = Field(
+        default=0,
+        description="Posts encountered during the run that failed to download",
+    )
     total_downloaded: int = Field(
         default=0, description="Total number of successful downloads"
     )
-    status: DownloadStatus = Field(..., description="Overall download operation status")
+    status: OperationStatus = Field(
+        ..., description="Overall download operation status"
+    )
     message: str | None = Field(None, description="Human-readable status message")
     error_details: str | None = Field(
         None, description="Details of any errors encountered"

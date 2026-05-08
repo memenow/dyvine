@@ -132,6 +132,36 @@ async def test_spawn_or_fallback_falls_back_to_create_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawn_or_fallback_isolates_correlation_id() -> None:
+    """Background tasks must run with a fresh correlation ID.
+
+    The spawning context's ``_correlation_id_var`` is captured by
+    ``contextvars.copy_context()``, then the snapshot is mutated to
+    hold a per-task ID before ``asyncio.create_task(..., context=...)``
+    runs the coroutine. The caller's context must remain unchanged
+    after ``spawn_or_fallback`` returns so request-scoped logging is
+    not contaminated by background work.
+    """
+    from dyvine.core.logging import _correlation_id_var, set_correlation_id
+
+    set_correlation_id("request-abc")
+    try:
+        captured: dict[str, str | None] = {}
+
+        async def record_id() -> None:
+            captured["task"] = _correlation_id_var.get()
+
+        task = spawn_or_fallback(None, record_id(), name="task-xyz")
+        await task
+
+        assert captured["task"] == "task-xyz"
+        # Caller's context must be untouched by the spawn.
+        assert _correlation_id_var.get() == "request-abc"
+    finally:
+        set_correlation_id(None)
+
+
+@pytest.mark.asyncio
 async def test_is_closed_property_reflects_drain_state() -> None:
     """``is_closed`` lets callers probe the registry without raising."""
     # No tracked tasks, so ``drain_timeout`` is irrelevant; use the default.

@@ -422,11 +422,25 @@ async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
+    """An in-flight job for the same room must short-circuit a new request.
+
+    The lock-protected check now inspects ``task.done()`` so a finished
+    task that has not yet been popped from ``download_jobs`` is treated
+    as cleared. The test injects an in-progress task to simulate the
+    racing case the lock guards against.
+    """
     store = OperationStore(str(tmp_path / "operations.db"))
     service = object.__new__(LivestreamService)
     service.settings = SimpleNamespace(douyin_cookie="cookie")
     service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
-    service.download_jobs = {"room-42": object()}
+
+    inflight_event = asyncio.Event()
+
+    async def _busy() -> None:
+        await inflight_event.wait()
+
+    inflight_task = asyncio.create_task(_busy())
+    service.download_jobs = {"room-42": inflight_task}
     service.user_service = None
     service.operation_store = store
     service.douyin_handler = None
@@ -447,8 +461,12 @@ async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
     )
     service._select_stream_url = lambda stream_map: "https://stream"  # type: ignore[method-assign]
 
-    with pytest.raises(LivestreamError, match="Already downloading this stream"):
-        await service.download_stream("https://live.douyin.com/abc")
+    try:
+        with pytest.raises(LivestreamError, match="Already downloading this stream"):
+            await service.download_stream("https://live.douyin.com/abc")
+    finally:
+        inflight_event.set()
+        await inflight_task
 
 
 @pytest.mark.asyncio
@@ -483,13 +501,14 @@ async def test_get_download_status_rejects_non_livestream_operation(tmp_path) ->
     service = object.__new__(LivestreamService)
     service.operation_store = store
 
-    with pytest.raises(livestreams_mod.DownloadError):
+    with pytest.raises(livestreams_mod.OperationNotFoundError):
         await service.get_download_status(operation.operation_id)
 
 
 @pytest.mark.asyncio
 async def test_download_stream_serializes_concurrent_requests_same_room(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two concurrent callers for the same room must not both schedule a job.
 
@@ -498,6 +517,15 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
     succeed, the other must raise ``LivestreamError``, and only a single
     operation record must exist for the room.
     """
+    # The path_safety jail rejects absolute or escaped output paths, so
+    # repoint ``download_root`` to the test's tmp_path before calling
+    # download_stream so the relative subdir is accepted.
+    from dyvine.core import path_safety
+    from dyvine.core.settings import settings as live_settings
+
+    monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
+    monkeypatch.setattr(path_safety.settings.douyin, "download_root", str(tmp_path))
+
     store = OperationStore(str(tmp_path / "operations.db"))
     service = object.__new__(LivestreamService)
     service.settings = SimpleNamespace(douyin_cookie="cookie")
@@ -552,11 +580,11 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
         results = await asyncio.gather(
             service.download_stream(
                 "https://live.douyin.com/abc",
-                output_path=str(tmp_path / "dl"),
+                output_path="dl",
             ),
             service.download_stream(
                 "https://live.douyin.com/abc",
-                output_path=str(tmp_path / "dl"),
+                output_path="dl",
             ),
             return_exceptions=True,
         )

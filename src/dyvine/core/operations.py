@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .exceptions import DownloadError
+from .exceptions import OperationNotFoundError
 from .settings import settings
 
 _R = TypeVar("_R")
@@ -533,7 +533,7 @@ class OperationStore:
         ).fetchone()
         operation = self._from_row(row)
         if operation is None:
-            raise DownloadError(f"Operation {operation_id} not found")
+            raise OperationNotFoundError(f"Operation {operation_id} not found")
         return operation
 
     async def get_latest_operation_for_subject(
@@ -574,7 +574,7 @@ class OperationStore:
         row = connection.execute(query, params).fetchone()
         operation = self._from_row(row)
         if operation is None:
-            raise DownloadError(f"Operation {subject_id} not found")
+            raise OperationNotFoundError(f"Operation {subject_id} not found")
         return operation
 
     async def update_operation(
@@ -586,7 +586,6 @@ class OperationStore:
     def _update_operation_sync(
         self, operation_id: str, **fields: Any
     ) -> OperationRecord:
-        current = self._get_operation_sync(operation_id)
         allowed_fields = {
             "status",
             "message",
@@ -597,30 +596,74 @@ class OperationStore:
             "error",
             "metadata",
         }
-        updates = {key: value for key, value in fields.items() if key in allowed_fields}
-        if not updates:
-            return current
+        requested = {
+            key: value for key, value in fields.items() if key in allowed_fields
+        }
 
-        updates["updated_at"] = self._now()
-        if "metadata" not in updates:
-            updates["metadata"] = current.metadata
-
-        assignments = ", ".join(f"{column} = ?" for column in updates)
-        values = [
-            json.dumps(value, sort_keys=True) if key == "metadata" else value
-            for key, value in updates.items()
-        ]
-        values.append(operation_id)
-
+        # The whole read-modify-write-readback cycle runs under
+        # ``self._lock`` so two concurrent updates cannot interleave and
+        # the returned record is guaranteed to reflect THIS update — not
+        # whatever a racing winner happened to commit between our UPDATE
+        # and a post-lock reread. The metadata-preservation branch only
+        # SELECTs when the caller did not pass an explicit ``metadata``
+        # value; otherwise we just verify the row exists. ``RETURNING *``
+        # then both confirms the UPDATE matched a row and gives us the
+        # post-write snapshot in one round trip.
         with self._lock:
             connection = self._writer_connection()
-            connection.execute(
-                f"UPDATE operations SET {assignments} WHERE operation_id = ?",
+
+            preserved_metadata: dict[str, Any] | None = None
+            if requested and "metadata" not in requested:
+                row = connection.execute(
+                    "SELECT metadata FROM operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None:
+                    raise OperationNotFoundError(f"Operation {operation_id} not found")
+                stored = row["metadata"] if "metadata" in row.keys() else None
+                preserved_metadata = json.loads(str(stored)) if stored else {}
+            elif not requested:
+                # Fast-path verification: the caller passed only unknown
+                # field names, so the operation must exist but no UPDATE
+                # is needed. Return the current state under the lock so
+                # we still serialise with concurrent writers.
+                row = connection.execute(
+                    "SELECT * FROM operations WHERE operation_id = ?",
+                    (operation_id,),
+                ).fetchone()
+                if row is None:
+                    raise OperationNotFoundError(f"Operation {operation_id} not found")
+                operation = self._from_row(row)
+                assert operation is not None
+                return operation
+
+            updates: dict[str, Any] = dict(requested)
+            updates["updated_at"] = self._now()
+            if preserved_metadata is not None:
+                updates["metadata"] = preserved_metadata
+
+            assignments = ", ".join(f"{column} = ?" for column in updates)
+            values: list[Any] = [
+                json.dumps(value, sort_keys=True) if key == "metadata" else value
+                for key, value in updates.items()
+            ]
+            values.append(operation_id)
+
+            cursor = connection.execute(
+                f"UPDATE operations SET {assignments} "
+                f"WHERE operation_id = ? RETURNING *",
                 values,
             )
+            updated = cursor.fetchone()
             connection.commit()
-
-        return self._get_operation_sync(operation_id)
+            if updated is None:
+                # ``RETURNING`` yields zero rows when the WHERE matched
+                # nothing — the row vanished between the existence
+                # probe (when we ran one) and the UPDATE.
+                raise OperationNotFoundError(f"Operation {operation_id} not found")
+            operation = self._from_row(updated)
+            assert operation is not None
+            return operation
 
     async def mark_incomplete_operations_failed(self) -> int:
         """Mark stale pending/running operations as interrupted.

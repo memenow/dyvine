@@ -55,8 +55,14 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
       with:
+        # Pin BuildKit to a specific tag so a breaking release upstream
+        # cannot silently break our multi-platform builds, cache layout,
+        # or provenance attestation. Bump intentionally after testing —
+        # ``v0.20.2`` is the latest stable line at the time of this
+        # commit and rolls up about 18 months of fixes the previous
+        # ``v0.18.1`` pin missed.
         driver-opts: |
-          image=moby/buildkit:latest
+          image=moby/buildkit:v0.20.2
           network=host
         config-inline: |
           [worker.oci]

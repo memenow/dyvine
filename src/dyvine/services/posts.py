@@ -18,6 +18,7 @@ The module also defines custom exceptions related to post operations, such as
 PostNotFoundError, UserNotFoundError, and DownloadError.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
-    DownloadError,
+    OperationNotFoundError,
     PostNotFoundError,
     ServiceError,
     UserNotFoundError,
@@ -35,6 +36,7 @@ from ..core.exceptions import (
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
+from ..core.path_safety import relative_to_download_root
 from ..schemas.posts import (
     BulkDownloadResponse,
     DownloadStatus,
@@ -55,6 +57,22 @@ PostServiceError = ServiceError
 # spinning forever. The fallback covers ``MAX_PAGES_FALLBACK * PAGE_SIZE``
 # items when ``total_posts`` is unknown.
 PAGE_SIZE = 20
+
+
+@dataclass(slots=True)
+class UserPostsPage:
+    """Single-page result from :meth:`PostService.get_user_posts`.
+
+    Carries both the materialised ``PostDetail`` items and the raw
+    upstream cursor needed to fetch the next page. Routers wrap the
+    cursor in an opaque token; service callers receive the integer
+    Douyin cursor verbatim. ``next_cursor`` is ``None`` when the feed
+    is exhausted (``has_more=False`` upstream).
+    """
+
+    posts: list[PostDetail]
+    next_cursor: int | None
+    has_more: bool
 
 
 class PostService:
@@ -160,23 +178,28 @@ class PostService:
         sec_user_id: str,
         max_cursor: int = 0,
         count: int = 20,
-    ) -> list[PostDetail]:
+    ) -> UserPostsPage:
         """Retrieve a paginated list of posts from a Douyin user.
 
         ``count`` is intentionally a literal default rather than the
         module-level :data:`PAGE_SIZE`. The latter binds the bulk
-        download loop guard to the fetcher used by ``_fetch_posts_batch``;
-        this single-page API is a public read endpoint whose contract
-        should not silently change if a future tuning PR adjusts
-        :data:`PAGE_SIZE`.
+        download loop guard to the fetcher used by
+        ``_fetch_posts_batch``; this single-page API is a public read
+        endpoint whose contract should not silently change if a future
+        tuning PR adjusts :data:`PAGE_SIZE`.
 
         Args:
             sec_user_id: Unique identifier of the user.
-            max_cursor: Pagination cursor for fetching the next batch of posts.
+            max_cursor: Douyin pagination cursor for fetching the next
+                batch of posts. ``0`` requests the first page.
             count: Number of posts to fetch per page.
 
         Returns:
-            List[PostDetail]: List of PostDetail objects representing the user's posts.
+            UserPostsPage: Materialised posts plus the raw upstream
+            ``max_cursor`` for the next request. Callers must echo
+            ``next_cursor`` back unchanged on the follow-up call;
+            offset arithmetic on it does not produce a valid Douyin
+            cursor.
 
         Raises:
             UserNotFoundError: If the requested user cannot be found.
@@ -200,7 +223,7 @@ class PostService:
                 posts_filter = await posts_iterator.__anext__()
             except StopAsyncIteration:
                 logger.warning("No posts found", extra={"sec_user_id": sec_user_id})
-                return []
+                return UserPostsPage(posts=[], next_cursor=None, has_more=False)
             finally:
                 aclose = getattr(posts_iterator, "aclose", None)
                 if callable(aclose):
@@ -209,18 +232,31 @@ class PostService:
             raw_data = posts_filter._to_raw()
             aweme_list = raw_data.get("aweme_list") or []
 
+            has_more = bool(raw_data.get("has_more"))
+            raw_next = raw_data.get("max_cursor")
+            next_cursor: int | None
+            if has_more and isinstance(raw_next, int):
+                # The upstream cursor is a Douyin-defined sentinel, not
+                # an offset; stuck cursors (``raw_next == max_cursor``)
+                # mean the feed is exhausted and we expose ``None`` so
+                # the router does not invite the caller to re-fetch the
+                # same window.
+                next_cursor = raw_next if raw_next != max_cursor else None
+            else:
+                next_cursor = None
+
             if not aweme_list:
                 logger.warning(
                     "User posts response empty",
                     extra={
                         "sec_user_id": sec_user_id,
-                        "has_more": raw_data.get("has_more"),
+                        "has_more": has_more,
                         "status_msg": raw_data.get("status_msg"),
                     },
                 )
-                return []
+                return UserPostsPage(posts=[], next_cursor=next_cursor, has_more=False)
 
-            return [
+            posts = [
                 PostDetail(
                     aweme_id=post["aweme_id"],
                     desc=post.get("desc", ""),
@@ -232,6 +268,12 @@ class PostService:
                 )
                 for post in aweme_list
             ]
+
+            return UserPostsPage(
+                posts=posts,
+                next_cursor=next_cursor,
+                has_more=has_more and next_cursor is not None,
+            )
 
         except UserNotFoundError:
             raise
@@ -354,6 +396,7 @@ class PostService:
         download_path: str | None = None
         batch_errored = False
         batch_error_message: str | None = None
+        failed_count = 0
 
         aweme_count = getattr(profile, "aweme_count", 0)
         total_posts = aweme_count if isinstance(aweme_count, int) else 0
@@ -397,7 +440,10 @@ class PostService:
                 user_path = await self.handler.get_or_add_user_data(
                     self.handler.kwargs, sec_user_id, db
                 )
-                download_path = str(user_path)
+                # Persist the path relative to the configured download
+                # root so the public API surface never leaks the on-disk
+                # absolute layout.
+                download_path = relative_to_download_root(user_path)
                 logger.info(
                     "Download directory created",
                     extra={"download_path": download_path},
@@ -456,7 +502,10 @@ class PostService:
                         )
                         break
 
-                    await self._process_posts_batch(posts, download_stats, user_path)
+                    batch_failures = await self._process_posts_batch(
+                        posts, download_stats, user_path
+                    )
+                    failed_count += batch_failures
                     total_downloaded = sum(download_stats.values())
 
                     progress: float | None
@@ -474,6 +523,7 @@ class PostService:
                             "download_stats": _serialize_download_stats(download_stats),
                             "download_path": download_path,
                             "total_posts": total_posts,
+                            "failed_count": failed_count,
                         },
                     }
                     if progress is not None:
@@ -490,7 +540,21 @@ class PostService:
                         break
 
                     if next_cursor == current_cursor:
-                        next_cursor = current_cursor + 1
+                        # The server replied with the same cursor it
+                        # accepted; advancing to ``current_cursor + 1``
+                        # used to spin through the same page repeatedly
+                        # because the upstream API treats the synthetic
+                        # cursor as out-of-range and returns the
+                        # original window. Treat a sticky cursor as the
+                        # end of the feed instead.
+                        logger.info(
+                            "Upstream cursor stuck; ending pagination",
+                            extra={
+                                "cursor": current_cursor,
+                                "operation_id": operation_id,
+                            },
+                        )
+                        break
 
                     current_cursor = next_cursor
                     logger.info("Moving to next page", extra={"cursor": current_cursor})
@@ -527,6 +591,7 @@ class PostService:
                     "download_stats": _serialize_download_stats(download_stats),
                     "download_path": download_path,
                     "total_posts": total_posts,
+                    "failed_count": failed_count,
                 },
             )
             return
@@ -549,6 +614,7 @@ class PostService:
                     "download_stats": _serialize_download_stats(download_stats),
                     "download_path": download_path,
                     "total_posts": total_posts,
+                    "failed_count": failed_count,
                 },
             )
             return
@@ -609,6 +675,7 @@ class PostService:
                 "download_stats": _serialize_download_stats(download_stats),
                 "download_path": download_path,
                 "total_posts": total_posts,
+                "failed_count": failed_count,
             },
         )
 
@@ -623,16 +690,17 @@ class PostService:
                 per-PostType counts persisted in the operation metadata.
 
         Raises:
-            DownloadError: If no bulk download operation matches the
+            OperationNotFoundError: If no bulk download operation matches the
                 provided identifier.
         """
-        # ``OperationStore.get_operation`` already raises ``DownloadError``
-        # with a descriptive message when the row is missing; re-wrapping
-        # here would just discard the original ``error_code`` and ``details``.
+        # ``OperationStore.get_operation`` already raises
+        # ``OperationNotFoundError`` with a descriptive message when the
+        # row is missing; re-wrapping here would just discard the
+        # original ``error_code`` and ``details``.
         op = await self.operation_store.get_operation(operation_id)
 
         if op.operation_type != "user_posts_bulk_download":
-            raise DownloadError(f"Bulk download task {operation_id} not found")
+            raise OperationNotFoundError(f"Bulk download task {operation_id} not found")
 
         download_stats = _deserialize_download_stats(op.metadata)
         total_posts = int(op.total_items or op.metadata.get("total_posts") or 0)
@@ -641,6 +709,7 @@ class PostService:
             total_downloaded = max(total_downloaded, int(op.completed_items))
 
         download_path = op.download_path or op.metadata.get("download_path")
+        failed_count = int(op.metadata.get("failed_count") or 0)
 
         status = _operation_status_to_download_status(op.status)
         message = op.message or _build_bulk_message(
@@ -653,6 +722,7 @@ class PostService:
             download_path=download_path,
             total_posts=total_posts,
             downloaded_count=download_stats,
+            failed_count=failed_count,
             total_downloaded=total_downloaded,
             status=status,
             message=message,
@@ -666,15 +736,12 @@ class PostService:
     ) -> dict[str, Any]:
         """Fetch a batch of posts from a user.
 
-        Args:
-            sec_user_id (str): Unique identifier of the user.
-            cursor (int): Pagination cursor for fetching the next batch of
-                posts.
-
-        Returns:
-            Dict[str, Any]: Dictionary containing the fetched posts and
-                pagination information. Returns an empty dictionary if no
-                posts are found for the given user and cursor.
+        Returns an empty dict only when the upstream feed is exhausted
+        (``StopAsyncIteration``). Any other exception propagates so the
+        caller's ``batch_errored`` accounting in ``_run_bulk_download``
+        can record the failure and the operation lands in a clear
+        ``partial`` / ``failed`` terminal state instead of a silent clean
+        break.
         """
         logger.info(
             "Fetching posts batch", extra={"sec_user_id": sec_user_id, "cursor": cursor}
@@ -685,16 +752,11 @@ class PostService:
         )
 
         try:
-            posts_filter = await posts_iterator.__anext__()
+            try:
+                posts_filter = await posts_iterator.__anext__()
+            except StopAsyncIteration:
+                return {}
             return dict(posts_filter._to_dict())
-        except StopAsyncIteration:
-            return {}
-        except Exception as e:
-            logger.exception(
-                "Error fetching posts batch",
-                extra={"sec_user_id": sec_user_id, "cursor": cursor, "error": str(e)},
-            )
-            return {}
         finally:
             aclose = getattr(posts_iterator, "aclose", None)
             if callable(aclose):
@@ -705,19 +767,26 @@ class PostService:
         posts: dict[str, Any],
         download_stats: dict[PostType, int],
         user_path: Path,
-    ) -> None:
+    ) -> int:
         """Process and download a batch of posts.
 
         Args:
-            posts (Dict[str, Any]): Dictionary containing the batch of posts.
-            download_stats (Dict[PostType, int]): Dictionary for tracking the
-                download statistics for each post type.
-            user_path (Path): Path to the user's directory for saving
-                downloaded content.
+            posts: Dictionary containing the batch of posts.
+            download_stats: Dictionary for tracking the download statistics
+                for each post type. Mutated in place.
+            user_path: Path to the user's directory for saving downloaded
+                content.
+
+        Returns:
+            Number of posts in this batch that failed to download. The
+            caller adds this to a running ``failed_count`` so the
+            terminal operation record exposes how many items were
+            skipped.
         """
         post_list = posts.get("aweme_list", [])
         logger.info("Processing posts batch", extra={"post_count": len(post_list)})
 
+        failed = 0
         for post in post_list:
             try:
                 post_type = self._determine_post_type(post)
@@ -725,10 +794,12 @@ class PostService:
                 download_stats[post_type] += 1
 
             except Exception as e:
+                failed += 1
                 logger.error(
                     "Error processing post",
                     extra={"aweme_id": post.get("aweme_id"), "error": str(e)},
                 )
+        return failed
 
     def _determine_post_type(self, post: dict[str, Any]) -> PostType:
         """Determine the type of a Douyin post.
@@ -915,15 +986,24 @@ def _deserialize_download_stats(
 
 
 def _operation_status_to_download_status(status: str) -> DownloadStatus:
-    """Translate persisted operation status to public download status."""
-    mapping = {
-        "pending": DownloadStatus.PENDING,
-        "running": DownloadStatus.IN_PROGRESS,
-        "completed": DownloadStatus.SUCCESS,
-        "partial": DownloadStatus.PARTIAL_SUCCESS,
-        "failed": DownloadStatus.FAILED,
+    """Translate persisted operation status to public download status.
+
+    ``DownloadStatus`` is an alias for ``OperationStatus`` so the
+    persisted strings round-trip directly. Legacy values from before the
+    consolidation (``in_progress`` / ``success`` / ``partial_success``)
+    are remapped to their canonical equivalents so old operation records
+    keep deserialising cleanly.
+    """
+    legacy = {
+        "in_progress": DownloadStatus.RUNNING,
+        "success": DownloadStatus.COMPLETED,
+        "partial_success": DownloadStatus.PARTIAL,
     }
-    return mapping.get(status, DownloadStatus.FAILED)
+    canonical = legacy.get(status, status)
+    try:
+        return DownloadStatus(canonical)
+    except ValueError:
+        return DownloadStatus.FAILED
 
 
 def _build_bulk_message(

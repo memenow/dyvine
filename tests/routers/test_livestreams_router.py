@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from dyvine.core.exceptions import UserNotFoundError
+from dyvine.core.exceptions import OperationNotFoundError, UserNotFoundError
 from dyvine.schemas.livestreams import (
     LiveStreamDownloadResponse,
     LiveStreamURLDownloadRequest,
@@ -55,7 +55,7 @@ async def test_download_livestream_user_not_found(
     mock_livestream_service.download_stream.side_effect = UserNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream(service=mock_livestream_service, user_id="bad")
+        await download_livestream(service=mock_livestream_service, user_id="user01")
     assert exc_info.value.status_code == 404
 
 
@@ -68,7 +68,7 @@ async def test_download_livestream_download_error(
     mock_livestream_service.download_stream.side_effect = DownloadError("fail")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_livestream(service=mock_livestream_service, user_id="u1")
+        await download_livestream(service=mock_livestream_service, user_id="user01")
     assert exc_info.value.status_code == 500
 
 
@@ -174,8 +174,12 @@ async def test_get_download_status_not_found(
 ) -> None:
     from dyvine.routers.livestreams import get_download_status
 
-    mock_livestream_service.get_download_status.side_effect = DownloadError("nf")
+    mock_livestream_service.get_download_status.side_effect = OperationNotFoundError(
+        "nf"
+    )
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_download_status(service=mock_livestream_service, operation_id="bad")
+        await get_download_status(
+            service=mock_livestream_service, operation_id="op-12345"
+        )
     assert exc_info.value.status_code == 404

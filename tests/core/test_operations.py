@@ -10,7 +10,7 @@ from contextlib import closing
 
 import pytest
 
-from dyvine.core.exceptions import DownloadError
+from dyvine.core.exceptions import OperationNotFoundError
 from dyvine.core.operations import OperationStore
 
 
@@ -61,7 +61,7 @@ async def test_operation_store_update_operation(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_operation_store_missing_operation_raises(tmp_path) -> None:
     store = OperationStore(str(tmp_path / "operations.db"))
-    with pytest.raises(DownloadError):
+    with pytest.raises(OperationNotFoundError):
         await store.get_operation("missing")
 
 
@@ -251,7 +251,7 @@ async def test_operation_store_latest_missing_raises(tmp_path) -> None:
     """
     store = OperationStore(str(tmp_path / "operations.db"))
 
-    with pytest.raises(DownloadError, match="unknown-subject"):
+    with pytest.raises(OperationNotFoundError, match="unknown-subject"):
         await store.get_latest_operation_for_subject("unknown-subject")
 
 
@@ -345,11 +345,112 @@ async def test_operation_store_concurrent_reads_do_not_serialize(tmp_path) -> No
 
     assert len(results) == reader_count
     # Serialized execution would take at least ``reader_count *
-    # slow_read_delay`` seconds. A healthy concurrent run finishes in a
-    # small multiple of one read. We allow generous slack so the test
-    # does not flake on slow CI while still catching accidental
-    # serialization (which would take >= 400 ms for 8 readers at 50 ms).
-    assert elapsed < slow_read_delay * reader_count / 2
+    # slow_read_delay`` seconds (~400 ms for 8 readers at 50 ms). A
+    # healthy concurrent run finishes in a small multiple of a single
+    # read. The threshold is expressed as a coarse multiple of one read
+    # rather than a tight absolute wall-clock window so the assertion
+    # catches accidental serialization without flaking on slow CI
+    # runners that pay extra scheduling overhead.
+    assert elapsed < slow_read_delay * 4, (
+        f"Concurrent reads appear to serialize: elapsed={elapsed:.3f}s, "
+        f"single-read budget={slow_read_delay}s"
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_operation_raises_when_row_missing(tmp_path) -> None:
+    """``update_operation`` on a vanished row must surface as 404.
+
+    ``OperationNotFoundError`` is a ``NotFoundError`` so the global
+    handler / ``handle_errors`` decorator map it to HTTP 404. This
+    contract is what lets the router status endpoint return a clean
+    "operation not found" response when the persistence backend is
+    pruned mid-flight; without it the loud ``RETURNING *`` failure
+    would surface as 500.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    with pytest.raises(OperationNotFoundError):
+        await store.update_operation("ghost-id", status="failed")
+
+
+@pytest.mark.asyncio
+async def test_update_operation_returns_record_reflecting_this_write(
+    tmp_path,
+) -> None:
+    """The returned record must contain the values this caller just wrote.
+
+    The pre-fix shape did the post-write SELECT outside the writer
+    lock, so a racing winner could replace the row between our UPDATE
+    and the readback and the caller would receive the winner's record
+    instead of its own. The atomic ``UPDATE ... RETURNING *`` pulls the
+    snapshot inside the same transaction.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    created = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-returning",
+        status="pending",
+        message="scheduled",
+    )
+
+    result = await store.update_operation(
+        created.operation_id,
+        status="running",
+        message="now running",
+        progress=42.0,
+    )
+
+    assert result.status == "running"
+    assert result.message == "now running"
+    assert result.progress == 42.0
+    # And the same record is returned by a fresh read so the writer
+    # reader paths agree on the post-update state.
+    refreshed = await store.get_operation(created.operation_id)
+    assert refreshed.status == result.status
+    assert refreshed.message == result.message
+    assert refreshed.progress == result.progress
+
+
+@pytest.mark.asyncio
+async def test_operation_store_concurrent_metadata_updates_do_not_lose_writes(
+    tmp_path,
+) -> None:
+    """Two concurrent metadata writers must not silently overwrite each other.
+
+    The previous ``_update_operation_sync`` shape read ``current.metadata``
+    outside the writer lock and copied it into the UPDATE statement, so a
+    racing writer that committed between the read and the lock acquisition
+    was reverted by the loser's stale metadata. The atomic implementation
+    reads + writes inside the lock so both updates persist their own
+    metadata field — the test asserts that one of the two wins cleanly
+    rather than the row coming back with empty/missing metadata.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    created = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-meta-race",
+        status="pending",
+        message="scheduled",
+        metadata={"phase": "init"},
+    )
+
+    executor = ThreadPoolExecutor(max_workers=4)
+    try:
+        store.set_executor(executor)
+
+        async def writer(value: str) -> None:
+            for _ in range(10):
+                await store.update_operation(
+                    created.operation_id, metadata={"phase": value}
+                )
+
+        await asyncio.gather(writer("worker-a"), writer("worker-b"))
+    finally:
+        store.set_executor(None)
+        executor.shutdown(wait=True)
+
+    final = await store.get_operation(created.operation_id)
+    assert final.metadata.get("phase") in {"worker-a", "worker-b"}
 
 
 @pytest.mark.asyncio

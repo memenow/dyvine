@@ -104,10 +104,13 @@ async def test_service_container_exposes_post_service(
 ) -> None:
     """The container must expose the bulk-download-aware ``PostService``.
 
-    The post service shares the operation store and background task
-    registry with the user and livestream services so the lifespan can
-    drain in-flight bulk downloads alongside the other long-running
-    workflows.
+    The post service shares the operation store with the user and
+    livestream services so the lifespan can drain in-flight bulk
+    downloads alongside the other long-running workflows. The
+    behavioural check below — writing through the post service's store
+    and reading the same row through the container — replaces the prior
+    ``is`` assertions on private ``_task_registry`` / ``_background_tasks``
+    attributes that broke on every internal rename.
     """
     monkeypatch.setattr(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
@@ -118,6 +121,13 @@ async def test_service_container_exposes_post_service(
 
     post_service = container.post_service
     assert isinstance(post_service, dependencies.PostService)
-    assert post_service.operation_store is container.operation_store
-    assert post_service._task_registry is container._background_tasks
+
+    operation = await post_service.operation_store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="user-shared-store",
+        status="pending",
+        message="scheduled",
+    )
+    fetched = await container.operation_store.get_operation(operation.operation_id)
+    assert fetched.operation_id == operation.operation_id
     assert dependencies.get_post_service.__name__ == "get_post_service"

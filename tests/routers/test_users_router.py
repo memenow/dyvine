@@ -5,8 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from dyvine.core.exceptions import OperationNotFoundError
 from dyvine.schemas.users import DownloadResponse, UserResponse
-from dyvine.services.users import DownloadError, UserNotFoundError
+from dyvine.services.users import UserNotFoundError
 
 
 @pytest.fixture
@@ -118,8 +119,8 @@ async def test_get_operation_success(mock_user_service: MagicMock) -> None:
 async def test_get_operation_not_found(mock_user_service: MagicMock) -> None:
     from dyvine.routers.users import get_operation
 
-    mock_user_service.get_download_status.side_effect = DownloadError("nf")
+    mock_user_service.get_download_status.side_effect = OperationNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_operation(operation_id="bad", service=mock_user_service)
+        await get_operation(operation_id="missing-op", service=mock_user_service)
     assert exc_info.value.status_code == 404

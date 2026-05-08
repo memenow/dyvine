@@ -41,6 +41,24 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+    # IMPORTANT: On Calico in strict mode or Cilium with
+    # ``--policy-enforcement=always`` the kubelet/apiserver health
+    # probes originate from the node IP rather than a pod, so the
+    # ``namespaceSelector`` rule above does NOT match them and the
+    # probes are silently dropped. Operators running such CNIs must
+    # apply a kustomize patch that appends an ``ipBlock`` rule
+    # covering the cluster's node CIDR(s), e.g.::
+    #
+    #     - from:
+    #         - ipBlock:
+    #             cidr: 10.244.0.0/16  # ← actual node CIDR
+    #       ports:
+    #         - protocol: TCP
+    #           port: 8000
+    #
+    # The base manifest leaves the node CIDR unspecified so a wrong
+    # default cannot turn into a generic ingress back door; resolve
+    # the value with ``kubectl get nodes -o wide``.
 ---
 # Egress policy for the dyvine-api Pods.
 #

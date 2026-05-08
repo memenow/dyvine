@@ -5,7 +5,7 @@ import logging.handlers
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -29,12 +29,28 @@ _context_var: contextvars.ContextVar[dict[str, Any] | None] = contextvars.Contex
 )
 
 
+def set_correlation_id(correlation_id: str | None) -> None:
+    """Module-level setter so non-logger callers can update the ContextVar.
+
+    Background-task scheduling needs to overwrite the inherited
+    correlation ID with a fresh value before the coroutine runs so logs
+    emitted by long-lived downloads do not appear under the spawning
+    request's identifier.
+    """
+    _correlation_id_var.set(correlation_id)
+
+
+def clear_logging_context() -> None:
+    """Reset the request-scoped logging context dict."""
+    _context_var.set({})
+
+
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging."""
 
     def format(self, record: logging.LogRecord) -> str:
         log_data = {
-            "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -58,7 +74,14 @@ class JSONFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    """Configure application logging."""
+    """Configure application logging.
+
+    The file handler uses :class:`logging.handlers.TimedRotatingFileHandler`
+    keyed on UTC midnight so the active filename ``dyvine.log`` is
+    rotated cleanly across day boundaries. The previous design baked the
+    startup-time date into the path, which left the handler writing to a
+    stale filename indefinitely after the first midnight.
+    """
     level = logging.DEBUG if settings.debug else logging.INFO
 
     # Ensure logs directory exists
@@ -72,10 +95,13 @@ def setup_logging() -> None:
         handler.close()
     root_logger.handlers.clear()
 
-    # File handler with rotation
-    log_file = logs_dir / f"dyvine-{datetime.now():%Y-%m-%d}.log"
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"  # 10MB
+    log_file = logs_dir / "dyvine.log"
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_file,
+        when="midnight",
+        backupCount=14,
+        encoding="utf-8",
+        utc=True,
     )
     file_handler.setFormatter(JSONFormatter())
     root_logger.addHandler(file_handler)

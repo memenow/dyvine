@@ -28,6 +28,7 @@ def test_user_download_request_missing_user_id_raises() -> None:
 
 
 def test_user_response_all_fields() -> None:
+    """``room_data`` is now a structured dict; the service decodes the JSON."""
     resp = UserResponse(
         user_id="u1",
         nickname="nick",
@@ -38,11 +39,25 @@ def test_user_response_all_fields() -> None:
         total_favorited=100,
         is_living=True,
         room_id=42,
-        room_data='{"status": 2}',
+        room_data={"status": 2},
     )
     assert resp.user_id == "u1"
     assert resp.is_living is True
     assert resp.room_id == 42
+    assert resp.room_data == {"status": 2}
+
+
+def test_user_response_avatar_url_empty_coerces_to_none() -> None:
+    """Empty upstream avatars surface as ``None`` rather than an empty URL."""
+    resp = UserResponse(
+        user_id="u",
+        nickname="n",
+        avatar_url="",
+        following_count=0,
+        follower_count=0,
+        total_favorited=0,
+    )
+    assert resp.avatar_url is None
 
 
 def test_user_response_optional_fields_none() -> None:
