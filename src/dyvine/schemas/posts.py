@@ -127,8 +127,7 @@ class ListPostsResponse(BaseModel):
     next_page_token: str | None = Field(
         None,
         description=(
-            "Opaque cursor for the next page. ``None`` when the feed is "
-            "exhausted."
+            "Opaque cursor for the next page. ``None`` when the feed is " "exhausted."
         ),
     )
     total_size: int | None = Field(

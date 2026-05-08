@@ -718,7 +718,5 @@ class LivestreamService:
                 operation_type="livestream_download",
             )
         if operation.operation_type != "livestream_download":
-            raise OperationNotFoundError(
-                "Operation not found or status unknown."
-            )
+            raise OperationNotFoundError("Operation not found or status unknown.")
         return LiveStreamDownloadResponse(**operation.to_response())

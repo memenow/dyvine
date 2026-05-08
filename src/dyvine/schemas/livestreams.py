@@ -122,9 +122,7 @@ class LiveStreamURLDownloadRequest(BaseModel):
         # ``HttpUrl``.
         host = (value.host or urlsplit(str(value)).hostname or "").lower()
         if host not in _ALLOWED_LIVESTREAM_HOSTS:
-            raise ValueError(
-                f"URL host {host!r} is not on the douyin.com allowlist"
-            )
+            raise ValueError(f"URL host {host!r} is not on the douyin.com allowlist")
         return value
 
     @field_validator("output_path")

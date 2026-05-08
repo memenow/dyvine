@@ -685,7 +685,9 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
         # detects ``next_cursor == current_cursor`` and breaks before
         # ``_process_posts_batch`` is called again. Termination — not the
         # batch count — is the contract we are asserting here.
-        assert call_count <= 2, f"sticky cursor cap failed; loop ran {call_count} iterations"
+        assert (
+            call_count <= 2
+        ), f"sticky cursor cap failed; loop ran {call_count} iterations"
         assert process_batch.await_count == call_count
 
     refreshed = await svc.get_bulk_download_status(operation.operation_id)

@@ -171,8 +171,7 @@ async def download_user_posts(
     page_token: str | None = Query(
         None,
         description=(
-            "Optional starting cursor token. Omit to begin at the newest "
-            "post."
+            "Optional starting cursor token. Omit to begin at the newest " "post."
         ),
     ),
 ) -> BulkDownloadResponse:

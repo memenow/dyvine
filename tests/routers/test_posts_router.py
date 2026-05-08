@@ -92,9 +92,7 @@ async def test_list_user_posts_paginates_with_upstream_cursor(
         list_user_posts,
     )
 
-    detail = PostDetail(
-        aweme_id="9876543210", create_time=0, post_type=PostType.VIDEO
-    )
+    detail = PostDetail(aweme_id="9876543210", create_time=0, post_type=PostType.VIDEO)
     mock_post_service.get_user_posts.return_value = UserPostsPage(
         posts=[detail], next_cursor=12345, has_more=True
     )
@@ -130,9 +128,7 @@ async def test_list_user_posts_omits_token_when_feed_exhausted(
     """When the service reports no further cursor, the response omits the token."""
     from dyvine.routers.posts import list_user_posts
 
-    detail = PostDetail(
-        aweme_id="1111111111", create_time=0, post_type=PostType.VIDEO
-    )
+    detail = PostDetail(aweme_id="1111111111", create_time=0, post_type=PostType.VIDEO)
     mock_post_service.get_user_posts.return_value = UserPostsPage(
         posts=[detail], next_cursor=None, has_more=False
     )
@@ -246,9 +242,9 @@ def test_router_registers_operation_route_before_post_id() -> None:
     from dyvine.routers.posts import router
 
     paths_in_order = [route.path for route in router.routes]
-    assert paths_in_order.index("/posts/operations/{operation_id}") < paths_in_order.index(
-        "/posts/{post_id}"
-    )
+    assert paths_in_order.index(
+        "/posts/operations/{operation_id}"
+    ) < paths_in_order.index("/posts/{post_id}")
 
 
 @pytest.mark.asyncio
@@ -332,7 +328,9 @@ async def test_get_bulk_download_operation_not_found(
 ) -> None:
     from dyvine.routers.posts import get_bulk_download_operation
 
-    mock_post_service.get_bulk_download_status.side_effect = OperationNotFoundError("nf")
+    mock_post_service.get_bulk_download_status.side_effect = OperationNotFoundError(
+        "nf"
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await get_bulk_download_operation(

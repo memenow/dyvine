@@ -411,9 +411,9 @@ async def test_process_download_breaks_on_sticky_cursor(
         max_items=50,
     )
 
-    assert call_count == 1, (
-        f"Sticky-cursor early-exit failed; loop ran {call_count} iterations"
-    )
+    assert (
+        call_count == 1
+    ), f"Sticky-cursor early-exit failed; loop ran {call_count} iterations"
     refreshed = await service.get_download_status(operation.operation_id)
     # ``has_aweme=True`` advanced ``downloaded_count`` once before the
     # sticky-cursor branch terminated the loop, so the run records as

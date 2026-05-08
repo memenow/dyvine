@@ -700,9 +700,7 @@ class PostService:
         op = await self.operation_store.get_operation(operation_id)
 
         if op.operation_type != "user_posts_bulk_download":
-            raise OperationNotFoundError(
-                f"Bulk download task {operation_id} not found"
-            )
+            raise OperationNotFoundError(f"Bulk download task {operation_id} not found")
 
         download_stats = _deserialize_download_stats(op.metadata)
         total_posts = int(op.total_items or op.metadata.get("total_posts") or 0)

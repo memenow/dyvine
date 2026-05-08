@@ -619,13 +619,9 @@ class OperationStore:
                     (operation_id,),
                 ).fetchone()
                 if row is None:
-                    raise OperationNotFoundError(
-                        f"Operation {operation_id} not found"
-                    )
+                    raise OperationNotFoundError(f"Operation {operation_id} not found")
                 stored = row["metadata"] if "metadata" in row.keys() else None
-                preserved_metadata = (
-                    json.loads(str(stored)) if stored else {}
-                )
+                preserved_metadata = json.loads(str(stored)) if stored else {}
             elif not requested:
                 # Fast-path verification: the caller passed only unknown
                 # field names, so the operation must exist but no UPDATE
@@ -636,9 +632,7 @@ class OperationStore:
                     (operation_id,),
                 ).fetchone()
                 if row is None:
-                    raise OperationNotFoundError(
-                        f"Operation {operation_id} not found"
-                    )
+                    raise OperationNotFoundError(f"Operation {operation_id} not found")
                 operation = self._from_row(row)
                 assert operation is not None
                 return operation
@@ -666,9 +660,7 @@ class OperationStore:
                 # ``RETURNING`` yields zero rows when the WHERE matched
                 # nothing — the row vanished between the existence
                 # probe (when we ran one) and the UPDATE.
-                raise OperationNotFoundError(
-                    f"Operation {operation_id} not found"
-                )
+                raise OperationNotFoundError(f"Operation {operation_id} not found")
             operation = self._from_row(updated)
             assert operation is not None
             return operation
