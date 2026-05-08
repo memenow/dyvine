@@ -25,22 +25,29 @@ authors = [
     { name = "Bill Duke", email = "billduke@memenow.xyz" }
 ]
 dependencies = [
-    # Core dependencies
-    "fastapi>=0.136.1",
-    "uvicorn[standard]>=0.46.0",
-    "pydantic>=2.13.3",
-    "pydantic-settings>=2.14.0",
-    "python-dotenv>=1.2.2",
+    # Core dependencies. Each direct dependency carries an upper bound so
+    # ``pyproject.toml`` resolution does not silently drag the next major
+    # version onto the API once it ships. ``uv.lock`` still pins exact
+    # versions for reproducible installs in CI and the Dockerfile; the
+    # bounds below add a second guard for tools that read pep-621
+    # metadata without consulting the lockfile (pip, poetry, etc.).
+    "fastapi>=0.136.1,<1.0.0",
+    "uvicorn[standard]>=0.46.0,<1.0.0",
+    "pydantic>=2.13.3,<3.0.0",
+    "pydantic-settings>=2.14.0,<3.0.0",
+    "python-dotenv>=1.2.2,<2.0.0",
 
-    # External integrations
-    "boto3>=1.42.96",
-    "f2>=0.0.1.7",
-    "httpx>=0.28.1",
+    # External integrations. ``f2`` is an especially low-maintenance
+    # upstream and pins many of its own deps with ``==``, so we tightly
+    # constrain it; widen the bound only after a deliberate test pass.
+    "boto3>=1.42.96,<2.0.0",
+    "f2>=0.0.1.7,<0.0.2",
+    "httpx>=0.28.1,<1.0.0",
 
     # Utilities
-    "prometheus-client>=0.25.0",
-    "psutil>=7.2.2",
-    "python-multipart>=0.0.26",
+    "prometheus-client>=0.25.0,<1.0.0",
+    "psutil>=7.2.2,<8.0.0",
+    "python-multipart>=0.0.26,<0.1.0",
 ]
 
 [tool.pytest.ini_options]
@@ -49,6 +56,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --asyncio-mode=auto"
+# Each fixture binds to the function-scoped event loop so async tests
+# do not accidentally share state via a longer-lived loop.
+asyncio_default_fixture_loop_scope = "function"
 # Treat every warning as an error (replaces the previous ``-W error``
 # CI flag), but allow the unavoidable upstream deprecations through.
 # ``websockets_proxy 0.1.2`` (a transitive dependency of f2) still

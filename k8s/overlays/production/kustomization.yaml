@@ -15,9 +15,20 @@ patchesJson6902:
       name: dyvine-api
     path: patches.yaml
 
+# ``newTag`` MUST be replaced by the deploy workflow with the immutable
+# commit-hash tag emitted by ``.github/workflows/docker-build.yml``
+# (e.g. ``main-abc1234``). The placeholder ``main-latest`` is a rolling
+# pointer kept here only so ``kustomize build`` succeeds in local dev;
+# any production rollout that does not run::
+#
+#   kustomize edit set image \
+#     ghcr.io/memenow/dyvine=ghcr.io/memenow/dyvine:main-<sha>
+#
+# before ``kubectl apply`` is silently exposed to the registry's view
+# of ``main-latest`` and cannot be rolled back to a known artefact.
 images:
   - name: ghcr.io/memenow/dyvine
-    newTag: latest
+    newTag: main-latest
 
 configMapGenerator:
   - name: dyvine-config

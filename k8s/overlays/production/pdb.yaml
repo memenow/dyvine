@@ -1,3 +1,18 @@
+# PodDisruptionBudget for the dyvine-api Pods.
+#
+# ``maxUnavailable: 0`` blocks every voluntary disruption (node drain
+# during cluster autoscale, kubectl drain, drain-on-upgrade, etc.) until
+# the operator reschedules the Pod manually. This is the only safe
+# configuration today because the Deployment uses the ``Recreate``
+# strategy backed by a ReadWriteOnce PVC: a rolling-update surge Pod
+# would not be able to attach the volume, and an involuntary drain
+# without a PDB would leave the API offline for the duration of the
+# detach/attach cycle.
+#
+# Once the SQLite operation store is migrated to a shared backend (see
+# ``k8s/overlays/production/hpa.yaml`` for the multi-replica plan)
+# replace this with ``minAvailable: 1`` so rolling updates are
+# permitted.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -8,7 +23,7 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
-  minAvailable: 0
+  maxUnavailable: 0
   selector:
     matchLabels:
       app.kubernetes.io/name: dyvine
