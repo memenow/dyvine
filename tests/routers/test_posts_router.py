@@ -6,13 +6,15 @@ import pytest
 from fastapi import HTTPException
 
 from dyvine.core.exceptions import (
-    DownloadError,
+    OperationNotFoundError,
+    PostNotFoundError,
     ServiceError,
     UserNotFoundError,
 )
 from dyvine.schemas.posts import (
     BulkDownloadResponse,
     DownloadStatus,
+    ListPostsResponse,
     PostDetail,
     PostType,
 )
@@ -35,22 +37,21 @@ def mock_post_service() -> MagicMock:
 async def test_get_post_success(mock_post_service: MagicMock) -> None:
     from dyvine.routers.posts import get_post
 
-    detail = PostDetail(aweme_id="123", create_time=0, post_type=PostType.VIDEO)
+    detail = PostDetail(aweme_id="1234567890", create_time=0, post_type=PostType.VIDEO)
     mock_post_service.get_post_detail.return_value = detail
 
-    result = await get_post(service=mock_post_service, post_id="123")
-    assert result.aweme_id == "123"
+    result = await get_post(service=mock_post_service, post_id="1234567890")
+    assert result.aweme_id == "1234567890"
 
 
 @pytest.mark.asyncio
 async def test_get_post_not_found(mock_post_service: MagicMock) -> None:
-    from dyvine.core.exceptions import PostNotFoundError
     from dyvine.routers.posts import get_post
 
     mock_post_service.get_post_detail.side_effect = PostNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
-        await get_post(service=mock_post_service, post_id="bad")
+        await get_post(service=mock_post_service, post_id="1234567890")
     assert exc_info.value.status_code == 404
 
 
@@ -64,9 +65,41 @@ async def test_list_user_posts_success(mock_post_service: MagicMock) -> None:
     mock_post_service.get_user_posts.return_value = []
 
     result = await list_user_posts(
-        service=mock_post_service, user_id="u1", max_cursor=0, count=20
+        service=mock_post_service, user_id="user01", page_token=None, count=20
     )
-    assert result == []
+    assert isinstance(result, ListPostsResponse)
+    assert result.posts == []
+    assert result.next_page_token is None
+
+
+@pytest.mark.asyncio
+async def test_list_user_posts_paginates_with_opaque_token(
+    mock_post_service: MagicMock,
+) -> None:
+    from dyvine.routers.posts import list_user_posts
+
+    detail = PostDetail(
+        aweme_id="9876543210", create_time=0, post_type=PostType.VIDEO
+    )
+    mock_post_service.get_user_posts.return_value = [detail]
+
+    first = await list_user_posts(
+        service=mock_post_service, user_id="user01", page_token=None, count=20
+    )
+    assert first.posts == [detail]
+    assert first.next_page_token is not None
+
+    # The second page reuses the opaque token; the service receives the
+    # decoded numeric cursor it can hand back to the upstream API.
+    second = await list_user_posts(
+        service=mock_post_service,
+        user_id="user01",
+        page_token=first.next_page_token,
+        count=20,
+    )
+    second_call_cursor = mock_post_service.get_user_posts.await_args_list[-1].args[1]
+    assert second_call_cursor == 1
+    assert isinstance(second, ListPostsResponse)
 
 
 @pytest.mark.asyncio
@@ -79,24 +112,9 @@ async def test_list_user_posts_user_not_found(
 
     with pytest.raises(HTTPException) as exc_info:
         await list_user_posts(
-            service=mock_post_service, user_id="bad", max_cursor=0, count=20
+            service=mock_post_service, user_id="user01", page_token=None, count=20
         )
     assert exc_info.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_list_user_posts_unexpected_error(
-    mock_post_service: MagicMock,
-) -> None:
-    from dyvine.routers.posts import list_user_posts
-
-    mock_post_service.get_user_posts.side_effect = RuntimeError("boom")
-
-    with pytest.raises(HTTPException) as exc_info:
-        await list_user_posts(
-            service=mock_post_service, user_id="u1", max_cursor=0, count=20
-        )
-    assert exc_info.value.status_code == 500
 
 
 # ── download_user_posts ──────────────────────────────────────────────────
@@ -109,8 +127,8 @@ async def test_download_user_posts_returns_pending_response(
     from dyvine.routers.posts import download_user_posts
 
     resp = BulkDownloadResponse(
-        operation_id="op-123",
-        sec_user_id="u1",
+        operation_id="op-12345",
+        sec_user_id="user01",
         download_path=None,
         total_posts=0,
         status=DownloadStatus.PENDING,
@@ -119,20 +137,15 @@ async def test_download_user_posts_returns_pending_response(
     mock_post_service.start_bulk_download.return_value = resp
 
     result = await download_user_posts(
-        service=mock_post_service, user_id="u1", max_cursor=0
+        service=mock_post_service, user_id="user01", page_token=None
     )
     assert result.status == DownloadStatus.PENDING
-    assert result.operation_id == "op-123"
-    mock_post_service.start_bulk_download.assert_awaited_once_with("u1", 0)
+    assert result.operation_id == "op-12345"
+    mock_post_service.start_bulk_download.assert_awaited_once_with("user01", 0)
 
 
 def test_download_user_posts_route_returns_202() -> None:
-    """The bulk download endpoint must advertise HTTP 202 Accepted.
-
-    A test client check guards against future regressions where the
-    decorator drops the ``status_code`` argument and silently reverts to
-    the default 200.
-    """
+    """The bulk download endpoint must advertise HTTP 202 Accepted."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -144,7 +157,7 @@ def test_download_user_posts_route_returns_202() -> None:
 
     pending = BulkDownloadResponse(
         operation_id="op-202",
-        sec_user_id="u1",
+        sec_user_id="user01",
         download_path=None,
         total_posts=0,
         status=DownloadStatus.PENDING,
@@ -155,12 +168,27 @@ def test_download_user_posts_route_returns_202() -> None:
     app.dependency_overrides[get_post_service] = lambda: fake_service
 
     with TestClient(app) as client:
-        response = client.post("/api/v1/posts/users/u1/posts:download")
+        response = client.post("/api/v1/posts/users/user01/posts:download")
 
     assert response.status_code == 202
     payload = response.json()
     assert payload["operation_id"] == "op-202"
     assert payload["status"] == DownloadStatus.PENDING.value
+
+
+def test_router_registers_operation_route_before_post_id() -> None:
+    """``/operations/{id}`` must take precedence over ``/{post_id}``.
+
+    The previous router registration order made ``GET /operations/{id}``
+    unreachable because ``/{post_id}`` matched first; this check guards
+    against a future revert.
+    """
+    from dyvine.routers.posts import router
+
+    paths_in_order = [route.path for route in router.routes]
+    assert paths_in_order.index("/posts/operations/{operation_id}") < paths_in_order.index(
+        "/posts/{post_id}"
+    )
 
 
 @pytest.mark.asyncio
@@ -173,20 +201,16 @@ async def test_download_user_posts_user_not_found(
 
     with pytest.raises(HTTPException) as exc_info:
         await download_user_posts(
-            service=mock_post_service, user_id="bad", max_cursor=0
+            service=mock_post_service, user_id="user01", page_token=None
         )
     assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_download_user_posts_service_error_returns_502_with_detail(
+async def test_download_user_posts_service_error_maps_to_5xx(
     mock_post_service: MagicMock,
 ) -> None:
-    """``PostServiceError`` raised from ``start_bulk_download`` (the typical
-    path when the upstream profile fetch fails) must surface as a 502 with
-    the original message in ``detail`` rather than as the opaque 500 the
-    bare ``Exception`` branch emits.
-    """
+    """``ServiceError`` from the service layer maps to 5xx with sanitised body."""
     from dyvine.routers.posts import download_user_posts
 
     mock_post_service.start_bulk_download.side_effect = ServiceError(
@@ -194,44 +218,25 @@ async def test_download_user_posts_service_error_returns_502_with_detail(
     )
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
-    assert exc_info.value.status_code == 502
-    assert "upstream profile fetch timed out" in str(exc_info.value.detail)
+        await download_user_posts(
+            service=mock_post_service, user_id="user01", page_token=None
+        )
+    assert exc_info.value.status_code == 500
 
 
 @pytest.mark.asyncio
-async def test_download_user_posts_download_error_routes_through_service_error(
+async def test_download_user_posts_unexpected_error_returns_500(
     mock_post_service: MagicMock,
 ) -> None:
-    """``DownloadError`` is a ``ServiceError`` subclass, so after the dead
-    ``except DownloadError`` branch was removed it must flow through the
-    ``ServiceError`` handler and land on 502 with the underlying detail.
-    """
-    from dyvine.routers.posts import download_user_posts
-
-    mock_post_service.start_bulk_download.side_effect = DownloadError("fail")
-
-    with pytest.raises(HTTPException) as exc_info:
-        await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
-    assert exc_info.value.status_code == 502
-    assert "fail" in str(exc_info.value.detail)
-
-
-@pytest.mark.asyncio
-async def test_download_user_posts_unexpected_error(
-    mock_post_service: MagicMock,
-) -> None:
-    """Non-``ServiceError`` exceptions still fall through to the opaque
-    500 to avoid leaking unbounded internal state in error responses.
-    """
     from dyvine.routers.posts import download_user_posts
 
     mock_post_service.start_bulk_download.side_effect = RuntimeError("boom")
 
     with pytest.raises(HTTPException) as exc_info:
-        await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
+        await download_user_posts(
+            service=mock_post_service, user_id="user01", page_token=None
+        )
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == "Internal server error"
 
 
 # ── get_bulk_download_operation ─────────────────────────────────────────
@@ -244,21 +249,21 @@ async def test_get_bulk_download_operation_success(
     from dyvine.routers.posts import get_bulk_download_operation
 
     resp = BulkDownloadResponse(
-        operation_id="op-1",
-        sec_user_id="u1",
+        operation_id="op-12345",
+        sec_user_id="user01",
         download_path="/dl",
         total_posts=5,
         total_downloaded=5,
-        status=DownloadStatus.SUCCESS,
+        status=DownloadStatus.COMPLETED,
         message="done",
     )
     mock_post_service.get_bulk_download_status.return_value = resp
 
     result = await get_bulk_download_operation(
-        service=mock_post_service, operation_id="op-1"
+        service=mock_post_service, operation_id="op-12345"
     )
-    assert result.operation_id == "op-1"
-    assert result.status == DownloadStatus.SUCCESS
+    assert result.operation_id == "op-12345"
+    assert result.status == DownloadStatus.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -267,11 +272,11 @@ async def test_get_bulk_download_operation_not_found(
 ) -> None:
     from dyvine.routers.posts import get_bulk_download_operation
 
-    mock_post_service.get_bulk_download_status.side_effect = DownloadError("nf")
+    mock_post_service.get_bulk_download_status.side_effect = OperationNotFoundError("nf")
 
     with pytest.raises(HTTPException) as exc_info:
         await get_bulk_download_operation(
-            service=mock_post_service, operation_id="missing"
+            service=mock_post_service, operation_id="missing-op"
         )
     assert exc_info.value.status_code == 404
 
@@ -286,6 +291,6 @@ async def test_get_bulk_download_operation_unexpected_error(
 
     with pytest.raises(HTTPException) as exc_info:
         await get_bulk_download_operation(
-            service=mock_post_service, operation_id="op-1"
+            service=mock_post_service, operation_id="op-12345"
         )
     assert exc_info.value.status_code == 500

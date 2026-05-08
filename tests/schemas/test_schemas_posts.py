@@ -28,8 +28,11 @@ def test_post_type_enum_values() -> None:
 
 
 def test_download_status_enum_values() -> None:
-    assert DownloadStatus.SUCCESS == "success"
-    assert DownloadStatus.PARTIAL_SUCCESS == "partial_success"
+    """``DownloadStatus`` is an alias for the canonical ``OperationStatus``."""
+    assert DownloadStatus.PENDING == "pending"
+    assert DownloadStatus.RUNNING == "running"
+    assert DownloadStatus.COMPLETED == "completed"
+    assert DownloadStatus.PARTIAL == "partial"
     assert DownloadStatus.FAILED == "failed"
 
 

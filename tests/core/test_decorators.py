@@ -36,14 +36,16 @@ async def test_handle_errors_maps_not_found_to_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_errors_maps_validation_error_to_400() -> None:
+async def test_handle_errors_maps_validation_error_to_422() -> None:
+    """``ValidationError`` maps to 422 (Unprocessable Content) by HTTP spec."""
+
     @handle_errors()
     async def fail() -> None:
         raise ValidationError("bad")
 
     with pytest.raises(HTTPException) as exc_info:
         await fail()
-    assert exc_info.value.status_code == 400
+    assert exc_info.value.status_code == 422
 
 
 @pytest.mark.asyncio

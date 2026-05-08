@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dyvine.core.operations import OperationStore
-from dyvine.services.users import DownloadError, DownloadResponse, UserService
+from dyvine.core.exceptions import OperationNotFoundError
+from dyvine.services.users import DownloadResponse, UserService
 
 
 @pytest.mark.asyncio
@@ -68,7 +69,7 @@ async def test_get_download_status_returns_persisted_state(
 @pytest.mark.asyncio
 async def test_get_download_status_raises_for_unknown_task() -> None:
     service = UserService()
-    with pytest.raises(DownloadError):
+    with pytest.raises(OperationNotFoundError):
         await service.get_download_status("missing-task")
 
 
@@ -83,7 +84,7 @@ async def test_get_download_status_rejects_non_user_operation(tmp_path) -> None:
     )
     service = UserService(operation_store=store)
 
-    with pytest.raises(DownloadError):
+    with pytest.raises(OperationNotFoundError):
         await service.get_download_status(operation.operation_id)
 
 
@@ -163,7 +164,9 @@ async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> 
     result = await service.get_user_info("live-user")
     assert result.is_living is True
     assert result.room_id == 42
-    assert result.room_data == '{"status":2}'
+    # Schema now exposes ``room_data`` as a decoded dict so consumers do
+    # not have to re-parse the upstream JSON payload.
+    assert result.room_data == {"status": 2}
 
 
 @pytest.mark.asyncio
@@ -339,18 +342,19 @@ async def test_process_download_runs_when_only_likes_requested(
 
 
 @pytest.mark.asyncio
-async def test_process_download_breaks_when_page_count_exceeds_cap(
+async def test_process_download_breaks_on_sticky_cursor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """An unbounded cursor bump must not spin the outer loop forever.
+    """A sticky upstream cursor must terminate the loop immediately.
 
-    Simulate an upstream that returns a non-empty page with a sticky
-    ``max_cursor`` and ``has_more=True`` on every call. Without the
-    ``max_pages`` guard the outer ``while`` loop relies on
-    ``downloaded_count >= total_posts`` to stop, which never fires when
-    uploads are slower than the fetch rate or when the upstream lies
-    about its total. The guard must terminate the loop deterministically
-    after ``max_items // 100 + 20`` iterations.
+    The previous implementation incremented ``max_cursor`` by one when
+    the upstream returned a value equal to the cursor we already issued,
+    relying on the ``max_pages`` cap as a safety net. The synthetic
+    increment was rejected by the upstream API, so the fetcher kept
+    returning the same window and the loop downloaded duplicates until
+    the cap fired. Treating a stuck cursor as the end of the feed is the
+    correct termination condition: the test asserts the fetcher is
+    called at most once per ``page_count`` round before the loop exits.
     """
     from dyvine.services import users as users_mod
 
@@ -404,20 +408,18 @@ async def test_process_download_breaks_when_page_count_exceeds_cap(
         user_id="sticky-cursor-user",
         include_posts=True,
         include_likes=False,
-        max_items=50,  # max_pages = 50 // 100 + 20 = 20
+        max_items=50,
     )
 
-    # The fetcher must have been invoked, but not more than ``max_pages``
-    # times. The outer loop breaks once ``page_count > max_pages``.
-    assert (
-        1 <= call_count <= 21
-    ), f"Expected the outer loop to break near max_pages=20, got {call_count} calls"
+    assert call_count == 1, (
+        f"Sticky-cursor early-exit failed; loop ran {call_count} iterations"
+    )
     refreshed = await service.get_download_status(operation.operation_id)
-    # The loop terminated after exhausting ``max_pages`` without reaching
-    # ``total_posts``, so the completion branch records ``partial`` with
-    # the 20 items that did download.
+    # ``has_aweme=True`` advanced ``downloaded_count`` once before the
+    # sticky-cursor branch terminated the loop, so the run records as
+    # ``partial`` with that single batch reflected in ``completed_items``.
     assert refreshed.status == "partial"
-    assert refreshed.completed_items == 20
+    assert refreshed.completed_items == 1
 
 
 @pytest.mark.asyncio

@@ -11,16 +11,30 @@ from dyvine.schemas.livestreams import (
 
 
 def test_livestream_download_request_required_user_id() -> None:
-    req = LiveStreamDownloadRequest(user_id="u1")
-    assert req.user_id == "u1"
+    req = LiveStreamDownloadRequest(user_id="user01")
+    assert req.user_id == "user01"
+
+
+def test_livestream_download_request_rejects_too_short_user_id() -> None:
+    """The schema rejects user_ids that fail the SSRF-prevention pattern."""
+    with pytest.raises(ValidationError):
+        LiveStreamDownloadRequest(user_id="u1")
+
+
+def test_livestream_download_request_rejects_traversal_output_path() -> None:
+    """Absolute paths and ``..`` segments are rejected at the schema layer."""
+    with pytest.raises(ValidationError):
+        LiveStreamDownloadRequest(user_id="user01", output_path="../../etc/passwd")
+    with pytest.raises(ValidationError):
+        LiveStreamDownloadRequest(user_id="user01", output_path="/abs/path")
 
 
 def test_livestream_download_request_optional_output_path() -> None:
-    req = LiveStreamDownloadRequest(user_id="u1")
+    req = LiveStreamDownloadRequest(user_id="user01")
     assert req.output_path is None
 
-    req2 = LiveStreamDownloadRequest(user_id="u1", output_path="/out")
-    assert req2.output_path == "/out"
+    req2 = LiveStreamDownloadRequest(user_id="user01", output_path="rooms/abc")
+    assert req2.output_path == "rooms/abc"
 
 
 def test_livestream_download_request_missing_user_id_raises() -> None:
@@ -30,7 +44,19 @@ def test_livestream_download_request_missing_user_id_raises() -> None:
 
 def test_livestream_url_download_request_required_url() -> None:
     req = LiveStreamURLDownloadRequest(url="https://live.douyin.com/123")
-    assert req.url == "https://live.douyin.com/123"
+    assert str(req.url) == "https://live.douyin.com/123"
+
+
+def test_livestream_url_download_request_rejects_non_douyin_host() -> None:
+    """Non-douyin hosts are rejected to prevent SSRF via the URL endpoint."""
+    with pytest.raises(ValidationError):
+        LiveStreamURLDownloadRequest(url="https://evil.example.com/123")
+
+
+def test_livestream_url_download_request_rejects_non_http_scheme() -> None:
+    """Pydantic ``AnyHttpUrl`` rejects ``file://``/``ftp://`` schemes."""
+    with pytest.raises(ValidationError):
+        LiveStreamURLDownloadRequest(url="file:///etc/passwd")
 
 
 def test_livestream_url_download_request_optional_output_path() -> None:

@@ -47,29 +47,65 @@ def test_api_settings_port_too_high() -> None:
 def test_security_settings_defaults_pass_in_debug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The placeholder secret values are tolerated when ``API_DEBUG=true``.
+
+    The cross-field check now lives on the composite ``Settings`` model
+    so that the validator sees the same ``api.debug`` value the rest of
+    the application reads. ``SecuritySettings`` on its own is therefore
+    permissive — the gate fires only when the placeholder is paired with
+    a non-debug build.
+    """
     monkeypatch.setenv("API_DEBUG", "true")
-    s = SecuritySettings()
-    assert s.secret_key == "change-me-in-production"
+    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
+    s = Settings()
+    assert s.security.secret_key == "change-me-in-production"
 
 
 def test_security_settings_rejects_defaults_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     with pytest.raises(ValidationError):
-        SecuritySettings()
+        Settings()
 
 
 def test_security_settings_rejects_defaults_when_api_debug_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # An unset ``API_DEBUG`` must be treated as "not debug", matching the
-    # production default. Earlier versions defaulted the unset case to
-    # ``"true"``, which silently bypassed the ``change-me-in-production``
-    # validator whenever operators forgot to set the variable explicitly.
+    """``API_DEBUG`` left unset must default to "production" semantics.
+
+    Previously the ad-hoc ``os.getenv("API_DEBUG", "false")`` lookup
+    inside ``SecuritySettings`` could disagree with ``settings.api.debug``
+    when the value lived in ``.env`` rather than the live environment.
+    The composite-level validator now relies on ``self.api.debug``, which
+    pydantic-settings derives from the same payload as the rest of the
+    config, so the unset case is rejected consistently.
+    """
     monkeypatch.delenv("API_DEBUG", raising=False)
+    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     with pytest.raises(ValidationError):
-        SecuritySettings()
+        Settings()
+
+
+def test_security_settings_isolated_construct_is_permissive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``SecuritySettings`` alone no longer enforces the production gate.
+
+    The cross-field check moved up to the composite ``Settings`` model,
+    so building a bare ``SecuritySettings`` with placeholder values must
+    succeed; otherwise downstream fixtures that monkeypatch only the
+    inner model would lose all flexibility.
+    """
+    monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
+    s = SecuritySettings()
+    assert s.secret_key == "change-me-in-production"
 
 
 # ── R2Settings ───────────────────────────────────────────────────────────

@@ -94,10 +94,39 @@ async def test_dyvine_error_handler_service_error_returns_500() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dyvine_error_handler_generic_dyvine_returns_400() -> None:
+async def test_dyvine_error_handler_validation_returns_422() -> None:
+    """``ValidationError`` now maps to 422 to match HTTP semantics."""
     req = _make_request("cid-3")
     resp = await dyvine_error_handler(req, ValidationError("bad"))
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_dyvine_error_handler_generic_dyvine_returns_400() -> None:
+    """A bare ``DyvineError`` without a more specific subclass falls back to 400."""
+    from dyvine.core.exceptions import DyvineError
+
+    req = _make_request("cid-3a")
+    resp = await dyvine_error_handler(req, DyvineError("generic"))
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_dyvine_error_handler_authentication_returns_401() -> None:
+    from dyvine.core.exceptions import AuthenticationError
+
+    req = _make_request("cid-3b")
+    resp = await dyvine_error_handler(req, AuthenticationError("nope"))
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_dyvine_error_handler_rate_limit_returns_429() -> None:
+    from dyvine.core.exceptions import RateLimitError
+
+    req = _make_request("cid-3c")
+    resp = await dyvine_error_handler(req, RateLimitError("slow down"))
+    assert resp.status_code == 429
 
 
 # ── generic_exception_handler ────────────────────────────────────────────
