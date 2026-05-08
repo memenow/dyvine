@@ -358,6 +358,60 @@ async def test_operation_store_concurrent_reads_do_not_serialize(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_update_operation_raises_when_row_missing(tmp_path) -> None:
+    """``update_operation`` on a vanished row must surface as 404.
+
+    ``OperationNotFoundError`` is a ``NotFoundError`` so the global
+    handler / ``handle_errors`` decorator map it to HTTP 404. This
+    contract is what lets the router status endpoint return a clean
+    "operation not found" response when the persistence backend is
+    pruned mid-flight; without it the loud ``RETURNING *`` failure
+    would surface as 500.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    with pytest.raises(OperationNotFoundError):
+        await store.update_operation("ghost-id", status="failed")
+
+
+@pytest.mark.asyncio
+async def test_update_operation_returns_record_reflecting_this_write(
+    tmp_path,
+) -> None:
+    """The returned record must contain the values this caller just wrote.
+
+    The pre-fix shape did the post-write SELECT outside the writer
+    lock, so a racing winner could replace the row between our UPDATE
+    and the readback and the caller would receive the winner's record
+    instead of its own. The atomic ``UPDATE ... RETURNING *`` pulls the
+    snapshot inside the same transaction.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    created = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-returning",
+        status="pending",
+        message="scheduled",
+    )
+
+    result = await store.update_operation(
+        created.operation_id,
+        status="running",
+        message="now running",
+        progress=42.0,
+    )
+
+    assert result.status == "running"
+    assert result.message == "now running"
+    assert result.progress == 42.0
+    # And the same record is returned by a fresh read so the writer
+    # reader paths agree on the post-update state.
+    refreshed = await store.get_operation(created.operation_id)
+    assert refreshed.status == result.status
+    assert refreshed.message == result.message
+    assert refreshed.progress == result.progress
+
+
+@pytest.mark.asyncio
 async def test_operation_store_concurrent_metadata_updates_do_not_lose_writes(
     tmp_path,
 ) -> None:

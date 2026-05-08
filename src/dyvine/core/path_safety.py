@@ -21,6 +21,45 @@ def get_download_root() -> Path:
     return Path(settings.douyin.download_root).expanduser().resolve()
 
 
+def _reject_symlink_segments(target: Path, root: Path) -> None:
+    """Reject *target* if any segment between *root* and *target*
+    is a symlink on disk.
+
+    ``Path.resolve()`` silently follows symlinks before the
+    ``relative_to`` jail check, so a symlink that points to another
+    directory **inside** the root would be considered legal even
+    though the indirection is exactly what an attacker needs to
+    redirect a follow-up ``mkdir`` / ``open``. Walking the *unresolved*
+    segments rejects that case at validation time. Segments that do
+    not yet exist are skipped because they cannot be symlinks yet —
+    the post-mutation :func:`ensure_within_root` covers the window
+    where a brand-new segment is replaced by a symlink before the
+    next syscall.
+    """
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        # ``resolve_within_root`` already raised; defensive guard only.
+        return
+
+    walked = root
+    for part in relative.parts:
+        walked = walked / part
+        # ``Path.is_symlink`` calls ``lstat`` and does NOT follow links,
+        # which is the property that lets us catch indirections that
+        # ``Path.resolve()`` would otherwise hide.
+        if walked.is_symlink():
+            raise ValidationError(
+                "Path traverses a symlink inside the download root",
+                details={"segment": str(walked), "download_root": str(root)},
+            )
+        if not walked.exists():
+            # Future segments will be created by ``mkdir`` and cannot
+            # be symlinks yet; the rest of the walk has nothing to
+            # check.
+            break
+
+
 def resolve_within_root(
     raw: str | Path | None,
     *,
@@ -52,6 +91,11 @@ def resolve_within_root(
         candidate = Path(raw).expanduser()
         target_unresolved = candidate if candidate.is_absolute() else root / candidate
 
+    # Reject indirection through symlink segments BEFORE ``resolve()``
+    # silently follows them, so an in-jail alias pointing at another
+    # in-jail directory is treated as suspicious rather than legal.
+    _reject_symlink_segments(target_unresolved, root)
+
     target = target_unresolved.resolve()
 
     try:
@@ -72,6 +116,38 @@ def resolve_within_root(
         )
 
     return target
+
+
+def ensure_within_root(path: Path) -> None:
+    """Re-verify that *path* still resolves under ``download_root``.
+
+    Callers that mutate the filesystem (e.g. ``Path.mkdir(parents=True)``)
+    after :func:`resolve_within_root` should invoke this helper as the
+    final step of the jail check. It defends against the residual TOCTOU
+    where a directory segment is swapped for a symlink between the
+    initial resolve and the syscall that creates the target. The
+    re-resolve runs ``Path.resolve()`` again so any newly introduced
+    symlink is followed, and the symlink-segment scan rejects any
+    indirection through the freshly-mutated tree.
+    """
+    root = get_download_root()
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise ValidationError(
+            "Could not re-resolve path after filesystem mutation",
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValidationError(
+            "Path escaped the download root after mutation",
+            details={"path": str(resolved), "download_root": str(root)},
+        ) from exc
+
+    _reject_symlink_segments(resolved, root)
 
 
 def relative_to_download_root(path: str | Path | None) -> str | None:

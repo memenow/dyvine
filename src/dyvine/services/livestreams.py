@@ -17,7 +17,11 @@ from ..core.exceptions import (
 )
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
-from ..core.path_safety import relative_to_download_root, resolve_within_root
+from ..core.path_safety import (
+    ensure_within_root,
+    relative_to_download_root,
+    resolve_within_root,
+)
 from ..core.settings import settings
 from ..schemas.livestreams import LiveStreamDownloadResponse
 from .users import UserService
@@ -546,8 +550,13 @@ class LivestreamService:
         # segments before the service touches the filesystem so an
         # attacker-controlled string cannot escape the configured
         # download root and create directories elsewhere.
+        # ``ensure_within_root`` repeats the jail check after ``mkdir``
+        # so the residual TOCTOU window — where a directory segment
+        # could be swapped for a symlink between the initial resolve
+        # and the syscall — is closed.
         output_dir = resolve_within_root(output_path, default_subdir="livestreams")
         output_dir.mkdir(parents=True, exist_ok=True)
+        ensure_within_root(output_dir)
 
         webcast_payload = {
             "room_id": room_id,
@@ -679,7 +688,16 @@ class LivestreamService:
                 download_path=None,
             )
         finally:
-            self.download_jobs.pop(room_id, None)
+            # Remove our slot from ``download_jobs`` only if the entry is
+            # still us. The dedupe check inside ``download_stream`` lets
+            # a new request schedule a successor task for the same
+            # ``room_id`` once ``existing.done()`` returns ``True`` but
+            # before this ``finally`` runs. Without this guard the old
+            # task's cleanup would silently evict the successor's slot
+            # and break dedupe for the next caller.
+            current = asyncio.current_task()
+            if self.download_jobs.get(room_id) is current:
+                self.download_jobs.pop(room_id, None)
 
     async def get_download_status(
         self, operation_id: str

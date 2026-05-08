@@ -94,7 +94,9 @@ def handle_errors(
                 400,
             )
             log.error(
-                f"{type(exc).__name__}: {str(exc)}",
+                "%s: %s",
+                type(exc).__name__,
+                exc,
                 extra={"error_code": exc.error_code, "details": exc.details},
             )
             if status_code >= 500 and not settings.debug:
@@ -113,7 +115,7 @@ def handle_errors(
                     "details": client_details,
                 },
             )
-        log.exception(f"Unexpected error: {str(exc)}")
+        log.exception("Unexpected error: %s", exc)
         return HTTPException(status_code=500, detail="Internal server error")
 
     def decorator(func: Callable) -> Callable:

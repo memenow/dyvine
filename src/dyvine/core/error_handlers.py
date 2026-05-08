@@ -101,7 +101,6 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
             status_code = mapped_code
             break
 
-    log_message = f"{exc.__class__.__name__}: {exc.message}"
     extra = {
         "error_code": exc.error_code,
         "correlation_id": correlation_id,
@@ -109,7 +108,13 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
     }
 
     if status_code >= 500:
-        logger.error(log_message, extra=extra, exc_info=True)
+        logger.error(
+            "%s: %s",
+            exc.__class__.__name__,
+            exc.message,
+            extra=extra,
+            exc_info=True,
+        )
         # Surface only a generic message in the response body; the real
         # exception text remains in the logs above for operators. In
         # debug builds the original message is preserved so local
@@ -121,7 +126,12 @@ async def dyvine_error_handler(request: Request, exc: DyvineError) -> JSONRespon
         )
         client_details: dict[str, Any] | None = exc.details if settings.debug else None
     else:
-        logger.warning(log_message, extra=extra)
+        logger.warning(
+            "%s: %s",
+            exc.__class__.__name__,
+            exc.message,
+            extra=extra,
+        )
         client_message = exc.message
         client_details = exc.details
 
@@ -144,7 +154,8 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
     correlation_id = getattr(request.state, "correlation_id", None)
 
     logger.error(
-        f"Unexpected error: {exc}",
+        "Unexpected error: %s",
+        exc,
         extra={
             "correlation_id": correlation_id,
             "exception_type": exc.__class__.__name__,

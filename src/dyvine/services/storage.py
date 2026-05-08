@@ -87,6 +87,13 @@ class R2StorageService:
         bucket: Name of the R2 bucket
     """
 
+    # Instance-level flag flipped the first time ``_list_objects_sync``
+    # falls back to a one-off ``ThreadPoolExecutor`` because no shared
+    # head pool was injected. Latching the warning to first occurrence
+    # keeps the production misconfiguration loud without flooding the
+    # log every time tests exercise the fallback path.
+    _head_pool_warning_emitted: bool
+
     def __init__(
         self,
         *,
@@ -112,6 +119,7 @@ class R2StorageService:
         """
         self._executor: Executor | None = executor
         self._head_executor: Executor | None = head_executor
+        self._head_pool_warning_emitted = False
 
         # Check if R2 configuration is available
         if not settings.r2.is_configured:
@@ -619,12 +627,19 @@ class R2StorageService:
                 obj_data["Metadata"] = metadata
             return results
 
-        logger.warning(
-            "R2 head executor not attached; falling back to a one-off pool. "
-            "Each call holds the calling executor slot for the full fan-out; "
-            "wire ``set_head_executor`` from the service container.",
-            extra={"prefix": prefix, "object_count": len(keys)},
-        )
+        # ``object.__new__`` paths (test fixtures) skip ``__init__`` so
+        # the latch attribute may not exist; ``getattr`` falls back to
+        # ``False`` and the explicit setattr below installs the flag for
+        # subsequent calls on the same instance.
+        if not getattr(self, "_head_pool_warning_emitted", False):
+            logger.warning(
+                "R2 head executor not attached; falling back to a one-off "
+                "pool. Each call holds the calling executor slot for the "
+                "full fan-out; wire ``set_head_executor`` from the "
+                "service container.",
+                extra={"prefix": prefix, "object_count": len(keys)},
+            )
+            self._head_pool_warning_emitted = True
         workers = min(LIST_OBJECTS_HEAD_MAX_WORKERS, len(keys))
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="r2-head"

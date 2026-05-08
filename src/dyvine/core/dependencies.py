@@ -29,6 +29,7 @@ Example:
         user_service = container.user_service
 """
 
+import hmac
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Annotated, Any
@@ -447,7 +448,12 @@ def require_api_key(
     if not settings.security.require_api_key:
         return
     expected = settings.security.api_key
-    if not expected or not x_api_key or x_api_key != expected:
+    # ``hmac.compare_digest`` runs in time independent of the leading
+    # matching prefix, which prevents a remote attacker from probing the
+    # secret a byte at a time via response-latency timing. The empty
+    # fallbacks keep the comparison length-balanced when either side is
+    # missing so the rejection path also has uniform timing.
+    if not expected or not hmac.compare_digest(x_api_key or "", expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",
