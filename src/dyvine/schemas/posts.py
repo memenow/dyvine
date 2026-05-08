@@ -135,9 +135,7 @@ class BulkDownloadResponse(BaseModel):
         error_details: Details of any errors encountered
     """
 
-    operation_id: str | None = Field(
-        default=None, description="Operation tracking identifier"
-    )
+    operation_id: str = Field(..., description="Operation tracking identifier")
     sec_user_id: str = Field(..., description="Target user's identifier")
     download_path: str | None = Field(
         default=None,

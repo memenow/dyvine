@@ -63,7 +63,14 @@ class APISettings(BaseSettings):
         default=10, ge=1, description="API rate limiting threshold per second"
     )
     cors_origins: list[str] = Field(
-        default=["*"], description="List of allowed CORS origins"
+        default_factory=lambda: ["http://localhost:3000"],
+        description=(
+            "Allowed browser origins. Defaults to localhost development; "
+            "production deployments must replace this with an explicit "
+            'allowlist via the ``API_CORS_ORIGINS`` env var. ``["*"]`` is '
+            "accepted but disables credentialed CORS automatically (see "
+            "``main.py`` middleware)."
+        ),
     )
     operation_db_path: str = Field(
         default="data/douyin/state/operations.db",

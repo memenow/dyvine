@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from ..core.decorators import handle_errors
 from ..core.dependencies import get_post_service
-from ..core.exceptions import DownloadError, UserNotFoundError
+from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..schemas.posts import BulkDownloadResponse, PostDetail
 from ..services.posts import PostService
@@ -304,9 +304,22 @@ async def download_user_posts(
         logger.warning("User not found", extra={"user_id": user_id})
         raise HTTPException(status_code=404, detail=str(e)) from e
 
-    except DownloadError as e:
-        logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
-        raise HTTPException(status_code=500, detail=str(e)) from e
+    except ServiceError as e:
+        # ``start_bulk_download`` raises ``PostServiceError`` (an alias for
+        # ``ServiceError``) when the upstream profile fetch fails before
+        # the operation record can be created. 502 surfaces the upstream
+        # nature of the failure to clients instead of the opaque
+        # ``Internal server error`` the bare ``Exception`` branch would
+        # emit, while still letting the response body carry the original
+        # message for debugging. ``DownloadError`` is also a
+        # ``ServiceError``, so any future download-layer failure routed
+        # through this handler is mapped to the same status — keep it
+        # there until a finer mapping is justified.
+        logger.error(
+            "Bulk download scheduling failed",
+            extra={"user_id": user_id, "error": str(e)},
+        )
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(

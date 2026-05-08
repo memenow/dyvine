@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from dyvine.core.exceptions import (
     DownloadError,
+    ServiceError,
     UserNotFoundError,
 )
 from dyvine.schemas.posts import (
@@ -178,22 +179,51 @@ async def test_download_user_posts_user_not_found(
 
 
 @pytest.mark.asyncio
-async def test_download_user_posts_download_error(
+async def test_download_user_posts_service_error_returns_502_with_detail(
     mock_post_service: MagicMock,
 ) -> None:
+    """``PostServiceError`` raised from ``start_bulk_download`` (the typical
+    path when the upstream profile fetch fails) must surface as a 502 with
+    the original message in ``detail`` rather than as the opaque 500 the
+    bare ``Exception`` branch emits.
+    """
+    from dyvine.routers.posts import download_user_posts
+
+    mock_post_service.start_bulk_download.side_effect = ServiceError(
+        "upstream profile fetch timed out"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
+    assert exc_info.value.status_code == 502
+    assert "upstream profile fetch timed out" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_download_user_posts_download_error_routes_through_service_error(
+    mock_post_service: MagicMock,
+) -> None:
+    """``DownloadError`` is a ``ServiceError`` subclass, so after the dead
+    ``except DownloadError`` branch was removed it must flow through the
+    ``ServiceError`` handler and land on 502 with the underlying detail.
+    """
     from dyvine.routers.posts import download_user_posts
 
     mock_post_service.start_bulk_download.side_effect = DownloadError("fail")
 
     with pytest.raises(HTTPException) as exc_info:
         await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 502
+    assert "fail" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
 async def test_download_user_posts_unexpected_error(
     mock_post_service: MagicMock,
 ) -> None:
+    """Non-``ServiceError`` exceptions still fall through to the opaque
+    500 to avoid leaking unbounded internal state in error responses.
+    """
     from dyvine.routers.posts import download_user_posts
 
     mock_post_service.start_bulk_download.side_effect = RuntimeError("boom")
@@ -201,6 +231,7 @@ async def test_download_user_posts_unexpected_error(
     with pytest.raises(HTTPException) as exc_info:
         await download_user_posts(service=mock_post_service, user_id="u1", max_cursor=0)
     assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Internal server error"
 
 
 # ── get_bulk_download_operation ─────────────────────────────────────────

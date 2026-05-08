@@ -164,48 +164,6 @@ def test_extract_image_urls_empty() -> None:
     assert svc._extract_image_urls({}) == []
 
 
-# ── _create_download_response ────────────────────────────────────────────
-
-
-def _stats(**kw: int) -> dict:
-    base = dict.fromkeys(PostType, 0)
-    for k, v in kw.items():
-        base[PostType(k)] = v
-    return base
-
-
-def test_create_download_response_success() -> None:
-    svc = _build_service()
-    stats = _stats(video=5)
-    resp = svc._create_download_response("u1", "/dl", 5, stats)
-    assert resp.status == DownloadStatus.SUCCESS
-    assert resp.total_downloaded == 5
-
-
-def test_create_download_response_partial() -> None:
-    svc = _build_service()
-    stats = _stats(video=3)
-    resp = svc._create_download_response("u1", "/dl", 10, stats)
-    assert resp.status == DownloadStatus.PARTIAL_SUCCESS
-
-
-def test_create_download_response_failed() -> None:
-    svc = _build_service()
-    stats = _stats()
-    resp = svc._create_download_response("u1", "/dl", 10, stats)
-    assert resp.status == DownloadStatus.FAILED
-    assert resp.total_downloaded == 0
-
-
-def test_create_download_response_message_format() -> None:
-    svc = _build_service()
-    stats = _stats(video=2, images=1)
-    resp = svc._create_download_response("u1", "/dl", 10, stats)
-    assert "Videos: 2" in resp.message
-    assert "Images: 1" in resp.message
-    assert "/dl" in resp.message
-
-
 # ── get_post_detail (async, mocked handler) ─────────────────────────────
 
 
@@ -485,6 +443,10 @@ async def test_run_bulk_download_marks_completed_for_zero_post_user(
     # ``total_downloaded == total_posts == 0`` is treated as a clean run.
     assert refreshed.completed_items == 0
     assert refreshed.total_items == 0
+    # No upstream error fired, so ``error`` must remain unset — pinning
+    # this guards against a regression where the terminal classifier
+    # spuriously copies ``batch_error_message`` for the zero-post path.
+    assert refreshed.error is None
 
 
 @pytest.mark.asyncio
@@ -515,7 +477,8 @@ async def test_run_bulk_download_records_failure_when_user_disappears(
 
     refreshed = await store.get_operation(operation.operation_id)
     assert refreshed.status == "failed"
-    assert refreshed.error and "ghost-user" in refreshed.error
+    assert refreshed.message == "Bulk download failed"
+    assert refreshed.error == "User not found: ghost-user"
 
 
 @pytest.mark.asyncio
@@ -685,6 +648,10 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
     # status must be FAILED. The important contract for this test is
     # termination, not the stats.
     assert refreshed.total_downloaded == 0
+    assert refreshed.status == DownloadStatus.FAILED
+    # The loop hit the ``max_pages`` cap (no exception was raised), so the
+    # operation must not carry a spurious ``error`` string.
+    assert refreshed.error_details is None
 
 
 @pytest.mark.asyncio
@@ -744,8 +711,149 @@ async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
     refreshed = await svc.get_bulk_download_status(operation.operation_id)
     assert refreshed.total_downloaded == 0
     # The loop terminated with no successful downloads but did not raise,
-    # so the operation lands in ``failed`` status (mapped to FAILED).
+    # so the operation lands in ``failed`` status (mapped to FAILED). The
+    # batch error message must be carried in ``error_details`` so callers
+    # polling the operation can distinguish a clean zero-post user from an
+    # upstream failure.
     assert refreshed.status == DownloadStatus.FAILED
+    assert refreshed.error_details == "upstream flaky"
+    assert refreshed.message == "Bulk download failed before any posts were downloaded"
+
+
+@pytest.mark.asyncio
+async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
+    tmp_path,
+) -> None:
+    """A batch error after partial progress must yield ``partial`` + error.
+
+    Without ``batch_errored`` propagation the terminal classifier would
+    mark the operation ``partial`` and discard the upstream failure
+    message — clients would see "missing items" with no hint of what went
+    wrong. Verify the error string survives to the operation record.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 10
+    profile.nickname = "PartialUser"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/partial-user"))
+
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="partial-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+
+        svc = _build_service(handler, operation_store=store)
+
+        call_count = 0
+
+        async def flaky_fetch(sec_user_id: str, cursor: int) -> dict:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    "aweme_list": [
+                        {"aweme_id": f"p{i}", "aweme_type": 0} for i in range(3)
+                    ],
+                    "has_more": True,
+                    "max_cursor": 100,
+                }
+            raise RuntimeError("upstream blew up on page 2")
+
+        async def fake_process(posts: dict, stats: dict, _user_path: Path) -> None:
+            stats[PostType.VIDEO] += len(posts.get("aweme_list", []))
+
+        with patch.object(svc, "_fetch_posts_batch", side_effect=flaky_fetch):
+            with patch.object(svc, "_process_posts_batch", side_effect=fake_process):
+                await svc._run_bulk_download(
+                    operation.operation_id, "partial-user", 0, profile=profile
+                )
+
+    refreshed = await svc.get_bulk_download_status(operation.operation_id)
+    assert refreshed.status == DownloadStatus.PARTIAL_SUCCESS
+    assert refreshed.total_downloaded == 3
+    assert refreshed.error_details == "upstream blew up on page 2"
+    assert refreshed.message == (
+        "Bulk download interrupted by upstream error: 3/10 posts"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_bulk_download_clamps_in_loop_progress_when_overcount(
+    tmp_path,
+) -> None:
+    """Per-batch progress must never exceed 100% even if downloaded > total.
+
+    The upstream ``aweme_count`` and the actual returned posts can drift
+    (deleted/private items are still surfaced through pagination) so the
+    in-loop ``progress`` field must be clamped. Without the clamp the
+    operation record would persist values like ``130.0`` that violate the
+    ``0..100`` contract documented on ``OperationRecord.progress``.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.aweme_count = 2  # smaller than what pagination actually returns
+    profile.nickname = "OverflowUser"
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/overflow-user"))
+
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="overflow-user",
+        status="pending",
+        message="scheduled",
+        metadata={"max_cursor": 0},
+    )
+
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+
+        svc = _build_service(handler, operation_store=store)
+
+        async def overcount_fetch(sec_user_id: str, cursor: int) -> dict:
+            # Single page returns five items even though aweme_count == 2.
+            return {
+                "aweme_list": [
+                    {"aweme_id": f"p{i}", "aweme_type": 0} for i in range(5)
+                ],
+                "has_more": False,
+                "max_cursor": 0,
+            }
+
+        async def fake_process(posts: dict, stats: dict, _user_path: Path) -> None:
+            stats[PostType.VIDEO] += len(posts.get("aweme_list", []))
+
+        with patch.object(svc, "_fetch_posts_batch", side_effect=overcount_fetch):
+            with patch.object(svc, "_process_posts_batch", side_effect=fake_process):
+                await svc._run_bulk_download(
+                    operation.operation_id, "overflow-user", 0, profile=profile
+                )
+
+    refreshed_record = await store.get_operation(operation.operation_id)
+    assert refreshed_record.progress is not None
+    assert refreshed_record.progress <= 100.0
+    assert refreshed_record.completed_items == 5
+    assert refreshed_record.total_items == 2
 
 
 # ── runtime polling consistency ─────────────────────────────────────────

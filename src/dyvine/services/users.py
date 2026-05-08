@@ -64,6 +64,7 @@ Performance Considerations:
 
 import asyncio
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -536,16 +537,31 @@ class UserService:
         """
         if temp_dir is None or not temp_dir.exists():
             return
-        try:
-            for file in sorted(temp_dir.glob("**/*"), reverse=True):
-                if file.is_file():
-                    file.unlink()
-            for sub_dir in sorted(temp_dir.glob("**/*"), reverse=True):
-                if sub_dir.is_dir():
-                    sub_dir.rmdir()
-            temp_dir.rmdir()
-        except Exception as e:
-            logger.error(f"Failed to clean up temp directory: {str(e)}")
+
+        # ``shutil.rmtree`` handles nested files in a single walk so a file
+        # created mid-cleanup cannot strand a non-empty subdirectory the
+        # way a hand-rolled two-pass glob walker would. The ``onexc``
+        # callback (Python 3.12+) keeps the helper safe to call from a
+        # ``finally`` block — a cleanup failure must never mask the
+        # original error — but records each failed entry so a permission
+        # issue on a production volume is still observable in logs
+        # instead of silently leaving orphaned files behind. ``path`` is
+        # typed ``str``: on Linux + Python 3.12 ``shutil.rmtree`` runs
+        # the fd-based walker which calls ``os.fsdecode(path)`` at entry
+        # before invoking ``onexc`` (CPython ``shutil.py``), so a bytes
+        # path the kernel surfaced on a non-UTF-8 filesystem never
+        # reaches this callback.
+        def _on_rmtree_error(func: Any, path: str, exc: BaseException) -> None:
+            logger.warning(
+                "Failed to remove temp file during workspace cleanup",
+                extra={
+                    "path": path,
+                    "operation": getattr(func, "__name__", str(func)),
+                    "error": str(exc),
+                },
+            )
+
+        shutil.rmtree(temp_dir, onexc=_on_rmtree_error)
 
     async def _process_download(
         self,
