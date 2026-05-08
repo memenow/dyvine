@@ -31,9 +31,10 @@ Example:
 
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Any
+from typing import Annotated, Any
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+from fastapi import Depends, Header, HTTPException, status
 
 from ..services.livestreams import LivestreamService
 from ..services.posts import PostService
@@ -226,15 +227,17 @@ class ServiceContainer:
         if isinstance(operation_store, OperationStore):
             operation_store.shutdown()
 
-        # Reverse of init order. ``r2_executor`` is drained before
-        # ``r2_head_executor`` so any in-flight listing finishes its
-        # ``head_object`` fan-out submissions while the head pool still
-        # accepts work; the head pool is then drained on its own.
+        # Reverse of init order. The R2 head pool is drained first so any
+        # ``list_objects`` follow-up still has a working main pool to
+        # report back through; the head pool then drains its own
+        # short-lived ``head_object`` work, R2 uploads finish next, and
+        # SQLite + audit pools drain last so any final write triggered by
+        # an earlier shutdown step still has a target to land on.
         for attr in (
-            "_audit_executor",
-            "_sqlite_executor",
-            "_r2_executor",
             "_r2_head_executor",
+            "_r2_executor",
+            "_sqlite_executor",
+            "_audit_executor",
         ):
             executor = getattr(self, attr)
             if executor is not None:
@@ -427,3 +430,26 @@ def get_post_service() -> PostService:
     ``Annotated[PostService, Depends(get_post_service)]``.
     """
     return get_service_container().post_service
+
+
+def require_api_key(
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> None:
+    """Reject requests that do not present a matching ``X-API-Key`` header.
+
+    Uses ``settings.security.api_key`` as the expected value. The check is
+    bypassed entirely when ``settings.security.require_api_key`` is
+    ``False`` so deployments fronted by mTLS or a mesh policy can opt out.
+    The composite ``Settings`` validator already guarantees the configured
+    key is non-default in production builds, so this dependency does not
+    need to re-check that here.
+    """
+    if not settings.security.require_api_key:
+        return
+    expected = settings.security.api_key
+    if not expected or not x_api_key or x_api_key != expected:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )

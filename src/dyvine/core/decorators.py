@@ -21,6 +21,12 @@ from .exceptions import (
     ValidationError,
 )
 from .logging import ContextLogger
+from .settings import settings
+
+# Default fallback logger used when callers omit the ``logger`` argument
+# so a bare ``DyvineError`` cannot disappear silently. Module-level so
+# the lookup happens once.
+_FALLBACK_LOGGER = ContextLogger(__name__)
 
 
 def handle_errors(
@@ -51,47 +57,63 @@ def handle_errors(
         A decorator that wraps an async callable (coroutine or async
         generator).
     """
+    # Default exception → status mapping. Caller-provided overrides are
+    # consulted FIRST below so a subclass that wants a different status
+    # code (e.g. ``LivestreamError`` mapped to 404 even though it
+    # inherits from ``ServiceError`` → 500) is matched ahead of the
+    # broader default.
     default_mapping: dict[type[Exception], int] = {
         NotFoundError: 404,
-        ValidationError: 400,
+        ValidationError: 422,
         AuthenticationError: 401,
         RateLimitError: 429,
         ServiceError: 500,
     }
+    user_overrides: dict[type[Exception], int] = dict(error_mapping or {})
 
-    if error_mapping:
-        default_mapping.update(error_mapping)
+    log = logger or _FALLBACK_LOGGER
 
     def _translate(exc: Exception) -> HTTPException:
         """Convert a service-layer exception into an HTTPException.
 
         Centralizes the mapping + logging so both the coroutine and the
-        async-generator wrappers share a single implementation.
+        async-generator wrappers share a single implementation. The
+        response payload mirrors the global ``dyvine_error_handler``: 5xx
+        responses never echo the raw ``str(exc)`` because service-layer
+        messages embed internal paths and upstream payloads.
         """
         if isinstance(exc, DyvineError):
             status_code = next(
                 (
                     code
-                    for exc_type, code in default_mapping.items()
+                    for exc_type, code in (
+                        list(user_overrides.items()) + list(default_mapping.items())
+                    )
                     if isinstance(exc, exc_type)
                 ),
                 400,
             )
-            if logger:
-                logger.error(
-                    f"{type(exc).__name__}: {str(exc)}",
-                    extra={"error_code": exc.error_code, "details": exc.details},
+            log.error(
+                f"{type(exc).__name__}: {str(exc)}",
+                extra={"error_code": exc.error_code, "details": exc.details},
+            )
+            if status_code >= 500 and not settings.debug:
+                client_message = (
+                    "Internal service error; see correlation_id in server logs"
                 )
+                client_details: dict[str, Any] = {}
+            else:
+                client_message = str(exc)
+                client_details = exc.details
             return HTTPException(
                 status_code=status_code,
                 detail={
-                    "error": str(exc),
+                    "error": client_message,
                     "error_code": exc.error_code,
-                    "details": exc.details,
+                    "details": client_details,
                 },
             )
-        if logger:
-            logger.exception(f"Unexpected error: {str(exc)}")
+        log.exception(f"Unexpected error: {str(exc)}")
         return HTTPException(status_code=500, detail="Internal server error")
 
     def decorator(func: Callable) -> Callable:

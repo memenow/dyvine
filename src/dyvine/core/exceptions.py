@@ -40,6 +40,12 @@ class LivestreamNotFoundError(NotFoundError):
     pass
 
 
+class OperationNotFoundError(NotFoundError):
+    """Operation record not found in the persistent store."""
+
+    pass
+
+
 class ServiceError(DyvineError):
     """Base exception for service-level errors."""
 

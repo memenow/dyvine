@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class OperationStatus(StrEnum):
+    """Canonical operation status values shared across the API surface.
+
+    Centralising the vocabulary avoids the historical drift between
+    ``OperationResponse.status`` (free-form string) and
+    ``BulkDownloadResponse.status`` (own ``DownloadStatus`` enum).
+    Persistence layers and routers both reuse these literals so an SDK
+    can branch on the same set of values regardless of the operation
+    type.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
 
 
 class OperationResponse(BaseModel):
@@ -19,11 +39,9 @@ class OperationResponse(BaseModel):
     subject_id: str = Field(
         ..., description="Domain identifier the operation belongs to"
     )
-    status: str = Field(
+    status: OperationStatus = Field(
         ...,
-        description=(
-            "Operation status: pending | running | completed | partial | failed"
-        ),
+        description="Operation status (see ``OperationStatus`` for the enum members)",
     )
     message: str = Field(..., description="Human-readable status message")
     progress: float | None = Field(None, description="Progress percentage (0-100)")
@@ -41,7 +59,11 @@ class OperationResponse(BaseModel):
     )
     download_path: str | None = Field(
         None,
-        description="Filesystem path to the downloaded artifact, when available",
+        description=(
+            "Path to the downloaded artefact, expressed relative to the "
+            "configured download root. Internal absolute paths are never "
+            "exposed."
+        ),
     )
     error: str | None = Field(None, description="Terminal error message, when failed")
     created_at: str = Field(..., description="ISO 8601 creation timestamp")
