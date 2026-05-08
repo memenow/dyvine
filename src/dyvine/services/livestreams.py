@@ -191,17 +191,28 @@ class LivestreamService:
 
     @staticmethod
     def _stream_map_from_room_data(
-        room_data: str | None,
+        room_data: str | dict[str, Any] | None,
     ) -> tuple[dict[str, str], int | None, dict[str, str]]:
-        """Parse room_data JSON into HLS and FLV stream maps plus status."""
+        """Parse room_data JSON into HLS and FLV stream maps plus status.
+
+        Accepts either the legacy raw JSON string (older operation
+        records) or the structured dict produced by the updated
+        ``UserResponse`` schema. Anything else is treated as missing.
+        """
         if not room_data:
             return {}, None, {}
 
-        try:
-            payload = json.loads(room_data)
-        except json.JSONDecodeError:
-            logger.debug("Invalid room_data payload")
-            return {}, None, {}
+        if isinstance(room_data, dict):
+            payload: dict[str, Any] = room_data
+        else:
+            try:
+                decoded = json.loads(room_data)
+            except json.JSONDecodeError:
+                logger.debug("Invalid room_data payload")
+                return {}, None, {}
+            if not isinstance(decoded, dict):
+                return {}, None, {}
+            payload = decoded
 
         stream_map: dict[str, str] = {}
         flv_map: dict[str, str] = {}

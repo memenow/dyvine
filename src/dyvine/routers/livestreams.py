@@ -38,7 +38,10 @@ _OPERATION_ID_PATTERN = r"^[A-Za-z0-9_\-]{8,128}$"
 # returns 404 for those cases (the resource is not "available"); the
 # global ``ServiceError → 500`` mapping would otherwise reclassify a
 # user-visible "not streaming" condition as an internal error.
-_LIVESTREAM_ERROR_MAPPING = {LivestreamError: 404}
+# The annotation pins the dict to the broader ``type[Exception]`` key
+# type the decorator declares so mypy does not reject this constant
+# under invariant generic key types.
+_LIVESTREAM_ERROR_MAPPING: dict[type[Exception], int] = {LivestreamError: 404}
 
 
 @router.post(

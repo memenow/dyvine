@@ -580,7 +580,11 @@ class R2StorageService:
             if continuation_token is not None:
                 kwargs["ContinuationToken"] = continuation_token
             response = client.list_objects_v2(**kwargs)
-            objects.extend(response.get("Contents", []))
+            # boto3 stubs type ``Contents`` as ``list[ObjectTypeDef]`` (a
+            # TypedDict alias), but downstream code only relies on the
+            # ``dict[str, Any]`` shape. Cast through ``list`` so mypy
+            # accepts the extend without leaking the boto3-specific type.
+            objects.extend(dict(item) for item in response.get("Contents", []))
             if not response.get("IsTruncated"):
                 break
             continuation_token = response.get("NextContinuationToken")

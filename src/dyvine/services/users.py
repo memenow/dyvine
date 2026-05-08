@@ -67,9 +67,10 @@ import json
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+from pydantic import AnyHttpUrl
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
@@ -291,10 +292,15 @@ class UserService:
             raw_room_data = raw_user.get("user", {}).get("room_data")
             room_data = _parse_room_data(raw_room_data)
 
+            # Pydantic v2 coerces ``str`` to ``AnyHttpUrl`` at validation
+            # time, so the explicit cast is safe. mypy still sees the
+            # call-site argument as ``str | None``, so resolve the field
+            # before the constructor call and pass it through ``cast``.
+            avatar_value = str(user_data.avatar_url) if user_data.avatar_url else None
             return UserResponse(
                 user_id=user_id,
                 nickname=user_data.nickname,
-                avatar_url=str(user_data.avatar_url) if user_data.avatar_url else None,
+                avatar_url=cast(AnyHttpUrl | None, avatar_value),
                 signature=str(user_data.signature or ""),
                 following_count=int(user_data.following_count or 0),  # type: ignore
                 follower_count=int(user_data.follower_count or 0),  # type: ignore
