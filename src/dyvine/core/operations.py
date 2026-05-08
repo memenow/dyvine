@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .exceptions import DownloadError
+from .exceptions import OperationNotFoundError
 from .settings import settings
 
 _R = TypeVar("_R")
@@ -533,7 +533,7 @@ class OperationStore:
         ).fetchone()
         operation = self._from_row(row)
         if operation is None:
-            raise DownloadError(f"Operation {operation_id} not found")
+            raise OperationNotFoundError(f"Operation {operation_id} not found")
         return operation
 
     async def get_latest_operation_for_subject(
@@ -574,7 +574,7 @@ class OperationStore:
         row = connection.execute(query, params).fetchone()
         operation = self._from_row(row)
         if operation is None:
-            raise DownloadError(f"Operation {subject_id} not found")
+            raise OperationNotFoundError(f"Operation {subject_id} not found")
         return operation
 
     async def update_operation(
@@ -586,7 +586,6 @@ class OperationStore:
     def _update_operation_sync(
         self, operation_id: str, **fields: Any
     ) -> OperationRecord:
-        current = self._get_operation_sync(operation_id)
         allowed_fields = {
             "status",
             "message",
@@ -597,23 +596,51 @@ class OperationStore:
             "error",
             "metadata",
         }
-        updates = {key: value for key, value in fields.items() if key in allowed_fields}
-        if not updates:
-            return current
+        requested = {
+            key: value for key, value in fields.items() if key in allowed_fields
+        }
 
-        updates["updated_at"] = self._now()
-        if "metadata" not in updates:
-            updates["metadata"] = current.metadata
-
-        assignments = ", ".join(f"{column} = ?" for column in updates)
-        values = [
-            json.dumps(value, sort_keys=True) if key == "metadata" else value
-            for key, value in updates.items()
-        ]
-        values.append(operation_id)
-
+        # Read + write happen inside a single ``self._lock`` window so
+        # two concurrent updates cannot interleave. The previous shape
+        # fetched ``current`` outside the lock and copied
+        # ``current.metadata`` into the UPDATE; a writer that committed
+        # between the read and the lock acquisition was silently
+        # overwritten because the second update reapplied the stale
+        # metadata blob.
         with self._lock:
             connection = self._writer_connection()
+            cursor = connection.execute(
+                "SELECT metadata FROM operations WHERE operation_id = ?",
+                (operation_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise OperationNotFoundError(
+                    f"Operation {operation_id} not found"
+                )
+
+            if not requested:
+                connection.commit()
+                return self._get_operation_sync(operation_id)
+
+            updates: dict[str, Any] = dict(requested)
+            updates["updated_at"] = self._now()
+            if "metadata" not in updates:
+                # Preserve the row's existing metadata under the lock so
+                # the value reflects whatever the previous winner wrote
+                # rather than a snapshot taken before the lock was held.
+                stored = row["metadata"] if "metadata" in row.keys() else None
+                updates["metadata"] = (
+                    json.loads(str(stored)) if stored else {}
+                )
+
+            assignments = ", ".join(f"{column} = ?" for column in updates)
+            values = [
+                json.dumps(value, sort_keys=True) if key == "metadata" else value
+                for key, value in updates.items()
+            ]
+            values.append(operation_id)
+
             connection.execute(
                 f"UPDATE operations SET {assignments} WHERE operation_id = ?",
                 values,
