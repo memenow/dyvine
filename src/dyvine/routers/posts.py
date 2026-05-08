@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from ..core.decorators import handle_errors
 from ..core.dependencies import get_post_service
-from ..core.exceptions import DownloadError, UserNotFoundError
+from ..core.exceptions import DownloadError, ServiceError, UserNotFoundError
 from ..core.logging import ContextLogger
 from ..schemas.posts import BulkDownloadResponse, PostDetail
 from ..services.posts import PostService
@@ -307,6 +307,19 @@ async def download_user_posts(
     except DownloadError as e:
         logger.error("Download failed", extra={"user_id": user_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+    except ServiceError as e:
+        # ``PostServiceError`` (a ``ServiceError`` that is not a
+        # ``DownloadError``) is raised when the upstream profile fetch fails
+        # before the operation record can be created. Surface the service-
+        # level message so clients can distinguish "upstream unavailable"
+        # from a generic crash, instead of the opaque ``Internal server error``
+        # the bare ``Exception`` branch would emit.
+        logger.error(
+            "Bulk download scheduling failed",
+            extra={"user_id": user_id, "error": str(e)},
+        )
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
     except Exception as e:
         logger.exception(

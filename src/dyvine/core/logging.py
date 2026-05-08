@@ -10,6 +10,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+import psutil
+
 from .settings import settings
 
 # Module-level ContextVars shared by every ``ContextLogger`` instance.
@@ -134,8 +136,6 @@ class ContextLogger:
 
     @asynccontextmanager
     async def track_memory(self, operation: str) -> AsyncGenerator[None, None]:
-        import psutil
-
         process = psutil.Process()
         start_mem = process.memory_info().rss
         try:

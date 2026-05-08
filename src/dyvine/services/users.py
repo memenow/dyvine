@@ -64,6 +64,7 @@ Performance Considerations:
 
 import asyncio
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -536,16 +537,13 @@ class UserService:
         """
         if temp_dir is None or not temp_dir.exists():
             return
-        try:
-            for file in sorted(temp_dir.glob("**/*"), reverse=True):
-                if file.is_file():
-                    file.unlink()
-            for sub_dir in sorted(temp_dir.glob("**/*"), reverse=True):
-                if sub_dir.is_dir():
-                    sub_dir.rmdir()
-            temp_dir.rmdir()
-        except Exception as e:
-            logger.error(f"Failed to clean up temp directory: {str(e)}")
+        # ``shutil.rmtree`` walks the tree atomically (single OS call per
+        # entry) so a file created mid-cleanup cannot strand a non-empty
+        # subdirectory the way a hand-rolled two-pass glob walker would.
+        # ``ignore_errors=True`` keeps the helper safe to call from a
+        # ``finally`` block when partial state may already have been torn
+        # down by another task.
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
     async def _process_download(
         self,

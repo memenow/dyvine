@@ -125,6 +125,7 @@ def test_post_detail_with_no_media() -> None:
 
 def test_bulk_download_response_defaults() -> None:
     resp = BulkDownloadResponse(
+        operation_id="op-defaults",
         sec_user_id="u1",
         download_path="/tmp",
         total_posts=0,

@@ -562,6 +562,48 @@ async def test_upload_directory_to_r2_counts_partial_failures(
     assert file_failing.exists()
 
 
+@pytest.mark.asyncio
+async def test_finalize_status_clamps_progress_when_downloaded_exceeds_total(
+    tmp_path: Path,
+) -> None:
+    """``_finalize_status`` must clamp ``progress`` at 100 even when the
+    download counter overshoots the profile's ``aweme_count``.
+
+    A run that mixes posts and likes accumulates both into ``downloaded``
+    while ``total_posts`` only tracks ``aweme_count``. Combined with an R2
+    upload failure (which forces the ``partial`` branch), the percentage
+    can climb above 100. The persisted ``progress`` field must remain
+    inside the documented 0..100 range so dashboards do not render
+    nonsense values.
+    """
+    store = OperationStore(str(tmp_path / "operations.db"))
+    operation = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="overflow-user",
+        status="running",
+        message="scheduled",
+        progress=0.0,
+        metadata={},
+    )
+
+    service = UserService(operation_store=store)
+    await service._finalize_status(
+        task_id=operation.operation_id,
+        downloaded=130,
+        total_posts=100,
+        failed_uploads=1,
+        downloading_likes_only=False,
+    )
+
+    refreshed = await store.get_operation(operation.operation_id)
+    assert refreshed.status == "partial"
+    assert refreshed.progress is not None
+    assert refreshed.progress <= 100.0
+    # ``failed_uploads`` should still surface in the error string so the
+    # clamp does not mask the underlying R2 failure.
+    assert refreshed.error and "R2 upload failed" in refreshed.error
+
+
 def test_cleanup_temp_dir_only_removes_target_subdirectory(tmp_path: Path) -> None:
     """Cleanup must isolate per-task workspaces from sibling tasks.
 

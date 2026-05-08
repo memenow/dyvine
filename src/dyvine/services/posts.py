@@ -352,6 +352,8 @@ class PostService:
         """
         download_stats: dict[PostType, int] = dict.fromkeys(PostType, 0)
         download_path: str | None = None
+        batch_errored = False
+        batch_error_message: str | None = None
 
         aweme_count = getattr(profile, "aweme_count", 0)
         total_posts = aweme_count if isinstance(aweme_count, int) else 0
@@ -506,6 +508,8 @@ class PostService:
                             "operation_id": operation_id,
                         },
                     )
+                    batch_errored = True
+                    batch_error_message = str(batch_error)
                     break
 
         except UserNotFoundError as e:
@@ -549,11 +553,28 @@ class PostService:
             )
             return
 
-        # Success / partial-success classification matches
-        # :meth:`_create_download_response` so the polling response surfaces
-        # the same status the synchronous implementation used to return.
+        # Terminal classification. The batch-error branch must take precedence
+        # over the count-based classifier: otherwise an upstream failure on
+        # the very first batch of a zero-post user would fall through as
+        # ``completed`` (because ``0 == 0``), and a partial run interrupted by
+        # an error would surface as ``partial`` with an empty ``error`` field
+        # — both of which lose the failure signal clients rely on.
         total_downloaded = sum(download_stats.values())
-        if total_downloaded == total_posts:
+        terminal_error: str | None = None
+        if batch_errored:
+            terminal_error = batch_error_message
+            if total_downloaded > 0:
+                final_status = "partial"
+                terminal_message = (
+                    "Bulk download interrupted by upstream error: "
+                    f"{total_downloaded}/{total_posts} posts"
+                )
+            else:
+                final_status = "failed"
+                terminal_message = (
+                    "Bulk download failed before any posts were downloaded"
+                )
+        elif total_downloaded == total_posts:
             final_status = "completed"
             terminal_message = (
                 f"Bulk download completed: {total_downloaded}/{total_posts} posts"
@@ -582,6 +603,7 @@ class PostService:
             completed_items=total_downloaded,
             total_items=total_posts,
             download_path=download_path,
+            error=terminal_error,
             metadata={
                 "max_cursor": max_cursor,
                 "download_stats": _serialize_download_stats(download_stats),
@@ -604,10 +626,10 @@ class PostService:
             DownloadError: If no bulk download operation matches the
                 provided identifier.
         """
-        try:
-            op = await self.operation_store.get_operation(operation_id)
-        except DownloadError as e:
-            raise DownloadError(f"Bulk download task {operation_id} not found") from e
+        # ``OperationStore.get_operation`` already raises ``DownloadError``
+        # with a descriptive message when the row is missing; re-wrapping
+        # here would just discard the original ``error_code`` and ``details``.
+        op = await self.operation_store.get_operation(operation_id)
 
         if op.operation_type != "user_posts_bulk_download":
             raise DownloadError(f"Bulk download task {operation_id} not found")
@@ -851,62 +873,6 @@ class PostService:
                     )
                 )
         return image_info if image_info else None
-
-    def _create_download_response(
-        self,
-        sec_user_id: str,
-        download_path: str,
-        total_posts: int,
-        download_stats: dict[PostType, int],
-        error_details: str | None = None,
-    ) -> BulkDownloadResponse:
-        """Create the response object for a bulk download operation.
-
-        Args:
-            sec_user_id (str): Unique identifier of the user.
-            download_path (str): Path to the directory where the content was
-                downloaded.
-            total_posts (int): Total number of posts for the user.
-            download_stats (Dict[PostType, int]): Dictionary containing the
-                download statistics for each post type.
-
-        Returns:
-            BulkDownloadResponse: Object containing the results of the bulk
-                download operation.
-        """
-        total_downloaded = sum(download_stats.values())
-
-        status = (
-            DownloadStatus.SUCCESS
-            if total_downloaded == total_posts
-            else (
-                DownloadStatus.PARTIAL_SUCCESS
-                if total_downloaded > 0
-                else DownloadStatus.FAILED
-            )
-        )
-
-        message = (
-            f"Downloaded {total_downloaded} out of {total_posts} posts. "
-            f"(Videos: {download_stats[PostType.VIDEO]}, "
-            f"Images: {download_stats[PostType.IMAGES]}, "
-            f"Mixed: {download_stats[PostType.MIXED]}, "
-            f"Lives: {download_stats[PostType.LIVE]}, "
-            f"Collections: {download_stats[PostType.COLLECTION]}, "
-            f"Stories: {download_stats[PostType.STORY]}) "
-            f"Files saved to {download_path}"
-        )
-
-        return BulkDownloadResponse(
-            sec_user_id=sec_user_id,
-            download_path=download_path,
-            total_posts=total_posts,
-            downloaded_count=download_stats,
-            total_downloaded=total_downloaded,
-            status=status,
-            message=message,
-            error_details=error_details,
-        )
 
 
 # ----------------------------------------------------------------------
