@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from dyvine.core.operations import OperationStore
 from dyvine.core.exceptions import OperationNotFoundError
+from dyvine.core.operations import OperationStore
 from dyvine.services.users import DownloadResponse, UserService
 
 
