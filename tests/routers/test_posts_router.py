@@ -18,6 +18,7 @@ from dyvine.schemas.posts import (
     PostDetail,
     PostType,
 )
+from dyvine.services.posts import UserPostsPage
 
 
 @pytest.fixture
@@ -62,7 +63,9 @@ async def test_get_post_not_found(mock_post_service: MagicMock) -> None:
 async def test_list_user_posts_success(mock_post_service: MagicMock) -> None:
     from dyvine.routers.posts import list_user_posts
 
-    mock_post_service.get_user_posts.return_value = []
+    mock_post_service.get_user_posts.return_value = UserPostsPage(
+        posts=[], next_cursor=None, has_more=False
+    )
 
     result = await list_user_posts(
         service=mock_post_service, user_id="user01", page_token=None, count=20
@@ -73,24 +76,41 @@ async def test_list_user_posts_success(mock_post_service: MagicMock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_user_posts_paginates_with_opaque_token(
+async def test_list_user_posts_paginates_with_upstream_cursor(
     mock_post_service: MagicMock,
 ) -> None:
-    from dyvine.routers.posts import list_user_posts
+    """The next-page token must echo the upstream Douyin ``max_cursor``.
+
+    Earlier revisions synthesised the token from ``cursor + len(posts)``,
+    which is not a valid Douyin cursor — the upstream API ignored it
+    and the client either re-fetched the same window or skipped pages.
+    The router now base64-encodes whatever ``max_cursor`` the service
+    surfaced.
+    """
+    from dyvine.routers.posts import (
+        _decode_page_token,
+        list_user_posts,
+    )
 
     detail = PostDetail(
         aweme_id="9876543210", create_time=0, post_type=PostType.VIDEO
     )
-    mock_post_service.get_user_posts.return_value = [detail]
+    mock_post_service.get_user_posts.return_value = UserPostsPage(
+        posts=[detail], next_cursor=12345, has_more=True
+    )
 
     first = await list_user_posts(
         service=mock_post_service, user_id="user01", page_token=None, count=20
     )
     assert first.posts == [detail]
     assert first.next_page_token is not None
+    assert _decode_page_token(first.next_page_token) == 12345
 
-    # The second page reuses the opaque token; the service receives the
-    # decoded numeric cursor it can hand back to the upstream API.
+    # The follow-up call hands the decoded upstream cursor back to the
+    # service untouched.
+    mock_post_service.get_user_posts.return_value = UserPostsPage(
+        posts=[], next_cursor=None, has_more=False
+    )
     second = await list_user_posts(
         service=mock_post_service,
         user_id="user01",
@@ -98,8 +118,30 @@ async def test_list_user_posts_paginates_with_opaque_token(
         count=20,
     )
     second_call_cursor = mock_post_service.get_user_posts.await_args_list[-1].args[1]
-    assert second_call_cursor == 1
+    assert second_call_cursor == 12345
     assert isinstance(second, ListPostsResponse)
+    assert second.next_page_token is None
+
+
+@pytest.mark.asyncio
+async def test_list_user_posts_omits_token_when_feed_exhausted(
+    mock_post_service: MagicMock,
+) -> None:
+    """When the service reports no further cursor, the response omits the token."""
+    from dyvine.routers.posts import list_user_posts
+
+    detail = PostDetail(
+        aweme_id="1111111111", create_time=0, post_type=PostType.VIDEO
+    )
+    mock_post_service.get_user_posts.return_value = UserPostsPage(
+        posts=[detail], next_cursor=None, has_more=False
+    )
+
+    result = await list_user_posts(
+        service=mock_post_service, user_id="user01", page_token=None, count=20
+    )
+    assert result.posts == [detail]
+    assert result.next_page_token is None
 
 
 @pytest.mark.asyncio
@@ -174,6 +216,24 @@ def test_download_user_posts_route_returns_202() -> None:
     payload = response.json()
     assert payload["operation_id"] == "op-202"
     assert payload["status"] == DownloadStatus.PENDING.value
+
+
+def test_decode_page_token_round_trips() -> None:
+    from dyvine.routers.posts import _decode_page_token, _encode_page_token
+
+    token = _encode_page_token(987)
+    assert _decode_page_token(token) == 987
+
+
+def test_decode_page_token_falls_back_to_zero_for_invalid_input() -> None:
+    """Garbage tokens must not surface as a 5xx; the cursor restarts."""
+    from dyvine.routers.posts import _decode_page_token
+
+    assert _decode_page_token(None) == 0
+    assert _decode_page_token("") == 0
+    assert _decode_page_token("!!!not-base64!!!") == 0
+    # Valid base64 that decodes to non-numeric ASCII also resets.
+    assert _decode_page_token("YWJj") == 0  # base64 for "abc"
 
 
 def test_router_registers_operation_route_before_post_id() -> None:

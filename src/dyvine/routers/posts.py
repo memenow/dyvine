@@ -135,9 +135,18 @@ async def list_user_posts(
         "Processing list_user_posts request",
         extra={"user_id": user_id, "page_token": page_token, "count": count},
     )
-    posts = await service.get_user_posts(user_id, cursor, count)
-    next_token = _encode_page_token(cursor + len(posts)) if posts else None
-    return ListPostsResponse(posts=posts, next_page_token=next_token, total_size=None)
+    page = await service.get_user_posts(user_id, cursor, count)
+    # The upstream Douyin ``max_cursor`` is an opaque sentinel — not an
+    # offset — so the next page token must echo it back verbatim.
+    # Synthesising a token from ``cursor + len(posts)`` would resolve to
+    # a window the upstream API does not recognise, repeating or
+    # skipping posts.
+    next_token = (
+        _encode_page_token(page.next_cursor) if page.next_cursor is not None else None
+    )
+    return ListPostsResponse(
+        posts=page.posts, next_page_token=next_token, total_size=None
+    )
 
 
 @router.post(

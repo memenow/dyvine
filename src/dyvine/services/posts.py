@@ -18,6 +18,7 @@ The module also defines custom exceptions related to post operations, such as
 PostNotFoundError, UserNotFoundError, and DownloadError.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,22 @@ PostServiceError = ServiceError
 # spinning forever. The fallback covers ``MAX_PAGES_FALLBACK * PAGE_SIZE``
 # items when ``total_posts`` is unknown.
 PAGE_SIZE = 20
+
+
+@dataclass(slots=True)
+class UserPostsPage:
+    """Single-page result from :meth:`PostService.get_user_posts`.
+
+    Carries both the materialised ``PostDetail`` items and the raw
+    upstream cursor needed to fetch the next page. Routers wrap the
+    cursor in an opaque token; service callers receive the integer
+    Douyin cursor verbatim. ``next_cursor`` is ``None`` when the feed
+    is exhausted (``has_more=False`` upstream).
+    """
+
+    posts: list[PostDetail]
+    next_cursor: int | None
+    has_more: bool
 
 
 class PostService:
@@ -161,23 +178,28 @@ class PostService:
         sec_user_id: str,
         max_cursor: int = 0,
         count: int = 20,
-    ) -> list[PostDetail]:
+    ) -> UserPostsPage:
         """Retrieve a paginated list of posts from a Douyin user.
 
         ``count`` is intentionally a literal default rather than the
         module-level :data:`PAGE_SIZE`. The latter binds the bulk
-        download loop guard to the fetcher used by ``_fetch_posts_batch``;
-        this single-page API is a public read endpoint whose contract
-        should not silently change if a future tuning PR adjusts
-        :data:`PAGE_SIZE`.
+        download loop guard to the fetcher used by
+        ``_fetch_posts_batch``; this single-page API is a public read
+        endpoint whose contract should not silently change if a future
+        tuning PR adjusts :data:`PAGE_SIZE`.
 
         Args:
             sec_user_id: Unique identifier of the user.
-            max_cursor: Pagination cursor for fetching the next batch of posts.
+            max_cursor: Douyin pagination cursor for fetching the next
+                batch of posts. ``0`` requests the first page.
             count: Number of posts to fetch per page.
 
         Returns:
-            List[PostDetail]: List of PostDetail objects representing the user's posts.
+            UserPostsPage: Materialised posts plus the raw upstream
+            ``max_cursor`` for the next request. Callers must echo
+            ``next_cursor`` back unchanged on the follow-up call;
+            offset arithmetic on it does not produce a valid Douyin
+            cursor.
 
         Raises:
             UserNotFoundError: If the requested user cannot be found.
@@ -201,7 +223,7 @@ class PostService:
                 posts_filter = await posts_iterator.__anext__()
             except StopAsyncIteration:
                 logger.warning("No posts found", extra={"sec_user_id": sec_user_id})
-                return []
+                return UserPostsPage(posts=[], next_cursor=None, has_more=False)
             finally:
                 aclose = getattr(posts_iterator, "aclose", None)
                 if callable(aclose):
@@ -210,18 +232,31 @@ class PostService:
             raw_data = posts_filter._to_raw()
             aweme_list = raw_data.get("aweme_list") or []
 
+            has_more = bool(raw_data.get("has_more"))
+            raw_next = raw_data.get("max_cursor")
+            next_cursor: int | None
+            if has_more and isinstance(raw_next, int):
+                # The upstream cursor is a Douyin-defined sentinel, not
+                # an offset; stuck cursors (``raw_next == max_cursor``)
+                # mean the feed is exhausted and we expose ``None`` so
+                # the router does not invite the caller to re-fetch the
+                # same window.
+                next_cursor = raw_next if raw_next != max_cursor else None
+            else:
+                next_cursor = None
+
             if not aweme_list:
                 logger.warning(
                     "User posts response empty",
                     extra={
                         "sec_user_id": sec_user_id,
-                        "has_more": raw_data.get("has_more"),
+                        "has_more": has_more,
                         "status_msg": raw_data.get("status_msg"),
                     },
                 )
-                return []
+                return UserPostsPage(posts=[], next_cursor=next_cursor, has_more=False)
 
-            return [
+            posts = [
                 PostDetail(
                     aweme_id=post["aweme_id"],
                     desc=post.get("desc", ""),
@@ -233,6 +268,12 @@ class PostService:
                 )
                 for post in aweme_list
             ]
+
+            return UserPostsPage(
+                posts=posts,
+                next_cursor=next_cursor,
+                has_more=has_more and next_cursor is not None,
+            )
 
         except UserNotFoundError:
             raise

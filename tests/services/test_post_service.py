@@ -251,7 +251,8 @@ async def test_get_user_posts_success() -> None:
                 "video": {"play_addr": {"url_list": ["https://example.com/v.mp4"]}},
             }
         ],
-        "has_more": False,
+        "has_more": True,
+        "max_cursor": 9999,
     }
 
     async def _iter(*a, **kw):
@@ -259,9 +260,13 @@ async def test_get_user_posts_success() -> None:
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)
-    result = await svc.get_user_posts("user1")
-    assert len(result) == 1
-    assert result[0].aweme_id == "p1"
+    page = await svc.get_user_posts("user1")
+    assert len(page.posts) == 1
+    assert page.posts[0].aweme_id == "p1"
+    # The router wraps ``next_cursor`` into an opaque token; the
+    # service surfaces the raw upstream sentinel verbatim.
+    assert page.next_cursor == 9999
+    assert page.has_more is True
 
 
 @pytest.mark.asyncio
@@ -274,23 +279,60 @@ async def test_get_user_posts_empty() -> None:
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)
-    result = await svc.get_user_posts("user-empty")
-    assert result == []
+    page = await svc.get_user_posts("user-empty")
+    assert page.posts == []
+    assert page.next_cursor is None
+    assert page.has_more is False
 
 
 @pytest.mark.asyncio
 async def test_get_user_posts_empty_aweme_list() -> None:
     handler = MagicMock()
     posts_filter = MagicMock()
-    posts_filter._to_raw.return_value = {"aweme_list": [], "has_more": False}
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [],
+        "has_more": False,
+        "max_cursor": 0,
+    }
 
     async def _iter(*a, **kw):
         yield posts_filter
 
     handler.fetch_user_post_videos = _iter
     svc = _build_service(handler)
-    result = await svc.get_user_posts("user-no-posts")
-    assert result == []
+    page = await svc.get_user_posts("user-no-posts")
+    assert page.posts == []
+    assert page.next_cursor is None
+    assert page.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_get_user_posts_returns_none_cursor_on_stuck_upstream() -> None:
+    """A sticky upstream cursor (``raw_next == max_cursor``) must not be echoed.
+
+    Returning the synthetic value as ``next_cursor`` would invite the
+    caller to re-fetch the same window forever; the service collapses
+    the case to ``next_cursor=None`` so the router renders no page
+    token and the client knows the feed is exhausted.
+    """
+    handler = MagicMock()
+    posts_filter = MagicMock()
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [
+            {"aweme_id": "p1", "create_time": 0, "aweme_type": 0},
+        ],
+        "has_more": True,
+        "max_cursor": 100,
+    }
+
+    async def _iter(*a, **kw):
+        yield posts_filter
+
+    handler.fetch_user_post_videos = _iter
+    svc = _build_service(handler)
+    page = await svc.get_user_posts("user-stuck", max_cursor=100)
+    assert page.next_cursor is None
+    assert page.has_more is False
 
 
 # ── _fetch_posts_batch (async) ──────────────────────────────────────────

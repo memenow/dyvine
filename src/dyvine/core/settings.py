@@ -323,19 +323,26 @@ class Settings(BaseSettings):
         ``os.environ`` (the previous approach) silently disagreed with
         ``api.debug`` whenever the value lived in a ``.env`` file rather
         than a real environment variable.
+
+        ``api_key`` is only validated when ``require_api_key`` is on, so
+        deployments that delegate authentication to mTLS or a service
+        mesh (and therefore set ``SECURITY_REQUIRE_API_KEY=false``) do
+        not need to mint a never-used key just to satisfy a startup
+        check. ``secret_key`` is always validated because it backs
+        cryptographic operations that are not gated by the API-key
+        dependency.
         """
         if self.api.debug:
             return self
 
         sentinel = _DEFAULT_SECRET_SENTINEL
-        offenders = [
-            name
-            for name, value in (
-                ("secret_key", self.security.secret_key),
-                ("api_key", self.security.api_key),
-            )
-            if value in {"", sentinel}
+        candidates: list[tuple[str, str]] = [
+            ("secret_key", self.security.secret_key),
         ]
+        if self.security.require_api_key:
+            candidates.append(("api_key", self.security.api_key))
+
+        offenders = [name for name, value in candidates if value in {"", sentinel}]
         if not offenders:
             return self
 
