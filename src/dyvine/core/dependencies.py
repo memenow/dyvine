@@ -35,7 +35,7 @@ from functools import lru_cache
 from typing import Annotated, Any
 
 from f2.apps.douyin.handler import DouyinHandler  # type: ignore
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Header, HTTPException, status
 
 from ..services.livestreams import LivestreamService
 from ..services.posts import PostService
