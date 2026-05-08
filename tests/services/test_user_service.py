@@ -648,6 +648,7 @@ def test_cleanup_temp_dir_logs_failures_without_propagating(
     — so the ``onexc`` callback must record a warning per failed entry.
     """
     import logging
+    import os
     import types
 
     from dyvine.services import users as users_mod
@@ -656,7 +657,7 @@ def test_cleanup_temp_dir_logs_failures_without_propagating(
     target.mkdir()
     (target / "leftover.bin").write_bytes(b"x")
 
-    def fake_rmtree(path: Path, *, onexc: Any) -> None:
+    def fake_rmtree(path: str | bytes | os.PathLike[str], *, onexc: Any) -> None:
         # Simulate ``shutil.rmtree`` encountering a permission error on a
         # nested file; the helper must invoke ``onexc`` with the offending
         # callable, the path, and the exception itself.
@@ -680,6 +681,53 @@ def test_cleanup_temp_dir_logs_failures_without_propagating(
     assert matching[0].levelno == logging.WARNING
     assert getattr(matching[0], "path", None) == str(target / "leftover.bin")
     assert getattr(matching[0], "error", None) == "EACCES"
+
+
+def test_cleanup_temp_dir_decodes_bytes_path_argument(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``shutil`` may surface a ``bytes`` path through ``onexc`` when the
+    underlying syscall returned a non-UTF-8 byte sequence (e.g.
+    ``os.scandir``/``os.lstat`` failures on legacy filesystems). The
+    callback must coerce that to ``str`` so structured log shippers do
+    not have to special-case ``bytes`` payloads.
+    """
+    import logging
+    import os
+    import types
+
+    from dyvine.services import users as users_mod
+
+    target = tmp_path / "bytes-path-task"
+    target.mkdir()
+
+    raw_bytes_path = b"/var/lib/dyvine/non-utf8/\xff\xfeleftover.bin"
+
+    def fake_rmtree(path: str | bytes | os.PathLike[str], *, onexc: Any) -> None:
+        onexc(Path.unlink, raw_bytes_path, PermissionError("EACCES"))
+
+    fake_shutil = types.SimpleNamespace(rmtree=fake_rmtree)
+    monkeypatch.setattr(users_mod, "shutil", fake_shutil)
+
+    with caplog.at_level(logging.WARNING, logger="dyvine.services.users"):
+        users_mod.UserService._cleanup_temp_dir(target)
+
+    matching = [
+        record
+        for record in caplog.records
+        if "workspace cleanup" in record.getMessage()
+    ]
+    assert matching, "bytes-path failure must still produce a warning"
+    logged_path = getattr(matching[0], "path", None)
+    assert isinstance(
+        logged_path, str
+    ), "callback must decode bytes paths so log payloads stay text-only"
+    # ``errors='replace'`` substitutes U+FFFD for the unmappable bytes
+    # while preserving every decodable byte verbatim.
+    assert logged_path.startswith("/var/lib/dyvine/non-utf8/")
+    assert logged_path.endswith("leftover.bin")
 
 
 @pytest.mark.asyncio
