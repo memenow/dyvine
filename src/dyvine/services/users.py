@@ -545,16 +545,13 @@ class UserService:
         # ``finally`` block — a cleanup failure must never mask the
         # original error — but records each failed entry so a permission
         # issue on a production volume is still observable in logs
-        # instead of silently leaving orphaned files behind.
-        def _on_rmtree_error(func: Any, path: str | bytes, exc: BaseException) -> None:
-            # ``shutil`` documents ``path`` as ``str`` for path-argument
-            # syscalls (``os.unlink``/``os.rmdir``) but it can arrive as
-            # ``bytes`` when ``os.scandir``/``os.lstat`` surfaces a path
-            # the filesystem returned in a non-UTF-8 encoding. Decode
-            # defensively so structured logs stay text and downstream
-            # log shippers do not have to special-case ``bytes``.
-            if isinstance(path, bytes):
-                path = path.decode("utf-8", errors="replace")
+        # instead of silently leaving orphaned files behind. ``path`` is
+        # typed ``str``: on Linux + Python 3.12 ``shutil.rmtree`` runs
+        # the fd-based walker which calls ``os.fsdecode(path)`` at entry
+        # before invoking ``onexc`` (CPython ``shutil.py``), so a bytes
+        # path the kernel surfaced on a non-UTF-8 filesystem never
+        # reaches this callback.
+        def _on_rmtree_error(func: Any, path: str, exc: BaseException) -> None:
             logger.warning(
                 "Failed to remove temp file during workspace cleanup",
                 extra={
