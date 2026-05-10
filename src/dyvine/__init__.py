@@ -1,9 +1,15 @@
-"""Dyvine - A Python package for interacting with Douyin content.
+"""Dyvine — FastAPI service for downloading Douyin content.
 
-This package provides functionality for:
-- Fetching and downloading Douyin posts
-- Managing user data
-- Handling different content types (videos, images, lives, etc.)
+Subpackages:
+    - ``core``: settings, dependency container, operation store, logging,
+      path-safety helpers, error handlers.
+    - ``services``: domain services (users, posts, livestreams) and the
+      R2 storage facade.
+    - ``routers``: FastAPI routers, all gated by the ``require_api_key``
+      dependency.
+    - ``schemas``: Pydantic request/response models.
+
+The runtime entry point is ``dyvine.main:app``.
 """
 
 __version__ = "1.0.0"

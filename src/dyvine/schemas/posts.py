@@ -1,12 +1,21 @@
-"""Schema definitions for Douyin post data models.
+"""Pydantic models for the post router.
 
-This module defines Pydantic models and enums for:
-- Post content types
-- Download operation statuses
-- Response models for bulk operations
-- Request/response models for post operations
+Provides:
 
-All models include proper type hints and validation.
+- `PostType` — `StrEnum` describing the materialised content type for
+  a Douyin post (`video`, `images`, `mixed`, `live`, `collection`,
+  `story`, `unknown`).
+- `DownloadStatus` — alias for the canonical `OperationStatus` enum
+  defined in `schemas.operations` so post-bulk responses share the
+  same vocabulary as every other async operation.
+- `PostBase` / `PostDetail` / `VideoInfo` / `ImageInfo` — record shapes
+  returned by `GET /posts/{post_id}` and `GET /posts/users/{user_id}/posts`.
+- `ListPostsResponse` — Google AIP-158 style page wrapper with
+  `next_page_token` and best-effort `total_size`.
+- `BulkDownloadResponse` — used by `POST /posts/users/{user_id}/posts:download`
+  and `GET /posts/operations/{operation_id}`. Carries `total_posts`,
+  `failed_count`, and a per-`PostType` counter map so polling clients
+  see consistent totals while work is still running.
 """
 
 from enum import StrEnum

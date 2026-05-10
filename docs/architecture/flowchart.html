@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Architecture — End-to-end Flowchart</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.875rem; margin: 0 0 8px; }
+    h2 { font-size: 1.25rem; margin-top: 32px; }
+    .lede { color: var(--muted); margin: 0; }
+    nav.crumbs a { color: var(--accent); text-decoration: none; }
+    nav.crumbs a:hover { text-decoration: underline; }
+    .diagram-frame {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .meta { display: inline-block; font-size: 0.875rem; color: var(--muted); }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <nav class="crumbs"><a href="index.html">&larr; Architecture overview</a></nav>
+      <h1>End-to-end request flowchart</h1>
+      <p class="lede">High-level view of how a request fans out across the three router domains, the operation store, and Cloudflare R2.</p>
+      <p><span class="pill">Updated 2026-05-10</span></p>
+    </header>
+
+    <p>
+      The flowchart below traces a typical request from the FastAPI router through validation,
+      domain routing, external API calls, optional R2 storage, and the operation store that
+      backs every asynchronous workflow.
+    </p>
+
+    <div class="diagram-frame">
+      <pre class="mermaid">
+flowchart TD
+    A[Client Request] --> Auth{X-API-Key valid?}
+    Auth -->|No| Reject[401 Unauthorized]
+    Auth -->|Yes| Mid[Correlation middleware]
+    Mid --> B[FastAPI Router]
+    B --> C{Valid Route?}
+    C -->|No| E[Error Handler]
+    C -->|Yes| D{Which Domain?}
+
+    D -->|Users| U[UserService]
+    D -->|Posts| P[PostService]
+    D -->|Livestreams| L[LivestreamService]
+
+    U --> F[Douyin API via f2]
+    P --> F
+    L --> F
+
+    F --> G{Upstream OK?}
+    G -->|No| E
+    G -->|Yes| H[Domain logic]
+
+    H --> S{Storage Required?}
+    S -->|Yes| R[Cloudflare R2]
+    S -->|No| I[Response Formatter]
+    R --> I
+
+    L --> LD{Download Requested?}
+    P --> PD{Bulk download?}
+    U --> UD{Bulk download?}
+
+    LD -->|Yes| OP[(OperationStore SQLite)]
+    PD -->|Yes| OP
+    UD -->|Yes| OP
+
+    OP --> TR[BackgroundTaskRegistry]
+    TR --> BG[Background download task]
+    BG --> R
+    BG --> OP
+    OP --> I
+
+    I --> J[Client Response]
+    E --> J
+    Reject --> J
+      </pre>
+    </div>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>The <code>require_api_key</code> dependency is mounted at every router so handlers cannot opt out by accident; bypass requires <code>SECURITY_REQUIRE_API_KEY=false</code>.</li>
+      <li>The correlation middleware in <code>main.request_middleware</code> assigns a fresh UUID per request, mirrors it back via <code>X-Correlation-ID</code>, and pins it into the <code>contextvars</code>-based logger.</li>
+      <li>Every "Bulk download" entry returns immediately with a persisted operation; the actual fetch + R2 upload runs on a tracked background task drained at lifespan shutdown.</li>
+    </ul>
+
+    <footer>
+      Diagram source mirrors <code>src/dyvine/main.py</code>, the three router modules, and <code>core/dependencies.py</code>.
+      View the underlying calls in <a href="call-graph.html">the call graph</a>.
+    </footer>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: prefersDark ? "dark" : "default", securityLevel: "loose" });
+  </script>
+</body>
+</html>

@@ -1,3 +1,22 @@
+"""Domain exceptions surfaced through the public API.
+
+Every service-layer failure raises a subclass of `DyvineError`. The
+`@handle_errors` decorator and the global `dyvine_error_handler` map
+each subclass to an HTTP status code:
+
+- `NotFoundError` (and friends: `UserNotFoundError`, `PostNotFoundError`,
+  `LivestreamNotFoundError`, `OperationNotFoundError`) -> `404`.
+- `AuthenticationError` -> `401`.
+- `RateLimitError` -> `429`.
+- `ValidationError` -> `422`.
+- `ServiceError` (and subclasses: `LivestreamError`, `DownloadError`,
+  `StorageError`) -> `500`.
+
+Routers can override per-handler mappings (for example, the livestream
+router maps `LivestreamError` to `404` because "user not currently
+streaming" is a not-found condition rather than a service fault).
+"""
+
 from typing import Any
 
 

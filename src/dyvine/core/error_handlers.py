@@ -1,3 +1,17 @@
+"""Application-level FastAPI exception handlers.
+
+Translates `DyvineError` subclasses, generic `HTTPException`, and any
+unexpected exception into the same JSON envelope produced by
+`ErrorResponse.create_response`. Status codes are picked from a most-
+specific-first mapping; 5xx responses never echo the raw exception
+text in production builds because service-layer messages frequently
+embed internal paths or upstream payloads.
+
+Use `register_error_handlers(app)` once during application setup so the
+handlers attach to every router, including dependency-rejected
+requests.
+"""
+
 import traceback
 from collections.abc import Mapping
 from typing import Any

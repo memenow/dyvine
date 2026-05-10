@@ -1,15 +1,21 @@
-"""Schema models for livestream operations.
+"""Pydantic models for the livestream router.
 
-This module defines Pydantic models for livestream-related operations,
-including request and response models for downloads and status tracking.
+Provides:
 
-Typical usage example:
-    from .schemas.livestreams import LiveStreamDownloadRequest
+- `LiveStreamDownloadRequest` — SDK-facing request body for downloads
+  identified by `user_id`. The router itself takes `user_id` as a
+  path parameter and `output_path` as an embedded body field; the
+  model is exported here for consumers that want a typed contract.
+- `LiveStreamURLDownloadRequest` — body for the URL-based download
+  endpoint (`POST /livestreams/stream:download`). Validates the host
+  against the `douyin.com` allowlist to prevent SSRF and rejects
+  output paths that contain absolute prefixes or `..` segments.
+- `LiveStreamDownloadResponse` — alias for `OperationResponse`.
 
-    request = LiveStreamDownloadRequest(
-        user_id="123456",
-        output_path="/downloads/stream.mp4"
-    )
+The schema-layer `output_path` validator is intentionally cheap: the
+authoritative jail check (including symlink-segment scanning before
+and after `mkdir`) runs in `core.path_safety.resolve_within_root`
+once the request hits the service.
 """
 
 from __future__ import annotations

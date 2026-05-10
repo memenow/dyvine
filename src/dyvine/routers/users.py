@@ -1,57 +1,26 @@
-"""User management API endpoints for Douyin user operations.
+"""User-facing FastAPI router.
 
-This module provides comprehensive RESTful API endpoints for managing Douyin users:
+Endpoints exposed under ``/api/v1/users``:
 
-Core Features:
-- User profile information retrieval with detailed metadata
-- Bulk content downloading (posts, liked videos, collections)
-- Asynchronous download operations with progress tracking
-- Operation status monitoring and result retrieval
-- Error handling for various user-related scenarios
+- ``GET /{user_id}`` — fetch the public Douyin profile.
+- ``POST /{user_id}/content:download`` — schedule an asynchronous
+  bulk download of the user's posts and/or liked items. Returns
+  ``202`` with an ``operation_id`` clients poll via the next endpoint.
+- ``GET /operations/{operation_id}`` — return the current status of a
+  scheduled download.
 
-Supported User Operations:
-- Profile data fetching (followers, following, statistics)
-- Content enumeration with pagination support
-- Batch download operations with configurable options
-- Real-time operation status checking
-- Download result management and cleanup
+Authentication:
+    The ``require_api_key`` dependency is attached at the router level,
+    so every handler enforces ``X-API-Key`` validation when
+    ``SECURITY_REQUIRE_API_KEY`` is ``true``. Set the variable to
+    ``false`` only when the API is fronted by another authenticated
+    layer.
 
-Authentication & Authorization:
-    Every endpoint requires the ``X-API-Key`` header to match
-    ``settings.security.api_key``. The dependency is mounted at the
-    router level so individual handlers cannot bypass it.
-
-Rate Limiting:
-    User endpoints are subject to rate limiting:
-    - Profile requests: 10 per minute per IP
-    - Download operations: 2 concurrent per user
-    - Status checks: 30 per minute per operation
-
-Data Privacy:
-    This API respects user privacy settings and only accesses
-    publicly available content or content accessible with provided
-    authentication credentials.
-
-Example Usage:
-    Get user profile:
-        GET /api/v1/users/MS4wLjABAAAA-kxe2_w-i_5F_q_b_rX_vIDqfwyTNYvM-oDD_eRjQVc
-
-    Download user content:
-        POST /api/v1/users/MS4wLjABAAAA.../content:download
-        {
-            "include_posts": true,
-            "include_likes": false,
-            "max_items": 100
-        }
-
-    Check download status:
-        GET /api/v1/users/operations/550e8400-e29b-41d4-a716-446655440000
-
-Dependencies:
-    - UserService: Core business logic for user operations
-    - ContextLogger: Structured logging with correlation tracking
-    - Pydantic models: Request/response validation and serialization
-    - Dependency injection: Service lifecycle management
+Rate limiting is intentionally **not** enforced inside the application;
+the ``API_RATE_LIMIT_PER_SECOND`` setting is reserved for an external
+gateway / ingress to honour. Internally, the only concurrency control
+comes from the dedupe lock inside ``LivestreamService`` and the bounded
+thread-pool executors owned by ``ServiceContainer``.
 """
 
 from typing import Annotated
@@ -77,8 +46,10 @@ router = APIRouter(
                 "application/json": {
                     "example": {
                         "error": True,
-                        "message": "User not found",
-                        "error_code": "USER_NOT_FOUND",
+                        "message": "User MS4wLjABAAAA... not found",
+                        "error_code": "UserNotFoundError",
+                        "status_code": 404,
+                        "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
                     }
                 }
             },
@@ -89,8 +60,12 @@ router = APIRouter(
                 "application/json": {
                     "example": {
                         "error": True,
-                        "message": "Invalid user ID format",
-                        "error_code": "VALIDATION_ERROR",
+                        "message": (
+                            "Path escapes the configured download root"
+                        ),
+                        "error_code": "ValidationError",
+                        "status_code": 422,
+                        "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
                     }
                 }
             },
@@ -101,8 +76,13 @@ router = APIRouter(
                 "application/json": {
                     "example": {
                         "error": True,
-                        "message": "Internal server error occurred",
-                        "error_code": "INTERNAL_SERVER_ERROR",
+                        "message": (
+                            "Internal service error; see correlation_id in "
+                            "server logs"
+                        ),
+                        "error_code": "ServiceError",
+                        "status_code": 500,
+                        "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
                     }
                 }
             },

@@ -1,3 +1,23 @@
+"""Livestream domain service.
+
+`LivestreamService` orchestrates Douyin livestream downloads:
+
+- Resolves a webcast ID from a numeric value, room URL, or a user
+  profile URL by combining direct lookups, the f2 ``WebCastIdFetcher``,
+  and the user-service profile fallback.
+- Loads upstream live metadata via the f2 handler and merges its
+  HLS / FLV stream maps with anything already present in the user
+  profile's ``room_data`` payload.
+- Writes a ``livestream_download`` operation row, schedules the
+  background download through ``BackgroundTaskRegistry.spawn_or_fallback``,
+  and returns a ``LiveStreamDownloadResponse`` immediately.
+- Deduplicates concurrent calls per ``room_id`` using an asyncio lock
+  spanning the existence check and registry insert.
+- Updates the operation row with terminal ``completed`` / ``failed``
+  status (and a ``download_path`` relative to the configured download
+  root) when the f2 downloader returns.
+"""
+
 import asyncio
 import json
 from pathlib import Path
@@ -37,16 +57,22 @@ __all__ = [
 
 
 class LivestreamService:
-    """Service class for managing Douyin livestream operations.
+    """Orchestrate Douyin livestream downloads.
 
-    This class provides methods for:
-    - Retrieving information about a livestream room.
-    - Downloading livestreams and saving them as video files.
-    - Monitoring the status of a livestream and merging downloaded segments.
-    - Handling active downloads and preventing duplicate downloads.
+    Public surface:
+        - ``get_room_info(webcast_id)`` — resolve live metadata via the
+          f2 handler.
+        - ``download_stream(url, output_path)`` — schedule a background
+          download for any URL the resolver can map to a webcast id.
+        - ``get_download_status(operation_id)`` — return the persisted
+          operation record.
 
-    It interacts with the DouyinDownloader and UserService classes to perform
-    the necessary operations.
+    The service holds an ``asyncio.Lock`` keyed by ``room_id`` so two
+    concurrent calls cannot both schedule a background task for the
+    same room. The actual segment fetch + container muxing is delegated
+    to ``f2.apps.douyin.dl.DouyinDownloader.create_stream_tasks``; the
+    service only verifies that the expected artefact exists on disk
+    before flipping the operation to ``completed``.
     """
 
     # Class-level default so tests that instantiate via ``object.__new__``

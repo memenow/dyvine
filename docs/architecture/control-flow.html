@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Architecture — Control Flow</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.875rem; margin: 0 0 8px; }
+    h2 { font-size: 1.25rem; margin-top: 32px; }
+    .lede { color: var(--muted); margin: 0; }
+    nav.crumbs a { color: var(--accent); text-decoration: none; }
+    nav.crumbs a:hover { text-decoration: underline; }
+    .diagram-frame {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <nav class="crumbs"><a href="index.html">&larr; Architecture overview</a></nav>
+      <h1>Control-flow graph</h1>
+      <p class="lede">Decision points and terminals inside the livestream URL resolver, the path-jail enforcement, and the bulk-download pagination loop.</p>
+      <p><span class="pill">Updated 2026-05-10</span></p>
+    </header>
+
+    <p>
+      Two flows dominate the control-flow story: the multi-stage livestream URL resolver
+      (<code>LivestreamService.download_stream</code>) and the bounded pagination loop
+      shared by user content and bulk-post downloads. Both have explicit terminals so an
+      adversarial input cannot pin a worker indefinitely.
+    </p>
+
+    <div class="diagram-frame">
+      <pre class="mermaid">
+flowchart TD
+    Start[Request Entry] --> Auth{require_api_key}
+    Auth -->|No| ErrAuth[401 Unauthorized]
+    Auth -->|Yes| Validate[Validate Pydantic body]
+    Validate -->|Invalid| Err422[422 Validation]
+    Validate -->|Valid| Route{Route Type}
+
+    Route -->|Livestream| ParseURL[_parse_url]
+    Route -->|Posts bulk| StartBulk[start_bulk_download]
+    Route -->|User download| StartUser[start_download]
+
+    ParseURL --> ResolveID{Resolve webcast_id}
+    ResolveID -->|Numeric ID| DirectID[Use as webcast_id]
+    ResolveID -->|URL segment| ExtractID[Use last URL segment]
+    ResolveID -->|Profile URL| ProfileLookup[_resolve_from_profile]
+    ResolveID -->|Unresolvable| LiveErr[LivestreamError -> 404]
+
+    ProfileLookup --> IsLive{room_id present?}
+    IsLive -->|No| LiveErr
+    IsLive -->|Yes| StreamMaps[_stream_map_from_room_data]
+
+    DirectID --> LoadFilter[_load_live_filter]
+    ExtractID --> LoadFilter
+    StreamMaps --> LoadFilter
+
+    LoadFilter --> FilterOK{Filter loaded?}
+    FilterOK -->|No + no profile| LiveErr
+    FilterOK -->|Yes| StatusCheck{status == 2?}
+
+    StatusCheck -->|No| LiveErr
+    StatusCheck -->|Yes| Resolve[_resolve_streams]
+    Resolve --> Pick[_select_stream_url]
+    Pick -->|No match| LiveErr
+    Pick -->|Found| Jail[resolve_within_root + ensure_within_root]
+
+    Jail -->|Escapes root| Err422
+    Jail -->|Symlink segment| Err422
+    Jail -->|Within jail| Dedupe{Active dedupe lock entry?}
+    Dedupe -->|Already running| LiveErr
+    Dedupe -->|None| CreateOp[OperationStore.create_operation]
+    CreateOp --> Spawn[BackgroundTaskRegistry.spawn]
+    Spawn --> Pending[Return 202 with operation_id]
+
+    StartBulk --> ValidateUser{Profile exists?}
+    ValidateUser -->|No| ErrUser[UserNotFoundError -> 404]
+    ValidateUser -->|Yes| BulkOp[OperationStore.create_operation]
+    BulkOp --> BulkSpawn[Spawn _run_bulk_download]
+    BulkSpawn --> BulkLoop[for page in pages]
+    BulkLoop --> CursorCheck{cursor == previous?}
+    CursorCheck -->|Yes| EndPagination[End pagination<br/>terminal partial/completed]
+    CursorCheck -->|No| FetchBatch[_fetch_posts_batch]
+    FetchBatch -->|Empty| EndPagination
+    FetchBatch -->|Has aweme_list| Process[_process_posts_batch]
+    Process --> R2Path{R2 enabled?}
+    R2Path -->|Yes| R2Upload[Upload to R2]
+    R2Path -->|No| LocalOnly[Keep on disk]
+    R2Upload --> Update[update_operation progress]
+    LocalOnly --> Update
+    Update --> Bound{page_count > max_pages?}
+    Bound -->|Yes| EndPagination
+    Bound -->|No| BulkLoop
+    EndPagination --> Final[Persist terminal status]
+      </pre>
+    </div>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>The path-safety jail (<code>core.path_safety</code>) walks unresolved segments before <code>Path.resolve()</code> follows symlinks, then re-checks after <code>mkdir(parents=True)</code> to close the residual TOCTOU window.</li>
+      <li>The bulk-download <code>page_count > max_pages</code> guard uses <code>core.pagination</code> constants (<code>PAGE_MULTIPLIER</code>, <code>PAGE_SLACK</code>, <code>MAX_PAGES_FALLBACK</code>) so a sticky upstream cursor cannot pin a worker even when each page is non-empty.</li>
+      <li>The dedupe lock window in <code>LivestreamService.download_stream</code> spans the entire check-then-register sequence so two concurrent callers for the same room cannot both schedule a download.</li>
+    </ul>
+
+    <footer>
+      Implementations live in <code>src/dyvine/services/livestreams.py</code> and <code>src/dyvine/services/posts.py</code>. The pagination constants are documented in <code>src/dyvine/core/pagination.py</code>.
+    </footer>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: prefersDark ? "dark" : "default", securityLevel: "loose" });
+  </script>
+</body>
+</html>

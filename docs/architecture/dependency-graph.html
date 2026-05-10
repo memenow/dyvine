@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Architecture — Dependency Graph</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.875rem; margin: 0 0 8px; }
+    h2 { font-size: 1.25rem; margin-top: 32px; }
+    .lede { color: var(--muted); margin: 0; }
+    nav.crumbs a { color: var(--accent); text-decoration: none; }
+    nav.crumbs a:hover { text-decoration: underline; }
+    .diagram-frame {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <nav class="crumbs"><a href="index.html">&larr; Architecture overview</a></nav>
+      <h1>Dependency graph</h1>
+      <p class="lede">Module imports and the third-party SDK surface Dyvine relies on.</p>
+      <p><span class="pill">Updated 2026-05-10</span></p>
+    </header>
+
+    <p>
+      The graph below highlights the boundary between Dyvine's own modules
+      (<code>routers</code>, <code>services</code>, <code>core</code>, <code>schemas</code>)
+      and the external SDKs Dyvine wraps (<code>f2</code>, <code>boto3</code>,
+      <code>fastapi</code>, <code>pydantic</code>).
+    </p>
+
+    <div class="diagram-frame">
+      <pre class="mermaid">
+graph LR
+    Main[main.py] --> RouterU[routers/users]
+    Main --> RouterP[routers/posts]
+    Main --> RouterL[routers/livestreams]
+    Main --> Core[core/*]
+    Main --> ProbesPM[prometheus_client.make_asgi_app]
+
+    RouterU --> SvcU[services/users]
+    RouterP --> SvcP[services/posts]
+    RouterL --> SvcL[services/livestreams]
+
+    SvcU --> SchU[schemas/users]
+    SvcP --> SchP[schemas/posts]
+    SvcL --> SchL[schemas/livestreams]
+    SchU --> SchOps[schemas/operations]
+    SchP --> SchOps
+    SchL --> SchOps
+
+    SvcU --> Douyin[f2 DouyinHandler]
+    SvcP --> Douyin
+    SvcL --> Douyin
+    SvcL --> SvcU
+    SvcL --> F2DL[f2 DouyinDownloader]
+    SvcL --> F2Util[f2 WebCastIdFetcher]
+
+    SvcU --> Storage[services/storage]
+    Storage --> Boto3[boto3 S3 client]
+    Storage --> Prom[prometheus_client]
+
+    Lifecycle[services/lifecycle] --> Storage
+    Lifecycle --> RuleConfig[core/storage_lifecycle.json]
+
+    Core --> Settings[core/settings]
+    Core --> Exceptions[core/exceptions]
+    Core --> Logging[core/logging]
+    Core --> Deps[core/dependencies]
+    Core --> Ops[core/operations]
+    Core --> Bg[core/background]
+    Core --> Pag[core/pagination]
+    Core --> Path[core/path_safety]
+    Core --> ErrH[core/error_handlers]
+    Core --> Dec[core/decorators]
+
+    Deps --> SvcU
+    Deps --> SvcL
+    Deps --> SvcP
+    Deps --> Bg
+    Deps --> Ops
+    Deps --> Settings
+    Settings --> PydanticSettings[pydantic-settings]
+    Ops --> SQLite[sqlite3]
+    Bg --> Logging
+
+    Dec --> Exceptions
+    Dec --> Logging
+    Dec --> Settings
+    ErrH --> Exceptions
+    ErrH --> Settings
+    ErrH --> Logging
+    Path --> Exceptions
+    Path --> Settings
+      </pre>
+    </div>
+
+    <h2>External boundary</h2>
+    <ul>
+      <li><strong><code>f2</code></strong> — third-party Douyin SDK. Wrapped exclusively from <code>UserService</code>, <code>PostService</code>, and <code>LivestreamService</code>; never imported from routers.</li>
+      <li><strong><code>boto3</code></strong> — used only inside <code>R2StorageService</code>. Routers and other services touch R2 through that single facade.</li>
+      <li><strong><code>fastapi</code> / <code>pydantic</code> / <code>pydantic-settings</code></strong> — the request/response and config layer. Schemas live exclusively in <code>schemas/</code>; settings in <code>core/settings.py</code>.</li>
+      <li><strong><code>prometheus_client</code></strong> — exposes the <code>/metrics</code> ASGI app and counter/histogram families used by both <code>main</code> and <code>R2StorageService</code>.</li>
+    </ul>
+
+    <footer>
+      For the symbol-level call relationships among these modules, see <a href="call-graph.html">the call graph</a>.
+    </footer>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: prefersDark ? "dark" : "default", securityLevel: "loose" });
+  </script>
+</body>
+</html>

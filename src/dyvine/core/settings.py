@@ -1,25 +1,31 @@
-"""Settings management for Dyvine.
+"""Composite Pydantic settings for Dyvine.
 
-This module provides centralized configuration management for the Dyvine application
-using Pydantic Settings with environment variable support and validation.
+The composite `Settings` aggregates four `BaseSettings` subclasses,
+each scoped by a distinct environment-variable prefix:
 
-The settings are organized into logical groups:
-- APISettings: Core API configuration
-- SecuritySettings: Authentication and security settings
-- R2Settings: Cloudflare R2 storage configuration
-- DouyinSettings: Douyin platform-specific settings
+- `APISettings` (`API_`) — server, CORS, operation DB path.
+- `SecuritySettings` (`SECURITY_`) — secret + API keys, gating flag.
+- `R2Settings` (`R2_`) — Cloudflare R2 credentials and endpoint.
+- `DouyinSettings` (`DOUYIN_`) — session cookie, headers, proxy,
+  download root, and livestream-specific HTTP headers.
 
-Example:
-    Basic usage:
-        from dyvine.core.settings import settings
+A model-level validator (`_validate_security_in_production`) refuses
+to instantiate the container when `api.debug` is `false` and either
+`security.secret_key` or `security.api_key` (when `require_api_key`
+is on) still match the placeholder `change-me-in-production`
+sentinel. The cross-field check lives on the composite class so the
+validator sees the parsed payload rather than reading `os.environ`
+directly, which used to silently disagree with `.env`-supplied
+values.
 
-        if settings.debug:
-            print(f"Running {settings.project_name} v{settings.version}")
+`get_settings()` is `lru_cache`d and loads `.env` at first call.
+Tests reset the cache via `tests/conftest.py::reset_singletons` so
+each test sees pristine settings.
 
-    Environment variables:
-        API_DEBUG=true
-        DOUYIN_COOKIE=your_cookie_here
-        R2_BUCKET_NAME=your_bucket_name
+Convenience properties (`debug`, `version`, `prefix`, the legacy
+`douyin_*` accessors) keep older call sites working without forcing
+them through the nested `settings.api.*` / `settings.douyin.*`
+addresses.
 """
 
 from functools import lru_cache
@@ -278,33 +284,37 @@ class DouyinSettings(BaseSettings):
 class Settings(BaseSettings):
     """Composite settings container with nested configuration groups.
 
-    This is the main settings class that combines all configuration groups
-    into a single, easy-to-use interface. It automatically initializes all
-    nested settings and provides convenient property access to frequently
-    used configuration values.
+    Aggregates `APISettings`, `SecuritySettings`, `R2Settings`, and
+    `DouyinSettings` so a single import gives access to every Pydantic-
+    validated env-driven knob the application reads. The model-level
+    `_validate_security_in_production` validator refuses to instantiate
+    when `api.debug` is False and a placeholder secret remains.
 
     Attributes:
-        api: API server configuration settings.
-        security: Security and authentication settings.
-        r2: Cloudflare R2 storage settings.
-        douyin: Douyin platform-specific settings.
+        api: Server, CORS, and operation DB configuration.
+        security: Secret + API keys and the `require_api_key` gate.
+        r2: Cloudflare R2 credentials and endpoint.
+        douyin: Session cookie, headers, proxy, download root, and
+            livestream-specific HTTP headers.
 
     Example:
-        Basic usage:
+        Standard access through the cached singleton::
+
             from dyvine.core.settings import settings
 
-            # Access nested settings
-            print(f"Server running on {settings.api.host}:{settings.api.port}")
-
-            # Use convenience properties
             if settings.debug:
-                print("Debug mode enabled")
+                print(f"Running {settings.project_name} v{settings.version}")
+                print(f"Listening on {settings.api.host}:{settings.api.port}")
 
-        Environment file:
-            The settings automatically load from .env file if present:
-                API_DEBUG=true
-                API_PORT=8080
-                DOUYIN_COOKIE=your_cookie_here
+        Override for tests by mutating the parsed instance::
+
+            settings.api.operation_db_path = str(tmp_path / "operations.db")
+
+        Or via env vars in `.env` / the process environment::
+
+            API_DEBUG=true
+            API_PORT=8080
+            DOUYIN_COOKIE=your_cookie_here
     """
 
     # Define nested settings as fields

@@ -1,59 +1,54 @@
-"""Main FastAPI application for Dyvine - Douyin Content Management API.
+"""FastAPI entry point for Dyvine.
 
-This module serves as the entry point for the Dyvine application, a high-performance
-FastAPI-based REST API for interacting with Douyin (TikTok) content. It provides
-comprehensive functionality for downloading, managing, and analyzing Douyin content
-including videos, images, live streams, and user data.
+Wires the Dyvine service: lifespan-driven `ServiceContainer` initialisation,
+the CORS + correlation-ID HTTP middleware, three feature routers
+(`users`, `posts`, `livestreams`), and the operational endpoints
+(`/livez`, `/readyz`, `/startupz`, `/health`, plus the Prometheus
+metrics ASGI app at `/metrics`).
 
-Application Architecture:
-    The application follows a layered architecture pattern:
-    - Presentation Layer: FastAPI routers and endpoints
-    - Business Logic Layer: Service classes with domain logic
-    - Data Access Layer: External API integration (Douyin, R2 storage)
-    - Cross-cutting Concerns: Logging, error handling, dependency injection
+Architecture:
+    - Presentation: FastAPI routers under `routers/` (each gated by the
+      `require_api_key` dependency mounted at the router level).
+    - Service: `UserService`, `PostService`, `LivestreamService`,
+      `R2StorageService` constructed by `ServiceContainer`.
+    - Persistence: `OperationStore` (SQLite + WAL) accessed through a
+      dedicated `sqlite_executor`; long-running tasks are tracked by a
+      shared `BackgroundTaskRegistry`.
+    - Observability: structured JSON logging with contextvars-based
+      correlation IDs, Prometheus counters/histograms.
 
-Key Features:
-    - RESTful API endpoints for Douyin content management
-    - Asynchronous request processing with connection pooling
-    - Comprehensive error handling with structured responses
-    - Request correlation tracking and structured logging
-    - Cloudflare R2 integration for content storage
-    - Health monitoring and metrics collection
-    - CORS support for web browser integration
-    - Production-ready deployment configuration
+Middleware:
+    1. `CORSMiddleware` honours `API_CORS_ORIGINS`; credentialed CORS is
+       auto-disabled when the allowlist is `["*"]`.
+    2. `request_middleware` assigns a UUID4 correlation ID per request
+       (or accepts a UUID provided via `X-Request-ID`), measures
+       duration, and exposes the ID via `X-Correlation-ID`.
+    Exception handlers registered through `register_error_handlers`
+    translate `DyvineError` subclasses and `HTTPException` into a
+    single error envelope; they are not middleware.
 
-Middleware Stack:
-    1. CORS middleware for cross-origin request handling
-    2. Request correlation middleware for tracking
-    3. Error handling middleware for unified responses
-    4. Custom logging middleware for structured logs
+Environment configuration:
+    `API_*`, `SECURITY_*`, `DOUYIN_*`, and `R2_*` variables drive
+    `core.settings.Settings`. The composite validator refuses to boot
+    when `API_DEBUG=false` and either `SECURITY_SECRET_KEY` or
+    `SECURITY_API_KEY` (when `SECURITY_REQUIRE_API_KEY` is true) still
+    matches the placeholder sentinel.
 
-Service Dependencies:
-    - DouyinHandler: Core integration with Douyin platform
-    - UserService: User profile and content operations
-    - StorageService: Cloudflare R2 storage integration
-    - LoggingService: Structured logging with correlation IDs
+Examples:
+    Local development::
 
-Environment Configuration:
-    The application uses environment-based configuration:
-    - API_DEBUG: Enable debug mode and verbose logging
-    - DOUYIN_COOKIE: Authentication cookie for Douyin API
-    - R2_* variables: Cloudflare R2 storage configuration
-    - SECURITY_* variables: API keys and security settings
+        uv run uvicorn src.dyvine.main:app --reload
 
-Example Usage:
-    Start the development server:
-        uvicorn src.dyvine.main:app --reload --host 0.0.0.0 --port 8000
+    Production-style::
 
-    Production deployment:
-        gunicorn src.dyvine.main:app -w 4 -k uvicorn.workers.UvicornWorker
+        uv run uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000 \\
+            --timeout-graceful-shutdown 25
 
-    Health check:
-        curl http://localhost:8000/health
-
-    API documentation:
-        Open http://localhost:8000/docs for Swagger UI
-        Open http://localhost:8000/redoc for ReDoc documentation
+    Multi-worker deployments are unsafe today: the default
+    `OperationStore` writes to a pod-local SQLite file, so scaling
+    requires either replacing that backend with a shared store or
+    pinning the deployment to a single replica (see the Kustomize
+    base, which uses `Recreate` + `replicas: 1`).
 """
 
 import time
@@ -192,22 +187,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title=settings.project_name,
     description="""
-    Dyvine is a high-performance REST API for Douyin (TikTok) content management.
+    Dyvine is a REST API for Douyin (TikTok) content management.
 
     Features:
-    • Download videos, images, and live streams
-    • User profile and content analysis
-    • Bulk content operations with progress tracking
-    • Cloudflare R2 storage integration
-    • Real-time operation monitoring
+    - Asynchronous downloads of videos, image galleries, and livestreams.
+    - User profile lookup and bulk download orchestration.
+    - Persistent operation tracking with poll-based progress.
+    - Optional Cloudflare R2 archival when every R2 setting is configured.
 
     Authentication:
-    Configure DOUYIN_COOKIE environment variable with valid session data.
+    - Application: every router endpoint requires the `X-API-Key`
+      header to match `SECURITY_API_KEY` when `SECURITY_REQUIRE_API_KEY`
+      is true (the default). Set the variable to false only when the
+      API is fronted by another authenticated layer.
+    - Upstream: `DOUYIN_COOKIE` must hold a valid Douyin session
+      cookie for the f2 SDK to talk to the upstream API.
 
     Notes:
-    • Asynchronous downloads return persistent operation records.
-    • Built-in API authentication and rate limiting are not enforced.
-    • Prometheus metrics are exposed at /metrics.
+    - Asynchronous downloads return a persisted operation record;
+      poll the matching `/operations/{id}` endpoint for progress.
+    - Application-level rate limiting is not enforced; rely on the
+      gateway / ingress fronting the deployment.
+    - Prometheus metrics are exposed at `/metrics`.
     """,
     version=settings.version,
     docs_url="/docs",

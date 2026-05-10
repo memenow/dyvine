@@ -1,13 +1,27 @@
-"""Storage service for managing Cloudflare R2 object storage operations.
+"""Cloudflare R2 storage facade.
 
-This module provides a service class (R2StorageService) that encapsulates all
-R2 storage operations including:
-- Path generation for user content and livestreams
-- Metadata management
-- Error handling with retries
-- Monitoring metrics
-- Lifecycle management
+`R2StorageService` wraps the boto3 S3 client used to push downloaded
+content into Cloudflare R2. The service:
 
+- Auto-disables when any required setting is missing — every public
+  method then short-circuits with a ``StorageError`` so callers can
+  treat the disabled state as a recoverable condition.
+- Dispatches every blocking boto3 call onto a dedicated executor
+  attached by ``ServiceContainer.set_executor`` / ``set_head_executor``
+  so the event loop never blocks on a slow R2 round trip.
+- Emits Prometheus counters (``r2_upload_requests_total``,
+  ``r2_upload_bytes_sum``, ``r2_upload_failures_total``) plus an upload
+  duration histogram so production runs are observable through
+  ``/metrics``.
+- Generates standardised paths for user content
+  (``{images,videos}/{user_id}/...``) and livestream recordings
+  (``livestreams/{user_id}/{stream_id}/recording_{ts}.mp4``).
+
+Storage-class transitions and retention rules live in
+``services/lifecycle.py`` (``LifecycleManager``); that helper is
+exercised by tests but is not currently wired into the runtime
+container. The dedicated ``audit_executor`` provisioned by
+``ServiceContainer`` is reserved for it.
 """
 
 import asyncio
@@ -77,14 +91,21 @@ class ContentType(StrEnum):
 
 
 class R2StorageService:
-    """Service for managing Cloudflare R2 object storage operations.
+    """Cloudflare R2 facade with bounded thread-pool dispatch.
 
-    This class implements the storage path specifications, metadata management,
-    retry logic, and monitoring for R2 storage operations.
+    Wraps a boto3 S3 client configured for the R2 endpoint. Every
+    blocking call (``put_object``, ``head_object``, ``delete_object``,
+    paginated ``list_objects_v2``) is dispatched onto a dedicated
+    `concurrent.futures.Executor` attached post-construction by the
+    `ServiceContainer`. The R2 head-fan-out used inside
+    `_list_objects_sync` runs on a separate executor so concurrent
+    listings cannot occupy the same threads that serve uploads.
 
     Attributes:
-        client: Boto3 S3 client configured for R2
-        bucket: Name of the R2 bucket
+        client: Boto3 S3 client configured for R2, or ``None`` when
+            the R2 settings are incomplete (the service auto-disables
+            and every public method raises `StorageError`).
+        bucket: Configured R2 bucket name, or ``None`` when disabled.
     """
 
     # Instance-level flag flipped the first time ``_list_objects_sync``

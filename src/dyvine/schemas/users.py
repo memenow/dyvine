@@ -1,6 +1,17 @@
-"""User-related schema definitions.
+"""Pydantic models for the user router.
 
-This module defines Pydantic models for user data validation and serialization.
+Provides:
+
+- `UserDownloadRequest` — typed body shape for client SDKs that want
+  to construct download requests programmatically. The router itself
+  takes the equivalent fields as `Query` parameters; the model is
+  exported here so consumers can introspect the contract.
+- `UserResponse` — `GET /users/{user_id}` payload. `room_data` is kept
+  open as `dict[str, Any]` because Douyin evolves the underlying
+  schema; treat it as opaque metadata.
+- `DownloadResponse` — alias for `OperationResponse` used by the
+  router so the user-download contract stays interchangeable with the
+  generic operation envelope.
 """
 
 from __future__ import annotations

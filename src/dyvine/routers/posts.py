@@ -1,35 +1,24 @@
-"""Post-related API endpoints for Douyin content management.
+"""Post-facing FastAPI router.
 
-This module provides RESTful API endpoints for managing Douyin posts including:
-- Retrieving individual post details and metadata
-- Listing posts from specific users with pagination
-- Bulk downloading of user posts with progress tracking
-- Error handling for various post-related operations
+Endpoints exposed under ``/api/v1/posts``:
 
-The endpoints support various post types including:
-- Video posts with playback URLs and metadata
-- Image gallery posts with multiple images
-- Live stream recordings and metadata
-- Story posts and collections
+- ``GET /{post_id}`` — return the materialised ``PostDetail`` for a
+  Douyin ``aweme_id``.
+- ``GET /users/{user_id}/posts`` — paginated list of a user's posts.
+  Pagination uses an opaque ``page_token`` derived from the upstream
+  Douyin cursor; clients must echo ``next_page_token`` back unchanged
+  on follow-up calls.
+- ``POST /users/{user_id}/posts:download`` — schedule an asynchronous
+  bulk download of every available post. Returns ``202`` with an
+  ``operation_id`` that ``get_bulk_download_operation`` polls for
+  progress, including per-``PostType`` counters.
+- ``GET /operations/{operation_id}`` — bulk-download status snapshot.
 
-Authentication:
-    All endpoints require a valid ``X-API-Key`` header that matches
-    ``settings.security.api_key``. The dependency is applied at the
-    router level so individual handlers cannot opt out by accident.
-
-Rate Limiting:
-    Endpoints are subject to API rate limiting to prevent abuse.
-    Default limit is 10 requests per second per client.
-
-Example Usage:
-    Get post details:
-        GET /api/v1/posts/7123456789012345678
-
-    List user posts:
-        GET /api/v1/posts/users/MS4wLjABAAAA.../posts?count=20&max_cursor=0
-
-    Download user posts:
-        POST /api/v1/posts/users/MS4wLjABAAAA.../posts:download
+Authentication is enforced via the router-level ``require_api_key``
+dependency. Static routes (``/operations/...`` and ``/users/...``) are
+registered before the catch-all ``/{post_id}`` so FastAPI's order-aware
+matcher selects the dedicated handlers instead of treating
+``operations`` or ``users`` as a literal post id.
 """
 
 import base64

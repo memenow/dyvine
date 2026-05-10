@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Architecture — Overview</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+      --code-bg: #0f172a;
+      --code-fg: #e2e8f0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+        --code-bg: #020617;
+        --code-fg: #cbd5e1;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 960px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.875rem; margin: 0 0 8px; }
+    h2 { font-size: 1.375rem; margin-top: 32px; }
+    h3 { font-size: 1.125rem; }
+    .lede { color: var(--muted); margin: 0; }
+    nav.toc {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin: 24px 0;
+    }
+    nav.toc ol { padding-left: 20px; margin: 0; }
+    nav.toc li { padding: 4px 0; }
+    nav.toc a { color: var(--accent); text-decoration: none; }
+    nav.toc a:hover { text-decoration: underline; }
+    .meta {
+      display: inline-block;
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+    article ul { padding-left: 22px; }
+    article li { margin: 4px 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 14px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    .pillrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Dyvine Architecture</h1>
+      <p class="lede">Reference diagrams for the Dyvine FastAPI service.</p>
+      <div class="pillrow">
+        <span class="pill">Last reviewed: 2026-05-10</span>
+        <span class="pill">Source layout: <code>src/dyvine/</code></span>
+        <span class="pill">Entry point: <code>main.py</code></span>
+      </div>
+    </header>
+
+    <p>
+      Dyvine fronts the third-party <code>f2</code> Douyin SDK with a FastAPI service that
+      delivers asynchronous content downloads, persistent operation tracking, and optional
+      Cloudflare R2 archival. These diagrams describe the runtime architecture as it is
+      implemented in <code>main</code>.
+    </p>
+
+    <nav class="toc">
+      <strong>Diagrams</strong>
+      <ol>
+        <li><a href="flowchart.html">End-to-end request flowchart</a> — top-level routing and decision points.</li>
+        <li><a href="sequence.html">Sequence diagram</a> — livestream and bulk-download interactions across components.</li>
+        <li><a href="control-flow.html">Control-flow graph</a> — webcast resolution, jail enforcement, and pagination terminals.</li>
+        <li><a href="dependency-graph.html">Dependency graph</a> — module imports and external SDK boundaries.</li>
+        <li><a href="call-graph.html">Call graph</a> — primary call relationships among routers, services, and infrastructure.</li>
+      </ol>
+    </nav>
+
+    <h2>Layered architecture at a glance</h2>
+    <ul>
+      <li><strong>Presentation</strong> — FastAPI routers under <code>src/dyvine/routers</code>. All router endpoints sit behind an <code>X-API-Key</code> dependency and the <code>handle_errors</code> decorator.</li>
+      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>R2StorageService</code>, and <code>LifecycleManager</code> in <code>src/dyvine/services</code>.</li>
+      <li><strong>Persistence</strong> — <code>OperationStore</code> (SQLite + WAL) at <code>src/dyvine/core/operations.py</code>; per-thread reader connections, single writer guarded by a lock, dispatched onto a dedicated <code>sqlite_executor</code>.</li>
+      <li><strong>Infrastructure</strong> — <code>ServiceContainer</code> wires four named thread-pool executors (R2, R2-head, SQLite, audit), a <code>BackgroundTaskRegistry</code>, and the f2 <code>DouyinHandler</code>.</li>
+      <li><strong>Observability</strong> — Prometheus metrics (<code>/metrics</code>), structured JSON logging, request correlation IDs, split <code>/livez</code>/<code>/readyz</code>/<code>/startupz</code> probes.</li>
+    </ul>
+
+    <h2>Operational invariants</h2>
+    <ul>
+      <li>Every long-running download returns immediately as a persisted <code>OperationRecord</code> and continues on a tracked background task.</li>
+      <li>The lifespan drains the <code>BackgroundTaskRegistry</code> before reaping executor pools, so an active R2 upload always finishes (or is cancelled with structured logging) before the process exits.</li>
+      <li>User-supplied filesystem paths are jailed inside <code>DOUYIN_DOWNLOAD_ROOT</code>; symlink redirection, traversal segments, and absolute prefixes are rejected pre- and post-mkdir.</li>
+      <li>The composite <code>Settings</code> validator refuses to boot in non-debug mode when <code>SECURITY_SECRET_KEY</code> or <code>SECURITY_API_KEY</code> still match the placeholder sentinel.</li>
+      <li><code>OperationStore.mark_incomplete_operations_failed</code> sweeps stale <code>pending</code>/<code>running</code> rows to <code>failed</code> on startup so a crashed deployment never leaves orphaned in-progress rows behind.</li>
+    </ul>
+
+    <footer>
+      Diagrams render with <a href="https://mermaid.js.org/">Mermaid 11</a> from the official CDN. Open each page to view the diagram inline; no build step required.
+    </footer>
+  </main>
+</body>
+</html>
