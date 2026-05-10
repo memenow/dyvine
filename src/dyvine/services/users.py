@@ -1,65 +1,28 @@
-"""User management service for Douyin user operations and content management.
+"""User domain service.
 
-This module provides comprehensive business logic for user-related operations
-in the Dyvine application. It acts as the primary interface between the API
-layer and external Douyin services, handling complex user workflows including
-profile data retrieval, content discovery, and bulk download operations.
+`UserService` encapsulates the public surface used by the user router:
 
-Core Responsibilities:
-    - User profile information retrieval and caching
-    - Content enumeration (posts, liked content, collections)
-    - Asynchronous bulk download orchestration
-    - Download progress tracking and status management
-    - File naming and organization for downloaded content
-    - Integration with Cloudflare R2 storage for content persistence
-    - Error handling and retry logic for robustness
+- ``get_user_info(user_id)`` — fetch and validate a Douyin profile,
+  returning a typed ``UserResponse``.
+- ``start_download(...)`` — persist a ``user_content_download``
+  operation, schedule the long-running fetch loop on the shared
+  ``BackgroundTaskRegistry``, and return immediately.
+- ``get_download_status(task_id)`` — return the current persisted
+  state of a previously scheduled download.
 
-Architecture:
-    The service follows a layered architecture pattern:
-    - Service Layer: UserService class with business logic
-    - Integration Layer: DouyinHandler for external API calls
-    - Storage Layer: R2StorageService for content persistence
-    - Utility Layer: Helper functions for data transformation
+The fetch loop (`_process_download`) walks the f2 paginated feed,
+downloads each batch into a per-task workspace under
+``temp_downloads/<task_id>``, optionally pushes every artefact into
+Cloudflare R2 via the shared ``R2StorageService``, and finalises the
+operation row with a clamped ``progress`` value plus a terminal
+``status``. The workspace is removed in a ``finally`` branch so a
+failed run does not leave files on disk.
 
-Key Features:
-    - Asynchronous operation support for scalability
-    - Comprehensive error handling with custom exceptions
-    - Structured logging with correlation tracking
-    - Configurable download parameters and filtering
-    - Safe filename generation for cross-platform compatibility
-    - Progress tracking for long-running operations
-    - Resource cleanup and lifecycle management
-
-Usage Patterns:
-    Dependency Injection:
-        service = UserService()
-        user_info = await service.get_user_info(user_id)
-
-    Download Operations:
-        download_task = await service.download_user_content(
-            user_id="MS4wLjABAAAA...",
-            include_posts=True,
-            include_likes=False,
-            max_items=100
-        )
-
-    Status Monitoring:
-        status = await service.get_operation_status(task_id)
-
-Custom Exceptions:
-    - UserNotFoundError: User profile not accessible or doesn't exist
-    - DownloadError: Content download failed or interrupted
-    - ServiceError: General service-level errors and timeouts
-
-Thread Safety:
-    The service is designed to be thread-safe for concurrent operations.
-    Internal state is managed through immutable objects and atomic operations.
-
-Performance Considerations:
-    - Implements connection pooling for external API calls
-    - Uses async/await patterns for non-blocking operations
-    - Provides configurable batch sizes for large downloads
-    - Includes timeout handling for long-running operations
+External dependencies are wrapped in `try`/`finally`:
+``DouyinHandler`` is closed via ``_safely_close_handler`` to avoid
+file-descriptor leaks across heavy polling, and ``shutil.rmtree``
+uses ``onexc`` to log per-entry failures without masking the
+original exception.
 """
 
 import asyncio
@@ -222,11 +185,19 @@ UserDownloadError = DownloadError
 
 
 class UserService:
-    """Service class for handling user-related operations.
+    """Domain logic for user profile lookup and bulk downloads.
 
-    This class encapsulates the business logic for various user-related
-    operations in the Douyin application, such as retrieving user information,
-    initiating content downloads, and tracking download progress.
+    Public surface:
+        - ``get_user_info(user_id)`` — typed Douyin profile.
+        - ``start_download(user_id, include_posts, include_likes, max_items)``
+          — persist a ``user_content_download`` operation row and
+          schedule the background loop on ``BackgroundTaskRegistry``.
+        - ``get_download_status(task_id)`` — current persisted state.
+
+    Internal state is otherwise stateless: every download starts in a
+    fresh per-task workspace under ``temp_downloads/<task_id>`` so two
+    concurrent downloads cannot stomp on each other's files. The
+    workspace is removed in a ``finally`` branch even on failure.
     """
 
     def __init__(

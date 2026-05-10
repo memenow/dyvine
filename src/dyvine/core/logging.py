@@ -1,3 +1,22 @@
+"""Structured logging primitives.
+
+Exposes a `ContextLogger` wrapper that:
+
+- Stores correlation IDs and ad-hoc key/value context in module-level
+  `contextvars.ContextVar` slots so they propagate naturally across
+  asyncio tasks, including background work spawned via
+  `BackgroundTaskRegistry`.
+- Emits log records as JSON via `JSONFormatter` (file + stdout) and a
+  human-readable formatter for console output when `API_DEBUG=true`.
+- Provides `track_time` / `track_memory` async context managers that
+  log a single completion record with elapsed milliseconds or RSS
+  delta, suitable for wrapping route handlers.
+
+`setup_logging` configures the root logger with a `TimedRotatingFileHandler`
+keyed on UTC midnight so the active filename `dyvine.log` rotates
+cleanly across day boundaries.
+"""
+
 import contextvars
 import json
 import logging

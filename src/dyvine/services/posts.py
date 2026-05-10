@@ -1,21 +1,31 @@
-"""Service layer for managing Douyin post operations.
+"""Post domain service.
 
-This module provides a service class (PostService) that encapsulates the
-high-level business logic for handling Douyin post-related operations,
-including:
+`PostService` encapsulates the public surface used by the post router:
 
-- Fetching detailed information about a specific post
-- Retrieving a paginated list of posts from a user
-- Downloading post content (videos, images, live streams, collections, stories)
-- Managing bulk download operations for all posts of a user
+- ``get_post_detail(aweme_id)`` — return a typed ``PostDetail`` for a
+  single Douyin post.
+- ``get_user_posts(sec_user_id, max_cursor, count)`` — paginated post
+  listing wrapped in ``UserPostsPage``. Callers must echo the upstream
+  cursor verbatim because Douyin treats it as a sentinel rather than
+  an offset.
+- ``start_bulk_download(sec_user_id, max_cursor)`` — validate the
+  profile, persist a ``user_posts_bulk_download`` operation row, and
+  schedule the long-running pagination + download loop on
+  ``BackgroundTaskRegistry``. Returns immediately with the
+  ``operation_id``.
+- ``get_bulk_download_status(operation_id)`` — return a
+  ``BulkDownloadResponse`` snapshot, including per-``PostType``
+  counters persisted in the operation metadata so polling clients see
+  consistent totals while work is still running.
 
-The PostService class implements proper error handling, comprehensive logging,
-and follows dependency injection patterns. It interacts with the DouyinHandler
-and DouyinDownloader classes from the f2 library to perform the necessary
-operations.
-
-The module also defines custom exceptions related to post operations, such as
-PostNotFoundError, UserNotFoundError, and DownloadError.
+The bulk loop (`_run_bulk_download`) bounds itself with the
+``core.pagination`` constants and exits via dedicated terminals
+(sticky cursor, empty batch, or batch error) so a misbehaving upstream
+cursor cannot pin a worker. Terminal classification favours the
+batch-error branch over the count-based classifier: an upstream
+failure on the first batch is recorded as ``failed`` (or ``partial``
+when downloads already succeeded) rather than silently passing as
+``completed``.
 """
 
 from dataclasses import dataclass
@@ -76,18 +86,26 @@ class UserPostsPage:
 
 
 class PostService:
-    """Service class for handling Douyin post operations.
+    """Domain logic for individual posts and bulk-download operations.
 
-    This class encapsulates the business logic for various post-related
-    operations, such as fetching post details, retrieving user posts,
-    downloading post content, and managing bulk downloads. It maintains the
-    following principles:
+    Public surface:
+        - ``get_post_detail(aweme_id)`` — typed `PostDetail`.
+        - ``get_user_posts(sec_user_id, max_cursor, count)`` — single-page
+          listing wrapped in `UserPostsPage` with the upstream cursor
+          to echo back unchanged.
+        - ``start_bulk_download(sec_user_id, max_cursor)`` — validate
+          the profile, persist a ``user_posts_bulk_download`` operation
+          row, and dispatch the long-running pagination + download
+          loop on `BackgroundTaskRegistry`.
+        - ``get_bulk_download_status(operation_id)`` — `BulkDownloadResponse`
+          snapshot, including per-`PostType` counters persisted in the
+          operation metadata.
 
-    - Proper error handling through custom exceptions
-    - Comprehensive logging for tracking operations
-    - Clean separation of concerns by delegating specific tasks to helper
-      methods
-    - Type safety through type annotations
+    Per-post download is delegated to the f2 SDK via
+    ``handler.downloader.create_download_tasks``. The bulk loop bounds
+    itself with `core.pagination` constants and exits via dedicated
+    terminals (sticky cursor, empty batch, batch error) so a misbehaving
+    upstream cursor cannot pin a worker.
     """
 
     # Class-level default mirrors the pattern used by ``LivestreamService`` so

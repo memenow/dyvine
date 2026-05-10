@@ -1,4 +1,20 @@
-"""Schema definitions for asynchronous operation tracking."""
+"""Shared schema for asynchronous operation tracking.
+
+Defines the canonical `OperationStatus` enum (``pending`` /
+``running`` / ``completed`` / ``partial`` / ``failed``) and the
+`OperationResponse` Pydantic model that every async-download endpoint
+returns. Per-domain response classes
+(`schemas.users.DownloadResponse`, `schemas.livestreams.LiveStreamDownloadResponse`,
+`schemas.posts.BulkDownloadResponse`) reuse these primitives so SDK
+clients can branch on the same vocabulary regardless of operation
+type.
+
+Two backward-compatibility aliases are kept inside `OperationResponse`:
+``task_id`` mirrors ``operation_id`` and ``downloaded_items`` mirrors
+``completed_items``. They populate automatically via the post-init
+validator, so callers should treat the canonical fields as
+authoritative.
+"""
 
 from __future__ import annotations
 

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Architecture — Call Graph</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.875rem; margin: 0 0 8px; }
+    h2 { font-size: 1.25rem; margin-top: 32px; }
+    .lede { color: var(--muted); margin: 0; }
+    nav.crumbs a { color: var(--accent); text-decoration: none; }
+    nav.crumbs a:hover { text-decoration: underline; }
+    .diagram-frame {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <nav class="crumbs"><a href="index.html">&larr; Architecture overview</a></nav>
+      <h1>Call graph</h1>
+      <p class="lede">Primary call relationships among the routers, services, and infrastructure helpers.</p>
+      <p><span class="pill">Updated 2026-05-10</span></p>
+    </header>
+
+    <p>
+      The call graph below summarises the principal calls that flow from the FastAPI
+      entry point into the service layer and the persistence/storage helpers. It is
+      intentionally lossy — see the source modules and <a href="control-flow.html">control-flow graph</a>
+      for the exhaustive paths.
+    </p>
+
+    <div class="diagram-frame">
+      <pre class="mermaid">
+graph TD
+    Main[main:app] --> Lifespan[main.lifespan]
+    Lifespan --> Container[ServiceContainer.initialize]
+    Lifespan --> ContainerS[ServiceContainer.shutdown]
+    Container --> Executors[ThreadPoolExecutor x4]
+    Container --> OS[OperationStore]
+    OS --> SqliteWriter[(SQLite writer)]
+    OS --> SqliteReaders[(per-thread readers)]
+    OS --> Sweep[mark_incomplete_operations_failed]
+
+    Main --> RouterL[routers.livestreams]
+    Main --> RouterP[routers.posts]
+    Main --> RouterU[routers.users]
+
+    RouterL --> DL[LivestreamService.download_stream]
+    RouterL --> GDS[LivestreamService.get_download_status]
+
+    DL --> PU[_parse_url]
+    DL --> RWI[_resolve_webcast_id]
+    DL --> LLF[_load_live_filter]
+    DL --> RS[_resolve_streams]
+    DL --> SSU[_select_stream_url]
+    DL --> Jail[path_safety.resolve_within_root]
+    DL --> JailEnsure[path_safety.ensure_within_root]
+    DL --> CreateOp[OperationStore.create_operation]
+    DL --> RSD[_run_stream_download]
+
+    RWI --> WCF[WebCastIdFetcher.get_webcast_id]
+    RWI --> RFP[_resolve_from_profile]
+    RFP --> GUI[UserService.get_user_info]
+    RFP --> SMRD[_stream_map_from_room_data]
+
+    LLF --> FULV[handler.fetch_user_live_videos]
+    LLF --> FRID[handler.fetch_user_live_videos_by_room_id]
+    LLF --> WCF
+
+    RSD --> SpawnL[BackgroundTaskRegistry.spawn]
+    SpawnL --> DDL[DouyinDownloader.create_stream_tasks]
+    SpawnL --> OPUpdate[OperationStore.update_operation]
+
+    RouterP --> GBP[PostService.get_post_detail]
+    RouterP --> LUP[PostService.get_user_posts]
+    RouterP --> SBD[PostService.start_bulk_download]
+    RouterP --> GBDS[PostService.get_bulk_download_status]
+    SBD --> Validate[handler.fetch_user_profile]
+    SBD --> CreateOpP[OperationStore.create_operation]
+    SBD --> SpawnP[BackgroundTaskRegistry.spawn]
+    SpawnP --> RBD[_run_bulk_download]
+    RBD --> FetchBatch[_fetch_posts_batch]
+    RBD --> ProcBatch[_process_posts_batch]
+    ProcBatch --> CreateDl[handler.downloader.create_download_tasks]
+    RBD --> OPUpdate
+
+    RouterU --> GU[UserService.get_user_info]
+    RouterU --> SD[UserService.start_download]
+    RouterU --> GDS2[UserService.get_download_status]
+    SD --> CreateOpU[OperationStore.create_operation]
+    SD --> SpawnU[BackgroundTaskRegistry.spawn]
+    SpawnU --> PD[_process_download]
+    PD --> Storage[R2StorageService.upload_file]
+    PD --> CleanupTmp[_cleanup_temp_dir]
+    PD --> Finalize[_finalize_status]
+
+    Storage --> Boto3PUT[client.put_object]
+    Storage --> Boto3Sign[generate_presigned_url]
+    Storage --> R2Head[_list_objects_sync head fan-out]
+
+    Lifespan --> ProbesH[/livez /readyz /startupz /health/]
+    ProbesH --> ContainerStatus[container.operation_store.healthcheck]
+    ProbesH --> R2Cfg[settings.r2.is_configured]
+      </pre>
+    </div>
+
+    <h2>Notes</h2>
+    <ul>
+      <li>Every long-running fan-out is mediated by <code>BackgroundTaskRegistry.spawn</code> via the <code>spawn_or_fallback</code> helper, so the lifespan can drain in-flight work before tearing down the executor pools.</li>
+      <li><code>OperationStore</code> public methods are coroutines that dispatch onto the dedicated <code>sqlite_executor</code>; readers use per-thread connections so progress polls run in parallel with writes.</li>
+      <li>The <code>_list_objects_sync</code> path uses the shared <code>r2_head_executor</code> when one is attached so several concurrent listings cannot each spawn their own pool.</li>
+    </ul>
+
+    <footer>
+      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,lifecycle}.py</code>, <code>core/{operations,background,dependencies,path_safety}.py</code>.
+    </footer>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: prefersDark ? "dark" : "default", securityLevel: "loose" });
+  </script>
+</body>
+</html>

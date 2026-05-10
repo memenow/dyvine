@@ -1,12 +1,19 @@
-"""FastAPI router module for livestream-related endpoints.
+"""Livestream-facing FastAPI router.
 
-This module provides API endpoints for:
-- Downloading live streams from Douyin users
-- Checking download operation status
-- Managing stream downloads
+Endpoints exposed under ``/api/v1/livestreams``:
 
-The router uses FastAPI's dependency injection for service management
-and includes comprehensive error handling and logging.
+- ``POST /users/{user_id}/stream:download`` — schedule a livestream
+  download for a user whose profile URL resolves to an active room.
+- ``POST /stream:download`` — schedule a livestream download from an
+  arbitrary URL. The schema validator restricts the host to the
+  ``douyin.com`` family to prevent SSRF.
+- ``GET /operations/{operation_id}`` — poll the persisted operation
+  record for a download in progress or already completed.
+
+``LivestreamError`` is intentionally remapped to ``404`` via
+``_LIVESTREAM_ERROR_MAPPING`` because the historical contract treats
+"user is not currently streaming" as a not-found rather than the
+500 the global ``ServiceError`` mapping would otherwise produce.
 """
 
 from typing import Annotated

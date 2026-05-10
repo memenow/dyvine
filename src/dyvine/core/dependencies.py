@@ -1,32 +1,38 @@
-"""Dependency injection and service initialization for Dyvine.
+"""Dependency injection and service container.
 
-This module implements a service container pattern for managing application
-dependencies and their lifecycles. It provides a centralized location for
-service initialization and configuration, making the application more
-testable and maintainable.
+`ServiceContainer` owns the long-lived runtime state of the application:
 
-The module provides:
-- ServiceContainer: Main container for managing service instances
-- Dependency providers: FastAPI-compatible dependency functions
-- Service configuration: Centralized service setup and initialization
+- A `DouyinHandler` configured from the composite `Settings`.
+- An `OperationStore` (SQLite + WAL) wired to a dedicated 4-worker
+  `sqlite_executor` so reads and writes never block the event loop.
+- A `UserService`, `PostService`, and `LivestreamService` that all
+  share the same `OperationStore` and `BackgroundTaskRegistry`.
+- An `R2StorageService` (under `UserService`) attached to two
+  separate executors: a 16-worker `r2_executor` for upload / head /
+  delete / list operations, and a 16-worker `r2_head_executor` for
+  the per-key `head_object` fan-out triggered inside
+  `_list_objects_sync`. A 2-worker `audit_executor` is provisioned
+  for `LifecycleManager` audit writes (the manager itself is not yet
+  wired into the runtime container).
+
+`initialize` is awaited from the FastAPI lifespan; `shutdown` drains
+the `BackgroundTaskRegistry` and reaps every executor in reverse
+initialisation order so a graceful shutdown never tears the
+executor pools down before in-flight uploads / SQLite commits finish.
+
+`require_api_key` (also exported here) is the FastAPI dependency
+mounted at every router; it uses `hmac.compare_digest` and short-
+circuits when `SECURITY_REQUIRE_API_KEY=false`.
 
 Example:
-    Using dependency injection in FastAPI routes:
-        from fastapi import Depends
-        from dyvine.core.dependencies import get_user_service
+    `get_user_service` and friends are FastAPI dependency providers::
 
         @router.get("/users/{user_id}")
         async def get_user(
             user_id: str,
-            user_service: UserService = Depends(get_user_service)
+            service: UserService = Depends(get_user_service),
         ):
-            return await user_service.get_user(user_id)
-
-    Direct service access:
-        from dyvine.core.dependencies import get_service_container
-
-        container = get_service_container()
-        user_service = container.user_service
+            return await service.get_user_info(user_id)
 """
 
 import hmac
@@ -125,7 +131,10 @@ class ServiceContainer:
             - ``r2_head_executor`` (16 workers): per-key ``head_object``
               fan-out triggered inside ``R2StorageService._list_objects_sync``
             - ``sqlite_executor`` (4 workers): OperationStore writes/reads
-            - ``audit_executor`` (2 workers): LifecycleManager audit writes
+            - ``audit_executor`` (2 workers): reserved for ``LifecycleManager``
+              audit writes; the manager is exercised in tests but not yet
+              wired into the runtime container, so the pool is currently
+              idle in production.
 
         Note:
             This method is awaited by the FastAPI lifespan. Direct access

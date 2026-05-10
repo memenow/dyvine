@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Architecture — Sequence Diagram</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 1.875rem; margin: 0 0 8px; }
+    h2 { font-size: 1.25rem; margin-top: 32px; }
+    .lede { color: var(--muted); margin: 0; }
+    nav.crumbs a { color: var(--accent); text-decoration: none; }
+    nav.crumbs a:hover { text-decoration: underline; }
+    .diagram-frame {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 24px;
+      overflow-x: auto;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <nav class="crumbs"><a href="index.html">&larr; Architecture overview</a></nav>
+      <h1>Sequence diagram</h1>
+      <p class="lede">Component interactions for livestream and bulk-post downloads, including the polling path clients use to observe progress.</p>
+      <p><span class="pill">Updated 2026-05-10</span></p>
+    </header>
+
+    <p>
+      Both flows run as fire-and-forget background tasks — the API returns a 202 with an
+      <code>operation_id</code> immediately and the heavy lifting happens on a tracked
+      <code>asyncio.Task</code> spawned through the shared <code>BackgroundTaskRegistry</code>.
+    </p>
+
+    <div class="diagram-frame">
+      <pre class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant R as FastAPI Router
+    participant DEP as require_api_key
+    participant LS as LivestreamService
+    participant PS as PostService
+    participant US as UserService
+    participant OP as OperationStore
+    participant TR as BackgroundTaskRegistry
+    participant F2 as f2 / Douyin API
+    participant DL as DouyinDownloader
+    participant R2 as R2StorageService
+
+    C->>R: POST /livestreams/stream:download
+    R->>DEP: validate X-API-Key
+    DEP-->>R: ok
+    R->>LS: download_stream(url)
+    LS->>LS: _parse_url(url)
+    LS->>F2: WebCastIdFetcher.get_webcast_id()
+    F2-->>LS: webcast_id
+    alt User profile URL
+        LS->>US: get_user_info(user_id)
+        US->>F2: fetch_user_profile
+        F2-->>US: profile
+        US-->>LS: UserResponse(room_data)
+        LS->>LS: _stream_map_from_room_data()
+    end
+    LS->>F2: fetch_user_live_videos(webcast_id)
+    F2-->>LS: live_filter
+    LS->>LS: _resolve_streams() / _select_stream_url()
+    LS->>OP: create_operation(pending)
+    LS->>TR: spawn(_run_stream_download)
+    LS-->>R: LiveStreamDownloadResponse
+    R-->>C: 202 {operation_id, status: pending}
+
+    Note over TR,DL: Background task draws on the tracked Task registry
+    TR->>DL: create_stream_tasks(...)
+    DL->>F2: HLS segment fetch
+    F2-->>DL: stream segments
+    DL->>OP: update_operation(running -> completed)
+
+    C->>R: POST /posts/users/{user_id}/posts:download
+    R->>PS: start_bulk_download(user_id)
+    PS->>F2: fetch_user_profile (existence check)
+    F2-->>PS: profile
+    PS->>OP: create_operation(pending)
+    PS->>TR: spawn(_run_bulk_download)
+    PS-->>R: BulkDownloadResponse
+    R-->>C: 202 {operation_id, status: pending}
+
+    Note over TR,F2: Bulk download iterates pages with a sticky-cursor guard
+    TR->>F2: fetch_user_post_videos
+    F2-->>TR: aweme_list + cursor
+    TR->>DL: create_download_tasks
+    TR->>OP: update progress + per-PostType counters
+
+    C->>R: GET /posts/operations/{operation_id}
+    R->>PS: get_bulk_download_status
+    PS->>OP: get_operation
+    OP-->>PS: OperationRecord (with download_stats)
+    PS-->>R: BulkDownloadResponse (current totals)
+    R-->>C: 200 {status, downloaded_count, total_downloaded}
+      </pre>
+    </div>
+
+    <h2>Operational notes</h2>
+    <ul>
+      <li><code>BackgroundTaskRegistry.drain</code> runs in the FastAPI lifespan's shutdown branch with a 30-second budget; pending tasks are cancelled with structured logging if they overrun.</li>
+      <li>The sticky-cursor guard inside <code>PostService._run_bulk_download</code> stops pagination when the upstream <code>max_cursor</code> equals the input — Douyin echoes it instead of advancing — so the loop never busy-waits.</li>
+      <li>The R2 archival path is only taken when every R2 setting is configured; otherwise <code>R2StorageService</code> auto-disables and downloads stay on local disk under <code>DOUYIN_DOWNLOAD_ROOT</code>.</li>
+    </ul>
+
+    <footer>
+      For the conditional branches taken inside <code>_resolve_webcast_id</code> and <code>_run_bulk_download</code>, see <a href="control-flow.html">the control-flow graph</a>.
+    </footer>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: prefersDark ? "dark" : "default", securityLevel: "loose" });
+  </script>
+</body>
+</html>

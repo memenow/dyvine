@@ -1,14 +1,23 @@
-"""Lifecycle management service for R2 storage.
+"""R2 storage lifecycle helper.
 
-This module implements the lifecycle management rules for R2 storage content,
-handling:
-- Content retention policies
-- Storage class transitions
-- Automated deletions
-- Audit logging
+`LifecycleManager` reads retention and transition rules from
+``core/storage_lifecycle.json`` and applies them to objects stored in
+R2 by walking each content-type prefix and either deleting expired
+objects or recording a transition entry (R2 itself does not yet
+support storage-class transitions, so the entry only documents the
+intended action).
 
-The service reads rules from storage_lifecycle.json and applies them to stored
-content based on content type and age.
+Audit log writes go through the optional ``audit_executor`` that
+``ServiceContainer`` provisions for this helper, with rotation that
+keeps logs under ``logs/r2_lifecycle_audit.YYYYMMDD.log`` and prunes
+files older than the configured retention window.
+
+`LifecycleManager` is exercised by
+``tests/services/test_lifecycle_service.py`` but is not yet wired into
+``ServiceContainer.initialize``; runtime deployments do not invoke it.
+Treat the class as a tested utility that can be scheduled (e.g. via a
+Kubernetes ``CronJob`` or an explicit FastAPI background task) once
+the operational decision to enforce retention is made.
 """
 
 import asyncio
@@ -33,15 +42,22 @@ class LifecycleError(Exception):
 
 
 class LifecycleManager:
-    """Service for managing R2 storage lifecycle policies.
+    """Apply R2 retention and transition rules from `storage_lifecycle.json`.
 
-    This class implements the lifecycle rules defined in storage_lifecycle.json,
-    managing content retention, transitions, and deletions.
+    Reads the JSON ruleset at construction time and exposes
+    ``apply_lifecycle_rules`` which walks each content-type prefix in
+    R2, dispatches deletions for objects past `retention_days`, and
+    records a ``transition`` audit entry for objects that should change
+    storage class (R2 itself does not yet support storage-class
+    transitions, so the entry only documents the intended action).
 
     Attributes:
-        storage: R2StorageService instance
-        rules: Loaded lifecycle rules
-        audit_config: Audit logging configuration
+        storage: `R2StorageService` instance the manager will operate
+            against. The instance must already be configured (a
+            disabled storage service produces an empty result).
+        rules: Loaded lifecycle rules keyed by content type.
+        audit_config: Audit logging configuration extracted from the
+            same JSON file.
     """
 
     def __init__(
