@@ -56,6 +56,7 @@ class APISettings(BaseSettings):
     Environment Variables:
         All attributes can be configured via environment variables with
         the 'API_' prefix (e.g., API_DEBUG, API_PORT).
+
     """
 
     version: str = Field(default="1.0.0", description="Application version string")
@@ -315,6 +316,7 @@ class Settings(BaseSettings):
             API_DEBUG=true
             API_PORT=8080
             DOUYIN_COOKIE=your_cookie_here
+
     """
 
     # Define nested settings as fields
@@ -341,6 +343,7 @@ class Settings(BaseSettings):
         check. ``secret_key`` is always validated because it backs
         cryptographic operations that are not gated by the API-key
         dependency.
+
         """
         if self.api.debug:
             return self

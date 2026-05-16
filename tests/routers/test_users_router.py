@@ -1,3 +1,5 @@
+"""Tests for user router endpoints."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +14,7 @@ from dyvine.services.users import UserNotFoundError
 
 @pytest.fixture
 def mock_user_service() -> MagicMock:
+    """Test helper for this module."""
     svc = MagicMock()
     svc.get_user_info = AsyncMock()
     svc.start_download = AsyncMock()
@@ -20,6 +23,7 @@ def mock_user_service() -> MagicMock:
 
 
 def _user_response() -> UserResponse:
+    """Test helper for this module."""
     return UserResponse(
         user_id="u1",
         nickname="nick",
@@ -31,6 +35,7 @@ def _user_response() -> UserResponse:
 
 
 def _download_response() -> DownloadResponse:
+    """Test helper for this module."""
     return DownloadResponse(
         operation_id="t1",
         operation_type="user_content_download",
@@ -47,6 +52,7 @@ def _download_response() -> DownloadResponse:
 
 @pytest.mark.asyncio
 async def test_get_user_success(mock_user_service: MagicMock) -> None:
+    """Verify get user success."""
     from dyvine.routers.users import get_user
 
     mock_user_service.get_user_info.return_value = _user_response()
@@ -56,6 +62,7 @@ async def test_get_user_success(mock_user_service: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_not_found(mock_user_service: MagicMock) -> None:
+    """Verify get user not found."""
     from dyvine.routers.users import get_user
 
     mock_user_service.get_user_info.side_effect = UserNotFoundError("nf")
@@ -67,6 +74,7 @@ async def test_get_user_not_found(mock_user_service: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_unexpected_error(mock_user_service: MagicMock) -> None:
+    """Verify get user unexpected error."""
     from dyvine.routers.users import get_user
 
     mock_user_service.get_user_info.side_effect = RuntimeError("boom")
@@ -83,6 +91,7 @@ async def test_get_user_unexpected_error(mock_user_service: MagicMock) -> None:
 async def test_download_user_content_success(
     mock_user_service: MagicMock,
 ) -> None:
+    """Verify download user content success."""
     from dyvine.routers.users import download_user_content
 
     mock_user_service.start_download.return_value = _download_response()
@@ -94,6 +103,7 @@ async def test_download_user_content_success(
 async def test_download_user_content_not_found(
     mock_user_service: MagicMock,
 ) -> None:
+    """Verify download user content not found."""
     from dyvine.routers.users import download_user_content
 
     mock_user_service.start_download.side_effect = UserNotFoundError("nf")
@@ -108,6 +118,7 @@ async def test_download_user_content_not_found(
 
 @pytest.mark.asyncio
 async def test_get_operation_success(mock_user_service: MagicMock) -> None:
+    """Verify get operation success."""
     from dyvine.routers.users import get_operation
 
     mock_user_service.get_download_status.return_value = _download_response()
@@ -117,6 +128,7 @@ async def test_get_operation_success(mock_user_service: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_get_operation_not_found(mock_user_service: MagicMock) -> None:
+    """Verify get operation not found."""
     from dyvine.routers.users import get_operation
 
     mock_user_service.get_download_status.side_effect = OperationNotFoundError("nf")

@@ -115,7 +115,7 @@ class ServiceContainer:
     async def initialize(self) -> None:
         """Initialize all registered services with their configurations.
 
-        Coroutine because ``OperationStore`` recovery uses async sqlite IO
+        Coroutine because ``OperationStore`` recovery uses async SQLite IO
         (``mark_incomplete_operations_failed`` dispatches to a worker
         thread). Safe to ``await`` multiple times; subsequent calls are
         no-ops.
@@ -140,6 +140,7 @@ class ServiceContainer:
             This method is awaited by the FastAPI lifespan. Direct access
             through the property methods still works but now raises if the
             container has not been initialized yet.
+
         """
         if self._initialized:
             return

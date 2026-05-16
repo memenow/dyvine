@@ -18,7 +18,7 @@ Authentication is enforced via the router-level ``require_api_key``
 dependency. Static routes (``/operations/...`` and ``/users/...``) are
 registered before the catch-all ``/{post_id}`` so FastAPI's order-aware
 matcher selects the dedicated handlers instead of treating
-``operations`` or ``users`` as a literal post id.
+``operations`` or ``users`` as a literal post ID.
 """
 
 import base64

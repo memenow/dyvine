@@ -41,6 +41,7 @@ class BackgroundTaskRegistry:
     """
 
     def __init__(self, *, drain_timeout: float = 30.0) -> None:
+        """Initialize the registry with no tracked tasks."""
         self._tasks: set[asyncio.Task[Any]] = set()
         self.drain_timeout = drain_timeout
         # Set inside ``drain`` so any post-drain ``spawn`` is rejected

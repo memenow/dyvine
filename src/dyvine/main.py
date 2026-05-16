@@ -304,6 +304,7 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
             "duration_ms": 245.67
         }
         ```
+
     """
     # Determine correlation ID from header or generate a new UUID
     client_request_id = request.headers.get("X-Request-ID")
@@ -429,7 +430,7 @@ async def root() -> dict[str, Any]:
         ```
 
         Response:
-        ```json
+        ```JSON
         {
             "name": "Dyvine API",
             "version": "1.0.0",
@@ -444,6 +445,7 @@ async def root() -> dict[str, Any]:
     Note:
         This endpoint is always available and doesn't require authentication.
         It's commonly used for service discovery and API health verification.
+
     """
     return {
         "name": settings.project_name,
@@ -622,7 +624,7 @@ async def health_check(request: Request) -> JSONResponse:
         ```
 
         Response:
-        ```json
+        ```JSON
         {
             "status": "ok",
             "version": "1.0.0",
@@ -640,6 +642,7 @@ async def health_check(request: Request) -> JSONResponse:
             "correlation_id": "550e8400-e29b-41d4-a716-446655440000"
         }
         ```
+
     """
     # Get current process information
     process = psutil.Process()

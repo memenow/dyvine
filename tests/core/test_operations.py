@@ -1,3 +1,5 @@
+"""Tests for SQLite-backed operation persistence."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +18,7 @@ from dyvine.core.operations import OperationStore
 
 @pytest.mark.asyncio
 async def test_operation_store_create_and_get(tmp_path) -> None:
+    """Verify operation store create and get."""
     store = OperationStore(str(tmp_path / "operations.db"))
 
     created = await store.create_operation(
@@ -35,6 +38,7 @@ async def test_operation_store_create_and_get(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_operation_store_update_operation(tmp_path) -> None:
+    """Verify operation store update operation."""
     store = OperationStore(str(tmp_path / "operations.db"))
     created = await store.create_operation(
         operation_type="livestream_download",
@@ -60,6 +64,7 @@ async def test_operation_store_update_operation(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_operation_store_missing_operation_raises(tmp_path) -> None:
+    """Verify operation store missing operation raises."""
     store = OperationStore(str(tmp_path / "operations.db"))
     with pytest.raises(OperationNotFoundError):
         await store.get_operation("missing")
@@ -67,6 +72,7 @@ async def test_operation_store_missing_operation_raises(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_operation_store_marks_incomplete_operations_failed(tmp_path) -> None:
+    """Verify operation store marks incomplete operations failed."""
     store = OperationStore(str(tmp_path / "operations.db"))
     pending = await store.create_operation(
         operation_type="user_content_download",
@@ -97,6 +103,7 @@ async def test_operation_store_marks_incomplete_operations_failed(tmp_path) -> N
 
 @pytest.mark.asyncio
 async def test_operation_store_get_latest_operation_for_subject(tmp_path) -> None:
+    """Verify operation store get latest operation for subject."""
     store = OperationStore(str(tmp_path / "operations.db"))
     first = await store.create_operation(
         operation_type="livestream_download",
@@ -121,6 +128,7 @@ async def test_operation_store_get_latest_operation_for_subject(tmp_path) -> Non
 
 
 def test_operation_store_enables_wal(tmp_path) -> None:
+    """Verify operation store enables wal."""
     store = OperationStore(str(tmp_path / "operations.db"))
 
     # ``sqlite3.connect`` in a ``with`` block only commits/rollbacks — it does
@@ -134,6 +142,7 @@ def test_operation_store_enables_wal(tmp_path) -> None:
 
 
 def test_operation_store_creates_lookup_index(tmp_path) -> None:
+    """Verify operation store creates lookup index."""
     store = OperationStore(str(tmp_path / "operations.db"))
 
     with closing(sqlite3.connect(store.db_path)) as connection:
@@ -148,6 +157,7 @@ def test_operation_store_creates_lookup_index(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_operation_store_healthcheck_succeeds(tmp_path) -> None:
+    """Verify operation store healthcheck succeeds."""
     store = OperationStore(str(tmp_path / "operations.db"))
 
     await store.healthcheck()
@@ -157,6 +167,7 @@ async def test_operation_store_healthcheck_succeeds(tmp_path) -> None:
 async def test_operation_store_healthcheck_fails_when_path_unwritable(
     tmp_path,
 ) -> None:
+    """Verify operation store healthcheck fails when path unwritable."""
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("chmod-based permission enforcement has no effect as root")
 
@@ -179,6 +190,7 @@ async def test_operation_store_healthcheck_fails_when_path_unwritable(
 
 @pytest.mark.asyncio
 async def test_operation_store_reads_back_empty_strings_as_empty(tmp_path) -> None:
+    """Verify operation store reads back empty strings as empty."""
     store = OperationStore(str(tmp_path / "operations.db"))
 
     created = await store.create_operation(
@@ -217,6 +229,7 @@ async def test_operation_store_update_runs_in_thread(
     original_run = store._run
 
     async def tracking_run(fn, /, *args, **kwargs):
+        """Test helper for test_operation_store_update_runs_in_thread."""
         calls.append(fn.__name__)
         return await original_run(fn, *args, **kwargs)
 
@@ -313,10 +326,13 @@ async def test_operation_store_concurrent_reads_do_not_serialize(tmp_path) -> No
     real_run = store._run
 
     async def slow_run(fn, /, *args, **kwargs):
+        """Test helper for test_operation_store_concurrent_reads_do_not_serialize."""
+
         # Simulate a slow sqlite read inside the worker thread so the
         # overlap is observable. The sleep happens on the executor thread,
         # mirroring a real long-running SELECT.
         def slow_wrapper(*a, **kw):
+            """Test helper for slow_run."""
             time.sleep(slow_read_delay)
             return fn(*a, **kw)
 
@@ -439,6 +455,9 @@ async def test_operation_store_concurrent_metadata_updates_do_not_lose_writes(
         store.set_executor(executor)
 
         async def writer(value: str) -> None:
+            """Test helper for
+            test_operation_store_concurrent_metadata_updates_do_not_lose_writes.
+            """
             for _ in range(10):
                 await store.update_operation(
                     created.operation_id, metadata={"phase": value}
@@ -477,6 +496,7 @@ async def test_operation_store_writes_serialize_cleanly(tmp_path) -> None:
         store.set_executor(executor)
 
         async def bump(target_progress: float) -> None:
+            """Test helper for test_operation_store_writes_serialize_cleanly."""
             for _ in range(10):
                 await store.update_operation(
                     created.operation_id, progress=target_progress
@@ -498,6 +518,7 @@ def test_operation_store_shutdown_closes_reader_connections(tmp_path) -> None:
     connections: list[sqlite3.Connection] = []
 
     def open_reader() -> None:
+        """Test helper for test_operation_store_shutdown_closes_reader_connections."""
         try:
             conn = store._reader_connection()
             conn.execute("SELECT 1").fetchone()
@@ -616,7 +637,12 @@ def test_operation_store_shutdown_swallows_sqlite_errors_on_close(tmp_path) -> N
     """Failing close calls during shutdown must not bubble up."""
 
     class FailingConnection:
+        """Test double used by
+        test_operation_store_shutdown_swallows_sqlite_errors_on_close.
+        """
+
         def close(self) -> None:
+            """Test helper for FailingConnection."""
             raise sqlite3.Error("already closed")
 
     store = OperationStore(str(tmp_path / "operations.db"))
@@ -642,20 +668,29 @@ def test_operation_store_healthcheck_swallows_rollback_errors(
     real_connect = store._connect
 
     class RollbackFailingConnection:
+        """Test double used by
+        test_operation_store_healthcheck_swallows_rollback_errors.
+        """
+
         def __init__(self, real: sqlite3.Connection) -> None:
+            """Test helper for RollbackFailingConnection."""
             self._real = real
 
         def execute(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             # First execute fails to force the finally branch.
+            """Test helper for RollbackFailingConnection."""
             raise sqlite3.OperationalError("boom")
 
         def rollback(self) -> None:
+            """Test helper for RollbackFailingConnection."""
             raise sqlite3.Error("rollback failed")
 
         def close(self) -> None:
+            """Test helper for RollbackFailingConnection."""
             self._real.close()
 
     def fake_connect(**kwargs):  # type: ignore[no-untyped-def]
+        """Test helper for test_operation_store_healthcheck_swallows_rollback_errors."""
         return RollbackFailingConnection(real_connect(**kwargs))
 
     monkeypatch.setattr(store, "_connect", fake_connect)
@@ -684,8 +719,9 @@ async def test_operation_store_async_calls_after_shutdown_raise(tmp_path) -> Non
     The container drains background tasks before calling ``shutdown``, so
     any post-shutdown coroutine call is a programming error. Surfacing a
     ``RuntimeError`` makes that error loud rather than returning a closed
-    sqlite handle that would later raise ``sqlite3.ProgrammingError`` deep
+    SQLite handle that would later raise ``sqlite3.ProgrammingError`` deep
     inside the executor pool.
+
     """
     store = OperationStore(str(tmp_path / "operations.db"))
     created = await store.create_operation(

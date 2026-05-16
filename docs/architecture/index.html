@@ -51,6 +51,9 @@
     nav.toc li { padding: 4px 0; }
     nav.toc a { color: var(--accent); text-decoration: none; }
     nav.toc a:hover { text-decoration: underline; }
+    nav.crumbs { margin-bottom: 8px; }
+    nav.crumbs a { color: var(--accent); text-decoration: none; }
+    nav.crumbs a:hover { text-decoration: underline; }
     .meta {
       display: inline-block;
       font-size: 0.875rem;
@@ -88,10 +91,11 @@
 <body>
   <main>
     <header>
+      <nav class="crumbs"><a href="../index.html">&larr; Project documentation</a></nav>
       <h1>Dyvine Architecture</h1>
       <p class="lede">Reference diagrams for the Dyvine FastAPI service.</p>
       <div class="pillrow">
-        <span class="pill">Last reviewed: 2026-05-10</span>
+        <span class="pill">Last reviewed: 2026-05-16</span>
         <span class="pill">Source layout: <code>src/dyvine/</code></span>
         <span class="pill">Entry point: <code>main.py</code></span>
       </div>

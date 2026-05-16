@@ -1,3 +1,5 @@
+"""Tests for user service downloads, status polling, and cleanup."""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +18,11 @@ from dyvine.services.users import DownloadResponse, UserService
 async def test_start_download_tracks_operation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify start download tracks operation."""
     scheduled: list[asyncio.Future[None]] = []
 
     def fake_create_task(coro: object, **_kwargs: Any) -> asyncio.Future[None]:
+        """Test helper for test_start_download_tracks_operation."""
         # ``spawn_or_fallback`` forwards a ``name=...`` kwarg to
         # ``asyncio.create_task``; absorb it so the mock can stand in for
         # the real factory.
@@ -47,7 +51,10 @@ async def test_start_download_tracks_operation(
 async def test_get_download_status_returns_persisted_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify get download status returns persisted state."""
+
     def resolved_future(coro: object, **_kwargs: Any) -> asyncio.Future[None]:
+        """Test helper for test_get_download_status_returns_persisted_state."""
         if hasattr(coro, "close"):
             coro.close()
         future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
@@ -68,6 +75,7 @@ async def test_get_download_status_returns_persisted_state(
 
 @pytest.mark.asyncio
 async def test_get_download_status_raises_for_unknown_task() -> None:
+    """Verify get download status raises for unknown task."""
     service = UserService()
     with pytest.raises(OperationNotFoundError):
         await service.get_download_status("missing-task")
@@ -75,6 +83,7 @@ async def test_get_download_status_raises_for_unknown_task() -> None:
 
 @pytest.mark.asyncio
 async def test_get_download_status_rejects_non_user_operation(tmp_path) -> None:
+    """Verify get download status rejects non user operation."""
     store = OperationStore(str(tmp_path / "operations.db"))
     operation = await store.create_operation(
         operation_type="livestream_download",
@@ -90,6 +99,7 @@ async def test_get_download_status_rejects_non_user_operation(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get user info success."""
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
@@ -103,7 +113,10 @@ async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_user_data._to_raw.return_value = {"user": {}}
 
     class FakeHandler:
+        """Test double used by test_get_user_info_success."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = AsyncMock(return_value=mock_user_data)
@@ -119,6 +132,7 @@ async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get user info not found."""
     from dyvine.core.exceptions import UserNotFoundError
     from dyvine.services import users as users_mod
 
@@ -126,7 +140,10 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_user_data.nickname = ""
 
     class FakeHandler:
+        """Test double used by test_get_user_info_not_found."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = AsyncMock(return_value=mock_user_data)
@@ -140,6 +157,7 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify get user info with room data."""
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
@@ -153,7 +171,10 @@ async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> 
     mock_user_data._to_raw.return_value = {"user": {"room_data": '{"status":2}'}}
 
     class FakeHandler:
+        """Test double used by test_get_user_info_with_room_data."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = AsyncMock(return_value=mock_user_data)
@@ -171,6 +192,7 @@ async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.asyncio
 async def test_process_download_no_posts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify process download no posts."""
     from dyvine.services import users as users_mod
 
     mock_user_data = MagicMock()
@@ -178,7 +200,10 @@ async def test_process_download_no_posts(monkeypatch: pytest.MonkeyPatch) -> Non
     mock_user_data.aweme_count = 0
 
     class FakeHandler:
+        """Test double used by test_process_download_no_posts."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = AsyncMock(return_value=mock_user_data)
@@ -210,10 +235,14 @@ async def test_process_download_no_posts(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_process_download_sets_failed_on_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify process download sets failed on error."""
     from dyvine.services import users as users_mod
 
     class FakeHandler:
+        """Test double used by test_process_download_sets_failed_on_error."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = AsyncMock(side_effect=RuntimeError("api error"))
@@ -251,7 +280,10 @@ async def test_process_download_skips_when_nothing_requested(
     fetch_profile = AsyncMock()
 
     class FakeHandler:
+        """Test double used by test_process_download_skips_when_nothing_requested."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = fetch_profile
@@ -304,13 +336,17 @@ async def test_process_download_runs_when_only_likes_requested(
     captured_kwargs: dict[str, Any] = {}
 
     async def fake_fetch_likes(*_args: Any, **_kwargs: Any) -> Any:
+        """Test helper for test_process_download_runs_when_only_likes_requested."""
         # Empty async generator; the loop treats this as "no likes yet"
         # and exits cleanly.
         if False:
             yield None
 
     class FakeHandler:
+        """Test double used by test_process_download_runs_when_only_likes_requested."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             captured_kwargs.update(kwargs)
 
         fetch_user_profile = fetch_profile
@@ -374,15 +410,21 @@ async def test_process_download_breaks_on_sticky_cursor(
     call_count = 0
 
     async def fake_fetch_posts(*_args: Any, **_kwargs: Any) -> Any:
+        """Test helper for test_process_download_breaks_on_sticky_cursor."""
         nonlocal call_count
         call_count += 1
         yield sticky_batch
 
     class FakeDownloader:
+        """Test double used by test_process_download_breaks_on_sticky_cursor."""
+
         create_download_tasks = AsyncMock()
 
     class FakeHandler:
+        """Test double used by test_process_download_breaks_on_sticky_cursor."""
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = fetch_profile
@@ -452,13 +494,25 @@ async def test_process_download_likes_reports_progress_as_indeterminate(
     aweme_batch._to_list = MagicMock(return_value=[])
 
     async def fake_fetch_likes(*_args: Any, **_kwargs: Any) -> Any:
+        """Test helper for
+        test_process_download_likes_reports_progress_as_indeterminate.
+        """
         yield aweme_batch
 
     class FakeDownloader:
+        """Test double used by
+        test_process_download_likes_reports_progress_as_indeterminate.
+        """
+
         create_download_tasks = AsyncMock()
 
     class FakeHandler:
+        """Test double used by
+        test_process_download_likes_reports_progress_as_indeterminate.
+        """
+
         def __init__(self, kwargs: dict) -> None:
+            """Test helper for FakeHandler."""
             pass
 
         fetch_user_profile = fetch_profile
@@ -483,6 +537,9 @@ async def test_process_download_likes_reports_progress_as_indeterminate(
     original_update = service.operation_store.update_operation
 
     async def capture_update(operation_id: str, **fields: Any) -> Any:
+        """Test helper for
+        test_process_download_likes_reports_progress_as_indeterminate.
+        """
         # Only capture in-loop updates (they carry ``completed_items`` but
         # never a ``status`` change; the ``running`` bootstrap update does).
         if "status" not in fields and "completed_items" in fields:
@@ -541,6 +598,7 @@ async def test_upload_directory_to_r2_counts_partial_failures(
         _metadata: dict[str, str],
         _content_type: str,
     ) -> None:
+        """Test helper for test_upload_directory_to_r2_counts_partial_failures."""
         if Path(local_path).resolve() == failing_target:
             raise users_mod.ServiceError("simulated upload outage")
 
@@ -659,6 +717,7 @@ def test_cleanup_temp_dir_logs_failures_without_propagating(
     (target / "leftover.bin").write_bytes(b"x")
 
     def fake_rmtree(path: Path, *, onexc: Any) -> None:
+        """Test helper for test_cleanup_temp_dir_logs_failures_without_propagating."""
         # Simulate ``shutil.rmtree`` encountering a permission error on a
         # nested file; the helper must invoke ``onexc`` with the offending
         # callable, the path, and the exception itself.
@@ -710,23 +769,34 @@ async def test_concurrent_downloads_use_isolated_temp_directories(
     aweme_batch._to_list = MagicMock(return_value=[])
 
     async def fake_fetch_posts(*_args: Any, **_kwargs: Any) -> Any:
+        """Test helper for test_concurrent_downloads_use_isolated_temp_directories."""
         yield aweme_batch
 
     class FakeDownloader:
+        """Test double used by
+        test_concurrent_downloads_use_isolated_temp_directories.
+        """
+
         async def create_download_tasks(
             self,
             _kwargs: dict[str, Any],
             _items: list[Any],
             user_dir: Path,
         ) -> None:
+            """Test helper for FakeDownloader."""
             # Record which workspace we were handed and drop a sentinel
             # file so the test can later assert per-task isolation.
             seen_dirs.append(Path(user_dir).parent)
             (Path(user_dir) / f"file-{Path(user_dir).parent.name}.txt").write_text("x")
 
     def make_handler(user_data: MagicMock) -> type:
+        """Test helper for test_concurrent_downloads_use_isolated_temp_directories."""
+
         class FakeHandler:
+            """Test double used by make_handler."""
+
             def __init__(self, _kwargs: dict) -> None:
+                """Test helper for FakeHandler."""
                 self.downloader = FakeDownloader()
 
             fetch_user_profile = AsyncMock(return_value=user_data)
@@ -745,6 +815,7 @@ async def test_concurrent_downloads_use_isolated_temp_directories(
     handlers = iter([make_handler(user_data_a), make_handler(user_data_b)])
 
     def handler_factory(kwargs: dict) -> Any:
+        """Test helper for test_concurrent_downloads_use_isolated_temp_directories."""
         return next(handlers)(kwargs)
 
     monkeypatch.setattr(users_mod, "DouyinHandler", handler_factory)

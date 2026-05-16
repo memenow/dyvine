@@ -58,6 +58,7 @@ class LifecycleManager:
         rules: Loaded lifecycle rules keyed by content type.
         audit_config: Audit logging configuration extracted from the
             same JSON file.
+
     """
 
     def __init__(

@@ -1,3 +1,5 @@
+"""Tests for post schema validation."""
+
 from __future__ import annotations
 
 import pytest
@@ -17,6 +19,7 @@ from dyvine.schemas.posts import (
 
 
 def test_post_type_enum_values() -> None:
+    """Verify post type enum values."""
     assert PostType.VIDEO == "video"
     assert PostType.IMAGES == "images"
     assert PostType.MIXED == "mixed"
@@ -40,12 +43,14 @@ def test_download_status_enum_values() -> None:
 
 
 def test_post_base_required_fields() -> None:
+    """Verify post base required fields."""
     p = PostBase(aweme_id="123", create_time=1000)
     assert p.aweme_id == "123"
     assert p.create_time == 1000
 
 
 def test_post_base_desc_defaults_empty() -> None:
+    """Verify post base desc defaults empty."""
     p = PostBase(aweme_id="123", create_time=0)
     assert p.desc == ""
 
@@ -54,6 +59,7 @@ def test_post_base_desc_defaults_empty() -> None:
 
 
 def test_video_info_valid() -> None:
+    """Verify video info valid."""
     v = VideoInfo(
         play_addr="https://example.com/video.mp4",
         duration=60,
@@ -65,6 +71,7 @@ def test_video_info_valid() -> None:
 
 
 def test_video_info_rejects_invalid_url() -> None:
+    """Verify video info rejects invalid URL."""
     with pytest.raises(ValidationError):
         VideoInfo(
             play_addr="not-a-url",
@@ -79,6 +86,7 @@ def test_video_info_rejects_invalid_url() -> None:
 
 
 def test_image_info_valid() -> None:
+    """Verify image info valid."""
     img = ImageInfo(
         url="https://example.com/img.jpg",
         width=800,
@@ -88,6 +96,7 @@ def test_image_info_valid() -> None:
 
 
 def test_image_info_rejects_invalid_url() -> None:
+    """Verify image info rejects invalid URL."""
     with pytest.raises(ValidationError):
         ImageInfo(url="bad", width=0, height=0)
 
@@ -96,6 +105,7 @@ def test_image_info_rejects_invalid_url() -> None:
 
 
 def test_post_detail_with_video_only() -> None:
+    """Verify post detail with video only."""
     pd = PostDetail(
         aweme_id="1",
         create_time=0,
@@ -113,6 +123,7 @@ def test_post_detail_with_video_only() -> None:
 
 
 def test_post_detail_with_no_media() -> None:
+    """Verify post detail with no media."""
     pd = PostDetail(
         aweme_id="2",
         create_time=0,
@@ -127,6 +138,7 @@ def test_post_detail_with_no_media() -> None:
 
 
 def test_bulk_download_response_defaults() -> None:
+    """Verify bulk download response defaults."""
     resp = BulkDownloadResponse(
         operation_id="op-defaults",
         sec_user_id="u1",

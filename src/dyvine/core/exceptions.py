@@ -29,6 +29,13 @@ class DyvineError(Exception):
         error_code: str | None = None,
         details: dict[str, Any] | None = None,
     ):
+        """Initialize the error with a message, code, and details.
+
+        Args:
+            message: Human-readable failure message.
+            error_code: Optional stable error code. Defaults to the class name.
+            details: Optional structured detail fields for API responses.
+        """
         super().__init__(message)
         self.message = message
         self.error_code = error_code or self.__class__.__name__

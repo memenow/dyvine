@@ -1,3 +1,5 @@
+"""Tests for background task registry lifecycle behavior."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,9 +11,11 @@ from dyvine.core.background import BackgroundTaskRegistry, spawn_or_fallback
 
 @pytest.mark.asyncio
 async def test_spawn_tracks_then_discards_completed_tasks() -> None:
+    """Verify spawn tracks then discards completed tasks."""
     registry = BackgroundTaskRegistry()
 
     async def quick() -> int:
+        """Test helper for test_spawn_tracks_then_discards_completed_tasks."""
         await asyncio.sleep(0)
         return 42
 
@@ -27,10 +31,12 @@ async def test_spawn_tracks_then_discards_completed_tasks() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_waits_for_outstanding_tasks() -> None:
+    """Verify drain waits for outstanding tasks."""
     registry = BackgroundTaskRegistry(drain_timeout=2.0)
     done_marker: list[str] = []
 
     async def slow() -> None:
+        """Test helper for test_drain_waits_for_outstanding_tasks."""
         await asyncio.sleep(0.05)
         done_marker.append("finished")
 
@@ -43,10 +49,12 @@ async def test_drain_waits_for_outstanding_tasks() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_cancels_tasks_that_overrun_timeout() -> None:
+    """Verify drain cancels tasks that overrun timeout."""
     registry = BackgroundTaskRegistry(drain_timeout=0.05)
     cancelled: list[str] = []
 
     async def hang() -> None:
+        """Test helper for test_drain_cancels_tasks_that_overrun_timeout."""
         try:
             await asyncio.sleep(5.0)
         except asyncio.CancelledError:
@@ -63,6 +71,7 @@ async def test_drain_cancels_tasks_that_overrun_timeout() -> None:
 
 @pytest.mark.asyncio
 async def test_drain_is_noop_when_nothing_is_tracked() -> None:
+    """Verify drain is noop when nothing is tracked."""
     registry = BackgroundTaskRegistry(drain_timeout=0.01)
     # No tasks registered; drain must return immediately without attempting
     # to ``asyncio.wait_for(asyncio.gather(*[]))`` (which would hit the
@@ -73,9 +82,11 @@ async def test_drain_is_noop_when_nothing_is_tracked() -> None:
 
 @pytest.mark.asyncio
 async def test_spawn_propagates_exceptions_to_awaiters() -> None:
+    """Verify spawn propagates exceptions to awaiters."""
     registry = BackgroundTaskRegistry()
 
     async def boom() -> None:
+        """Test helper for test_spawn_propagates_exceptions_to_awaiters."""
         raise RuntimeError("planned failure")
 
     task = registry.spawn(boom(), name="boom")
@@ -96,6 +107,7 @@ async def test_spawn_after_drain_raises_and_closes_coroutine() -> None:
     registry = BackgroundTaskRegistry(drain_timeout=0.5)
 
     async def noop() -> None:
+        """Test helper for test_spawn_after_drain_raises_and_closes_coroutine."""
         return None
 
     await registry.drain()
@@ -111,9 +123,11 @@ async def test_spawn_after_drain_raises_and_closes_coroutine() -> None:
 
 @pytest.mark.asyncio
 async def test_spawn_or_fallback_uses_registry_when_available() -> None:
+    """Verify spawn or fallback uses registry when available."""
     registry = BackgroundTaskRegistry()
 
     async def quick() -> int:
+        """Test helper for test_spawn_or_fallback_uses_registry_when_available."""
         return 7
 
     task = spawn_or_fallback(registry, quick(), name="via-registry")
@@ -123,7 +137,10 @@ async def test_spawn_or_fallback_uses_registry_when_available() -> None:
 
 @pytest.mark.asyncio
 async def test_spawn_or_fallback_falls_back_to_create_task() -> None:
+    """Verify spawn or fallback falls back to create task."""
+
     async def quick() -> int:
+        """Test helper for test_spawn_or_fallback_falls_back_to_create_task."""
         return 11
 
     task = spawn_or_fallback(None, quick())
@@ -149,6 +166,7 @@ async def test_spawn_or_fallback_isolates_correlation_id() -> None:
         captured: dict[str, str | None] = {}
 
         async def record_id() -> None:
+            """Test helper for test_spawn_or_fallback_isolates_correlation_id."""
             captured["task"] = _correlation_id_var.get()
 
         task = spawn_or_fallback(None, record_id(), name="task-xyz")

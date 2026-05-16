@@ -51,6 +51,7 @@ class _WriterSlot:
     __slots__ = ("connection",)
 
     def __init__(self) -> None:
+        """Create an empty writer-connection slot."""
         self.connection: sqlite3.Connection | None = None
 
 
@@ -120,7 +121,7 @@ class OperationRecord:
 class OperationStore:
     """SQLite-backed persistence for asynchronous operation state.
 
-    Public methods are coroutines. They perform no sqlite IO on the calling
+    Public methods are coroutines. They perform no SQLite IO on the calling
     thread: every database call is dispatched to a dedicated executor owned
     by the container so the event loop stays responsive during progress
     updates, healthchecks, and cross-request writes. The synchronous
@@ -132,6 +133,7 @@ class OperationStore:
     ``threading.Lock`` and one reader connection per worker thread (opened
     lazily on first read). Readers never take the lock, so N concurrent
     reads run in parallel instead of serializing behind a single handle.
+
     """
 
     def __init__(
@@ -140,6 +142,12 @@ class OperationStore:
         *,
         executor: Executor | None = None,
     ) -> None:
+        """Initialize the SQLite operation store and schema.
+
+        Args:
+            db_path: Optional database path. Defaults to configured settings.
+            executor: Optional executor for blocking SQLite calls.
+        """
         self.db_path = Path(db_path or settings.operation_db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # ``threading.Lock`` protects the single writer connection and its
@@ -189,10 +197,11 @@ class OperationStore:
     def set_executor(self, executor: Executor | None) -> None:
         """Attach a dedicated executor after construction.
 
-        The container owns the sqlite executor lifecycle. Late binding lets
+        The container owns the SQLite executor lifecycle. Late binding lets
         the store bootstrap synchronously inside ``ServiceContainer`` (no
         running event loop yet) while still routing every later async call
         through the dedicated worker pool.
+
         """
         self._executor = executor
 
@@ -207,7 +216,7 @@ class OperationStore:
         return self._closed
 
     async def _run(self, func: Callable[..., _R], /, *args: Any, **kwargs: Any) -> _R:
-        """Dispatch a blocking sqlite call to the configured executor.
+        """Dispatch a blocking SQLite call to the configured executor.
 
         Falls back to the default asyncio executor when no dedicated pool is
         attached, which keeps tests that instantiate the store directly
@@ -217,6 +226,7 @@ class OperationStore:
             RuntimeError: If ``shutdown`` has already closed the store. All
                 public coroutines route through this helper, so a single
                 guard here covers the full async surface.
+
         """
         if self._closed:
             raise RuntimeError(
@@ -229,6 +239,14 @@ class OperationStore:
         return result
 
     def _connect(self, *, autocommit: bool = False) -> sqlite3.Connection:
+        """Open and configure a SQLite connection for the store.
+
+        Args:
+            autocommit: Whether to use autocommit mode for reader connections.
+
+        Returns:
+            Configured SQLite connection.
+        """
         # Reader connections set ``autocommit=True`` so SELECTs never hold
         # an open snapshot between calls -- this is what lets multiple
         # readers see writes committed by the writer connection as soon as
@@ -260,6 +278,7 @@ class OperationStore:
         return connection
 
     def _initialize(self) -> None:
+        """Create the operations table, index, and WAL journal mode."""
         with self._lock, closing(self._connect()) as connection:
             # WAL is a database-level mode that persists across connections
             # and enables concurrent readers while a writer is active.
@@ -294,8 +313,9 @@ class OperationStore:
         concurrent readers do not serialize behind a single handle or
         ``threading.Lock``. Connections are stored on a ``threading.local``
         so the current thread can look up its handle without taking a
-        lock, and mirrored in a plain ``dict`` keyed by thread id so
+        lock, and mirrored in a plain ``dict`` keyed by thread ID so
         ``shutdown`` can iterate and close every live reader.
+
         """
         existing: sqlite3.Connection | None = getattr(
             self._reader_local, "connection", None
@@ -325,10 +345,11 @@ class OperationStore:
     def shutdown(self) -> None:
         """Close every live reader connection and the writer connection.
 
-        Called from ``ServiceContainer.shutdown`` before the owning sqlite
+        Called from ``ServiceContainer.shutdown`` before the owning SQLite
         executor reaps its worker threads so no handle outlives its thread
         and Python 3.13 does not flag unclosed databases at interpreter
         exit. Safe to call multiple times.
+
         """
         # Snapshot under the lock so we don't iterate while another thread
         # registers a fresh reader. ``_closed`` is flipped here too so
@@ -376,6 +397,7 @@ class OperationStore:
         await self._run(self._healthcheck_sync)
 
     def _healthcheck_sync(self) -> None:
+        """Run the synchronous writable-store health probe."""
         # BEGIN IMMEDIATE acquires a RESERVED lock, which proves the database
         # file is writable without mutating any rows. We run it on a
         # throwaway connection rather than the per-thread reader so the
@@ -396,10 +418,19 @@ class OperationStore:
 
     @staticmethod
     def _now() -> str:
+        """Return the current UTC timestamp in ISO 8601 format."""
         return datetime.now(UTC).isoformat()
 
     @staticmethod
     def _from_row(row: sqlite3.Row | None) -> OperationRecord | None:
+        """Convert a SQLite row into an operation record.
+
+        Args:
+            row: SQLite row returned from the operations table, or ``None``.
+
+        Returns:
+            Parsed operation record, or ``None`` when no row was supplied.
+        """
         if row is None:
             return None
         return OperationRecord(
@@ -472,6 +503,7 @@ class OperationStore:
         metadata: dict[str, Any] | None = None,
         operation_id: str | None = None,
     ) -> OperationRecord:
+        """Synchronously insert and return a new operation record."""
         created_at = self._now()
         operation = OperationRecord(
             operation_id=operation_id or str(uuid.uuid4()),
@@ -522,6 +554,7 @@ class OperationStore:
         return await self._run(self._get_operation_sync, operation_id)
 
     def _get_operation_sync(self, operation_id: str) -> OperationRecord:
+        """Synchronously fetch an operation by ID or raise when missing."""
         # Reads use the per-thread reader connection with no lock so several
         # executor workers can serve ``get_operation`` concurrently. WAL +
         # autocommit guarantees each SELECT starts a fresh snapshot and
@@ -560,6 +593,7 @@ class OperationStore:
     def _get_latest_operation_for_subject_sync(
         self, subject_id: str, *, operation_type: str | None = None
     ) -> OperationRecord:
+        """Synchronously fetch the latest operation for a subject."""
         query = """
             SELECT * FROM operations
             WHERE subject_id = ?
@@ -586,6 +620,7 @@ class OperationStore:
     def _update_operation_sync(
         self, operation_id: str, **fields: Any
     ) -> OperationRecord:
+        """Synchronously update allowed fields and return the new record."""
         allowed_fields = {
             "status",
             "message",
@@ -674,6 +709,7 @@ class OperationStore:
         return await self._run(self._mark_incomplete_operations_failed_sync)
 
     def _mark_incomplete_operations_failed_sync(self) -> int:
+        """Synchronously mark interrupted pending or running operations as failed."""
         updated_at = self._now()
         with self._lock:
             connection = self._writer_connection()

@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dyvine Documentation</title>
+  <style>
+    :root {
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --bg: #ffffff;
+      --panel: #f9fafb;
+      --accent: #2563eb;
+      --border: #e5e7eb;
+      --code-bg: #0f172a;
+      --code-fg: #e2e8f0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --bg: #0b1220;
+        --panel: #111827;
+        --accent: #60a5fa;
+        --border: #1f2937;
+        --code-bg: #020617;
+        --code-fg: #cbd5e1;
+      }
+    }
+    html, body { background: var(--bg); color: var(--fg); }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 24px 64px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    h1 { font-size: 2rem; margin: 0 0 8px; }
+    h2 { font-size: 1.375rem; margin-top: 36px; }
+    h3 { font-size: 1.125rem; margin-top: 24px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .lede { color: var(--muted); margin: 0; }
+    .pillrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      font-size: 0.8125rem;
+      color: var(--muted);
+    }
+    nav.toc, .note {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin: 24px 0;
+    }
+    nav.toc ol { columns: 2; padding-left: 20px; margin: 0; }
+    nav.toc li { break-inside: avoid; padding: 4px 0; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+    th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: var(--panel); }
+    code {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.875em;
+      background: var(--panel);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    pre {
+      background: var(--code-bg);
+      color: var(--code-fg);
+      padding: 14px 16px;
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; }
+    footer { margin-top: 48px; color: var(--muted); font-size: 0.875rem; border-top: 1px solid var(--border); padding-top: 16px; }
+    @media (max-width: 720px) {
+      nav.toc ol { columns: 1; }
+      main { padding: 24px 16px 48px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Dyvine</h1>
+      <p class="lede">FastAPI service for asynchronous Douyin content downloads, persistent operation tracking, and optional Cloudflare R2 archival.</p>
+      <div class="pillrow">
+        <span class="pill">Python 3.12+</span>
+        <span class="pill">FastAPI</span>
+        <span class="pill">SQLite operation store</span>
+        <span class="pill">Cloudflare R2 optional</span>
+        <span class="pill">Last reviewed: 2026-05-16</span>
+      </div>
+    </header>
+
+    <nav class="toc">
+      <strong>Contents</strong>
+      <ol>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#quick-start">Quick Start</a></li>
+        <li><a href="#configuration">Configuration</a></li>
+        <li><a href="#api-reference">API Reference</a></li>
+        <li><a href="#operations">Operations</a></li>
+        <li><a href="#deployment">Deployment</a></li>
+        <li><a href="#development">Development</a></li>
+        <li><a href="#security-notes">Security Notes</a></li>
+      </ol>
+    </nav>
+
+    <section id="overview">
+      <h2>Overview</h2>
+      <p>
+        Dyvine fronts the third-party <code>f2</code> Douyin SDK with a REST API that schedules long-running work,
+        persists operation state, and exposes operational health probes. It supports downloads for videos,
+        image galleries, livestreams, and user content.
+      </p>
+      <ul>
+        <li>Async, fire-and-forget downloads return an <code>operation_id</code> immediately and continue on tracked background tasks.</li>
+        <li>Persistent operation state is stored in a WAL-mode SQLite database.</li>
+        <li>Router endpoints are protected by <code>X-API-Key</code> authentication by default.</li>
+        <li>User-supplied output paths are resolved inside <code>DOUYIN_DOWNLOAD_ROOT</code> and rejected when they escape the configured root.</li>
+        <li>Dedicated thread pools isolate R2 calls, R2 metadata fan-out, SQLite work, and audit-log writes.</li>
+        <li>Operational endpoints include <code>/livez</code>, <code>/readyz</code>, <code>/startupz</code>, <code>/health</code>, and <code>/metrics</code>.</li>
+      </ul>
+      <table>
+        <thead>
+          <tr><th>Domain</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Users</td><td>Profile lookup and bulk download of a user's posts or likes to R2.</td></tr>
+          <tr><td>Posts</td><td>Per-post detail, paginated post listing, and bulk download of a user's posts.</td></tr>
+          <tr><td>Livestreams</td><td>Active-room download by user ID or direct URL with deduplication.</td></tr>
+          <tr><td>System</td><td>Liveness, readiness, startup, health, and Prometheus metrics endpoints.</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Architecture diagrams are available in <a href="architecture/index.html">docs/architecture/index.html</a>.
+      </p>
+    </section>
+
+    <section id="quick-start">
+      <h2>Quick Start</h2>
+      <h3>Prerequisites</h3>
+      <ul>
+        <li><a href="https://docs.astral.sh/uv/">uv</a> or Python 3.12+</li>
+        <li>Git</li>
+        <li>A valid Douyin session cookie</li>
+        <li>Optional Cloudflare R2 credentials and bucket for archival uploads</li>
+      </ul>
+      <h3>Install</h3>
+      <pre><code>git clone https://github.com/memenow/dyvine.git
+cd dyvine
+uv sync --all-extras</code></pre>
+      <h3>Run</h3>
+      <pre><code>uv run uvicorn src.dyvine.main:app --reload</code></pre>
+      <p>For a production-style process, run:</p>
+      <pre><code>uv run uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000 \
+    --timeout-graceful-shutdown 25</code></pre>
+      <table>
+        <thead>
+          <tr><th>Surface</th><th>URL</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Application</td><td><code>http://localhost:8000</code></td></tr>
+          <tr><td>Swagger UI</td><td><code>http://localhost:8000/docs</code></td></tr>
+          <tr><td>ReDoc</td><td><code>http://localhost:8000/redoc</code></td></tr>
+          <tr><td>OpenAPI spec</td><td><code>http://localhost:8000/api/v1/openapi.json</code></td></tr>
+          <tr><td>Prometheus metrics</td><td><code>http://localhost:8000/metrics</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="configuration">
+      <h2>Configuration</h2>
+      <p>Copy <code>.env.example</code> to <code>.env</code> and populate required fields.</p>
+      <pre><code>cp .env.example .env</code></pre>
+      <p>Minimum required settings for a non-debug deployment:</p>
+      <pre><code>API_DEBUG=false
+SECURITY_SECRET_KEY=&lt;48+ bytes of entropy&gt;
+SECURITY_API_KEY=&lt;48+ bytes of entropy&gt;
+DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
+      <p>Generate strong local secrets with:</p>
+      <pre><code>python -c "import secrets; print(secrets.token_urlsafe(48))"</code></pre>
+      <p>
+        Optional R2 archival requires <code>R2_ACCOUNT_ID</code>, <code>R2_ACCESS_KEY_ID</code>,
+        <code>R2_SECRET_ACCESS_KEY</code>, <code>R2_BUCKET_NAME</code>, and <code>R2_ENDPOINT</code>.
+        The storage service auto-disables when any R2 field is empty. The readiness probe fails until
+        all R2 fields and the Douyin cookie are set.
+      </p>
+    </section>
+
+    <section id="api-reference">
+      <h2>API Reference</h2>
+      <p>Router endpoints sit under the configurable <code>API_PREFIX</code>, which defaults to <code>/api/v1</code>.</p>
+
+      <h3>Authentication</h3>
+      <p>
+        When <code>SECURITY_REQUIRE_API_KEY=true</code>, every router request must include the configured key in
+        the <code>X-API-Key</code> header. Mismatches return <code>401 Unauthorized</code>.
+      </p>
+      <pre><code>X-API-Key: &lt;SECURITY_API_KEY&gt;</code></pre>
+
+      <h3>System Endpoints</h3>
+      <pre><code>GET /                       # Service metadata and feature list
+GET /livez                  # Process liveness signal
+GET /readyz                 # Dependency-aware readiness
+GET /startupz               # Lifespan startup completion
+GET /health                 # Aggregated runtime metrics
+GET /metrics                # Prometheus exposition format</code></pre>
+
+      <h3>Users</h3>
+      <pre><code>GET  /api/v1/users/{user_id}
+POST /api/v1/users/{user_id}/content:download
+GET  /api/v1/users/operations/{operation_id}</code></pre>
+
+      <h3>Posts</h3>
+      <pre><code>GET  /api/v1/posts/{post_id}
+GET  /api/v1/posts/users/{user_id}/posts
+POST /api/v1/posts/users/{user_id}/posts:download
+GET  /api/v1/posts/operations/{operation_id}</code></pre>
+      <p>
+        The list endpoint accepts an opaque <code>page_token</code> query parameter. Echo the response's
+        <code>next_page_token</code> back unchanged on the follow-up call.
+      </p>
+
+      <h3>Livestreams</h3>
+      <pre><code>POST /api/v1/livestreams/users/{user_id}/stream:download
+POST /api/v1/livestreams/stream:download
+GET  /api/v1/livestreams/operations/{operation_id}</code></pre>
+      <p>The URL endpoint validates the host against an allowlist of <code>*.douyin.com</code> domains to prevent SSRF.</p>
+
+      <h3>Examples</h3>
+      <pre><code>curl -H "X-API-Key: $API_KEY" \
+     "http://localhost:8000/api/v1/users/USER_ID"
+
+curl -X POST -H "X-API-Key: $API_KEY" \
+     "http://localhost:8000/api/v1/posts/users/USER_ID/posts:download"
+
+curl -X POST -H "X-API-Key: $API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://live.douyin.com/123456789"}' \
+     "http://localhost:8000/api/v1/livestreams/stream:download"
+
+curl -H "X-API-Key: $API_KEY" \
+     "http://localhost:8000/api/v1/livestreams/operations/OPERATION_ID"</code></pre>
+
+      <h3>Operation Response</h3>
+      <pre><code>{
+  "operation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "task_id": "550e8400-e29b-41d4-a716-446655440000",
+  "operation_type": "livestream_download",
+  "subject_id": "123456789",
+  "status": "pending",
+  "message": "Livestream download scheduled",
+  "progress": 0.0,
+  "total_items": null,
+  "completed_items": null,
+  "downloaded_items": null,
+  "download_path": "livestreams/123456789_live.flv",
+  "error": null,
+  "created_at": "2026-05-10T10:00:00Z",
+  "updated_at": "2026-05-10T10:00:00Z"
+}</code></pre>
+      <p>
+        Status values come from <code>OperationStatus</code>: <code>pending</code>, <code>running</code>,
+        <code>completed</code>, <code>partial</code>, and <code>failed</code>. Bulk-download responses extend this
+        shape with per-<code>PostType</code> counters and <code>failed_count</code>.
+      </p>
+    </section>
+
+    <section id="operations">
+      <h2>Operations</h2>
+      <h3>Persistent Operation Store</h3>
+      <p>
+        <code>src/dyvine/core/operations.py</code> owns a SQLite database at
+        <code>data/douyin/state/operations.db</code> by default. Override it with
+        <code>API_OPERATION_DB_PATH</code>.
+      </p>
+      <ul>
+        <li>WAL journaling allows concurrent readers and a single writer.</li>
+        <li>Per-thread reader connections allow parallel operation polling.</li>
+        <li>A shared writer connection is guarded by a lock.</li>
+        <li>Startup sweeps <code>pending</code> and <code>running</code> rows to <code>failed</code>.</li>
+        <li>SQLite calls run on a dedicated <code>dyvine-sqlite</code> executor.</li>
+      </ul>
+      <h3>Background Task Lifecycle</h3>
+      <p>
+        Long-running downloads are scheduled through <code>BackgroundTaskRegistry</code>. During shutdown,
+        the FastAPI lifespan drains tracked tasks before reaping executor pools.
+      </p>
+      <h3>Health and Probes</h3>
+      <table>
+        <thead>
+          <tr><th>Endpoint</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>/livez</code></td><td>Process liveness; returns 200 when the event loop is responsive.</td></tr>
+          <tr><td><code>/readyz</code></td><td>Dependency-aware readiness; returns 503 when a required dependency is missing.</td></tr>
+          <tr><td><code>/startupz</code></td><td>Startup completion state.</td></tr>
+          <tr><td><code>/health</code></td><td>Informational runtime metrics and dependency snapshot; always returns 200.</td></tr>
+          <tr><td><code>/metrics</code></td><td>Prometheus exposition format.</td></tr>
+        </tbody>
+      </table>
+      <h3>Concurrency Model</h3>
+      <table>
+        <thead>
+          <tr><th>Pool</th><th>Workers</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>dyvine-r2</code></td><td>16</td><td>R2 PUT, HEAD, DELETE, and list operations.</td></tr>
+          <tr><td><code>dyvine-r2-head</code></td><td>16</td><td>Per-key <code>head_object</code> fan-out during listing hydration.</td></tr>
+          <tr><td><code>dyvine-sqlite</code></td><td>4</td><td>OperationStore reads and writes.</td></tr>
+          <tr><td><code>dyvine-audit</code></td><td>2</td><td>Lifecycle audit-log writes.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="deployment">
+      <h2>Deployment</h2>
+      <h3>Docker</h3>
+      <pre><code>docker build -t dyvine:latest .
+
+docker run -d \
+  --name dyvine \
+  -p 8000:8000 \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/logs:/app/logs \
+  --env-file .env \
+  --restart unless-stopped \
+  dyvine:latest</code></pre>
+      <ul>
+        <li>The image is multi-stage and runs as non-root user <code>1000</code>.</li>
+        <li>The runtime layer uses <code>python -m uvicorn</code> with <code>--timeout-graceful-shutdown 25</code>.</li>
+        <li>The build removes the <code>f2</code>-injected <code>black</code> binary from the production layer.</li>
+      </ul>
+      <h3>Kubernetes</h3>
+      <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay.</p>
+      <pre><code>kubectl apply -k k8s/base
+kubectl apply -k k8s/overlays/production</code></pre>
+      <div class="note">
+        <strong>Scaling note:</strong> The default operation store is pod-local SQLite backed by a
+        <code>ReadWriteOnce</code> PVC and a single writer. Replace it with a shared backend before
+        scaling beyond one replica.
+      </div>
+    </section>
+
+    <section id="development">
+      <h2>Development</h2>
+      <h3>Test Suite</h3>
+      <pre><code>uv run pytest
+uv run pytest --cov=src/dyvine
+uv run pytest tests/services/test_post_service.py</code></pre>
+      <p>
+        CI gates merges on <code>pytest --cov-fail-under=80</code>. The warning filter is set to
+        <code>error</code>, with targeted ignores for known upstream deprecations.
+      </p>
+      <h3>Quality Gates</h3>
+      <pre><code>make format        # black + isort
+make lint          # ruff + mypy
+make test          # pytest</code></pre>
+      <h3>Continuous Integration</h3>
+      <table>
+        <thead>
+          <tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, quality gates, container scan, Docker build and push.</td></tr>
+          <tr><td><code>docker-build.yml</code></td><td>Reusable workflow</td><td>Multi-platform image build and registry push.</td></tr>
+          <tr><td><code>deploy-dev.yml</code></td><td>Push to <code>main</code></td><td>Apply the production overlay against the development cluster.</td></tr>
+          <tr><td><code>deploy-prod.yml</code></td><td>Tag push</td><td>Apply against the production cluster.</td></tr>
+          <tr><td><code>release.yml</code></td><td>Tag push</td><td>GitHub release creation.</td></tr>
+          <tr><td><code>security.yml</code></td><td>Weekly schedule and manual</td><td>Dependency and container security audit.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="security-notes">
+      <h2>Security Notes</h2>
+      <ul>
+        <li>API key auth is enabled by default.</li>
+        <li>Non-debug settings reject placeholder production secrets.</li>
+        <li>Livestream URL schema validation only accepts <code>douyin.com</code> family hosts.</li>
+        <li>Output paths are checked before and after directory creation, including symlink segment detection.</li>
+        <li><code>/health</code> and <code>/livez</code> are informational; use <code>/readyz</code> for dependency-aware gating.</li>
+      </ul>
+      <p>
+        Contributor workflow: create a feature branch from <code>main</code>, run
+        <code>make format &amp;&amp; make lint &amp;&amp; make test</code>, and open a pull request.
+      </p>
+      <p>
+        License details are available in <a href="../LICENSE">LICENSE</a>.
+      </p>
+    </section>
+
+    <footer>
+      This document is a static HTML entry point. No build step is required to read it locally.
+    </footer>
+  </main>
+</body>
+</html>

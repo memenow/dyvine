@@ -93,6 +93,7 @@ class LiveStreamDownloadRequest(BaseModel):
     @field_validator("output_path")
     @classmethod
     def _check_output_path(cls, value: str | None) -> str | None:
+        """Validate that an optional output path is relative and non-traversing."""
         return _validate_output_path(value)
 
 
@@ -100,9 +101,10 @@ class LiveStreamURLDownloadRequest(BaseModel):
     """Request model for initiating a livestream download via URL.
 
     Attributes:
-        url: The livestream URL (user profile or direct room URL).
+        URL: The livestream URL (user profile or direct room URL).
         output_path: Optional custom path where the stream should be saved.
             If not provided, a default path will be used.
+
     """
 
     url: AnyHttpUrl = Field(
@@ -123,6 +125,7 @@ class LiveStreamURLDownloadRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def _check_host(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        """Validate that the livestream URL host is in the Douyin allowlist."""
         # Pydantic preserves the parsed host as ``value.host``; fall back
         # to ``urlsplit`` only if a custom validator path bypasses
         # ``HttpUrl``.
@@ -134,6 +137,9 @@ class LiveStreamURLDownloadRequest(BaseModel):
     @field_validator("output_path")
     @classmethod
     def _check_output_path(cls, value: str | None) -> str | None:
+        """Validate that an optional URL download path is relative and
+        non-traversing.
+        """
         return _validate_output_path(value)
 
 
