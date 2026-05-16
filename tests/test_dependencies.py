@@ -1,3 +1,5 @@
+"""Tests for service container dependency wiring."""
+
 from __future__ import annotations
 
 import pytest
@@ -6,12 +8,16 @@ from dyvine.core import dependencies
 
 
 class DummyHandler:
+    """Test double used by this test."""
+
     def __init__(self, kwargs: dict[str, object]) -> None:
+        """Test helper for DummyHandler."""
         self.kwargs = kwargs
 
 
 @pytest.fixture(autouse=True)
 def reset_container_cache() -> None:
+    """Test helper for this module."""
     dependencies.get_service_container.cache_clear()
     yield
     dependencies.get_service_container.cache_clear()
@@ -21,9 +27,11 @@ def reset_container_cache() -> None:
 async def test_service_container_initializes_with_douyin_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify service container initializes with douyin handler."""
     captured_kwargs: dict[str, object] = {}
 
     def build_handler(kwargs: dict[str, object]) -> DummyHandler:
+        """Test helper for test_service_container_initializes_with_douyin_handler."""
         captured_kwargs.update(kwargs)
         return DummyHandler(kwargs)
 
@@ -41,6 +49,7 @@ async def test_service_container_initializes_with_douyin_handler(
 def test_get_service_container_returns_singleton(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify get service container returns singleton."""
     monkeypatch.setattr(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
     )
@@ -55,6 +64,7 @@ def test_get_service_container_returns_singleton(
 async def test_service_container_reconciles_incomplete_operations(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
+    """Verify service container reconciles incomplete operations."""
     monkeypatch.setattr(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
     )
@@ -85,9 +95,10 @@ def test_service_container_requires_initialization(
 ) -> None:
     """Accessing a service before awaiting ``initialize`` must fail loudly.
 
-    ``initialize`` is a coroutine because it awaits sqlite recovery via
+    ``initialize`` is a coroutine because it awaits SQLite recovery via
     ``asyncio.to_thread``. Synchronous property access has no safe way to
     bootstrap, so the container should raise rather than block the caller.
+
     """
     monkeypatch.setattr(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)

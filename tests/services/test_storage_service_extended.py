@@ -1,3 +1,5 @@
+"""Extended tests for R2 storage service behavior."""
+
 from __future__ import annotations
 
 import re
@@ -39,12 +41,14 @@ def _build_service(*, with_client: bool = False) -> R2StorageService:
 
 
 def test_generate_livestream_path_format() -> None:
+    """Verify generate livestream path format."""
     svc = _build_service()
     path = svc.generate_livestream_path("user-1", "stream-a", 1700000000)
     assert path == "livestreams/user-1/stream-a/recording_1700000000.mp4"
 
 
 def test_generate_livestream_path_varying_inputs() -> None:
+    """Verify generate livestream path varying inputs."""
     svc = _build_service()
     path = svc.generate_livestream_path("u", "s", 0)
     assert path.startswith("livestreams/u/s/")
@@ -55,6 +59,7 @@ def test_generate_livestream_path_varying_inputs() -> None:
 
 
 def test_generate_metadata_default_language_and_version() -> None:
+    """Verify generate metadata default language and version."""
     svc = _build_service()
     md = svc.generate_metadata(
         author="a",
@@ -67,6 +72,7 @@ def test_generate_metadata_default_language_and_version() -> None:
 
 
 def test_generate_metadata_custom_language_and_version() -> None:
+    """Verify generate metadata custom language and version."""
     svc = _build_service()
     md = svc.generate_metadata(
         author="a",
@@ -81,6 +87,7 @@ def test_generate_metadata_custom_language_and_version() -> None:
 
 
 def test_generate_metadata_file_format_from_content_type() -> None:
+    """Verify generate metadata file format from content type."""
     svc = _build_service()
     md = svc.generate_metadata(
         author="a",
@@ -95,6 +102,7 @@ def test_generate_metadata_file_format_from_content_type() -> None:
 
 
 def test_generate_ugc_path_image_type() -> None:
+    """Verify generate ugc path image type."""
     svc = _build_service()
     path = svc.generate_ugc_path("u1", "photo.png", "image/png")
     assert path.startswith("images/u1/")
@@ -102,6 +110,7 @@ def test_generate_ugc_path_image_type() -> None:
 
 
 def test_generate_ugc_path_no_extension_guesses() -> None:
+    """Verify generate ugc path no extension guesses."""
     svc = _build_service()
     path = svc.generate_ugc_path("u1", "noext", "image/jpeg")
     assert path.startswith("images/u1/")
@@ -110,6 +119,7 @@ def test_generate_ugc_path_no_extension_guesses() -> None:
 
 
 def test_generate_ugc_path_video_standardizes_to_mp4() -> None:
+    """Verify generate ugc path video standardizes to mp4."""
     svc = _build_service()
     path = svc.generate_ugc_path("u1", "clip.avi", "video/avi")
     assert path.endswith(".mp4")
@@ -121,6 +131,7 @@ def test_generate_ugc_path_video_standardizes_to_mp4() -> None:
 
 @pytest.mark.asyncio
 async def test_upload_file_disabled_raises() -> None:
+    """Verify upload file disabled raises."""
     svc = _build_service(with_client=False)
     with pytest.raises(StorageError, match="disabled"):
         await svc.upload_file("/nonexistent", "path", {})
@@ -128,6 +139,7 @@ async def test_upload_file_disabled_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_upload_file_file_not_found_raises(tmp_path: Path) -> None:
+    """Verify upload file file not found raises."""
     svc = _build_service(with_client=True)
     bad_path = tmp_path / "missing.bin"
     with pytest.raises(StorageError, match="not found"):
@@ -136,6 +148,7 @@ async def test_upload_file_file_not_found_raises(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_upload_file_success(tmp_path: Path) -> None:
+    """Verify upload file success."""
     svc = _build_service(with_client=True)
     f = tmp_path / "test.mp4"
     f.write_bytes(b"data")
@@ -158,6 +171,7 @@ async def test_upload_file_success(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_get_object_metadata_success() -> None:
+    """Verify get object metadata success."""
     svc = _build_service(with_client=True)
     svc.client.head_object.return_value = {  # type: ignore[union-attr]
         "Metadata": {"author": "test"}
@@ -168,6 +182,7 @@ async def test_get_object_metadata_success() -> None:
 
 @pytest.mark.asyncio
 async def test_get_object_metadata_404_raises() -> None:
+    """Verify get object metadata 404 raises."""
     from botocore.exceptions import ClientError
 
     svc = _build_service(with_client=True)
@@ -183,6 +198,7 @@ async def test_get_object_metadata_404_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_delete_object_disabled_raises() -> None:
+    """Verify delete object disabled raises."""
     svc = _build_service(with_client=False)
     with pytest.raises(StorageError, match="disabled"):
         await svc.delete_object("key")
@@ -190,6 +206,7 @@ async def test_delete_object_disabled_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_list_objects_disabled_raises() -> None:
+    """Verify list objects disabled raises."""
     svc = _build_service(with_client=False)
     with pytest.raises(StorageError, match="disabled"):
         await svc.list_objects("prefix/")
@@ -197,6 +214,7 @@ async def test_list_objects_disabled_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_list_objects_success() -> None:
+    """Verify list objects success."""
     svc = _build_service(with_client=True)
     svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
         "Contents": [
@@ -220,7 +238,8 @@ async def test_list_objects_uses_injected_head_executor() -> None:
     run on the shared pool so several concurrent listings share one
     bounded thread budget. We assert this by recording the worker
     thread name prefix and verifying every head call landed on the
-    injected pool, not on a one-off ``r2-head`` worker.
+    injected pool, not on a one-off ``R2-head`` worker.
+
     """
     import threading
     from concurrent.futures import ThreadPoolExecutor
@@ -236,6 +255,7 @@ async def test_list_objects_uses_injected_head_executor() -> None:
     head_thread_names: list[str] = []
 
     def head_object(Bucket: str, Key: str) -> dict:
+        """Test helper for test_list_objects_uses_injected_head_executor."""
         head_thread_names.append(threading.current_thread().name)
         return {"Metadata": {"key": Key}}
 
@@ -258,6 +278,7 @@ async def test_list_objects_uses_injected_head_executor() -> None:
 
 @pytest.mark.asyncio
 async def test_delete_object_success() -> None:
+    """Verify delete object success."""
     svc = _build_service(with_client=True)
     await svc.delete_object("videos/u1/clip.mp4")
     svc.client.delete_object.assert_called_once_with(  # type: ignore[union-attr]
@@ -267,6 +288,7 @@ async def test_delete_object_success() -> None:
 
 @pytest.mark.asyncio
 async def test_delete_object_client_error_surfaces_as_storage_error() -> None:
+    """Verify delete object client error surfaces as storage error."""
     from botocore.exceptions import ClientError
 
     svc = _build_service(with_client=True)
@@ -296,6 +318,9 @@ async def test_list_objects_per_item_head_error_returns_empty_metadata() -> None
     }
 
     def head_by_key(**kwargs: Any) -> dict[str, Any]:
+        """Test helper for
+        test_list_objects_per_item_head_error_returns_empty_metadata.
+        """
         if kwargs["Key"] == "videos/u1/c.mp4":
             raise ClientError({"Error": {"Code": "AccessDenied"}}, "HeadObject")
         return {"Metadata": {"author": Path(kwargs["Key"]).stem}}
@@ -314,6 +339,7 @@ async def test_list_objects_per_item_head_error_returns_empty_metadata() -> None
 
 @pytest.mark.asyncio
 async def test_list_objects_client_error_surfaces_as_storage_error() -> None:
+    """Verify list objects client error surfaces as storage error."""
     from botocore.exceptions import ClientError
 
     svc = _build_service(with_client=True)
@@ -327,6 +353,7 @@ async def test_list_objects_client_error_surfaces_as_storage_error() -> None:
 
 @pytest.mark.asyncio
 async def test_upload_file_guesses_content_type(tmp_path: Path) -> None:
+    """Verify upload file guesses content type."""
     svc = _build_service(with_client=True)
     f = tmp_path / "image.jpg"
     f.write_bytes(b"\xff\xd8\xff")
@@ -360,6 +387,7 @@ async def test_list_objects_preserves_order_under_variable_latency() -> None:
     delays = {k: (len(keys) - i) * 0.01 for i, k in enumerate(keys)}
 
     def head_by_key(**kwargs: Any) -> dict[str, Any]:
+        """Test helper for test_list_objects_preserves_order_under_variable_latency."""
         key = kwargs["Key"]
         time.sleep(delays[key])
         return {"Metadata": {"k": key}}
@@ -391,6 +419,7 @@ async def test_list_objects_bounded_concurrency() -> None:
     peak = 0
 
     def head_counting(**_: Any) -> dict[str, Any]:
+        """Test helper for test_list_objects_bounded_concurrency."""
         nonlocal in_flight, peak
         with lock:
             in_flight += 1
@@ -429,6 +458,7 @@ async def test_list_objects_workers_capped_for_small_listings() -> None:
     seen_threads: set[str] = set()
 
     def head_record_thread(**_: Any) -> dict[str, Any]:
+        """Test helper for test_list_objects_workers_capped_for_small_listings."""
         with lock:
             seen_threads.add(threading.current_thread().name)
         return {"Metadata": {}}

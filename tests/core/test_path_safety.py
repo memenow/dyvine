@@ -31,11 +31,13 @@ def jail_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 def test_resolve_within_root_relative_path(jail_root: Path) -> None:
+    """Verify resolve within root relative path."""
     target = path_safety.resolve_within_root("livestreams")
     assert target == jail_root / "livestreams"
 
 
 def test_resolve_within_root_returns_root_when_input_blank(jail_root: Path) -> None:
+    """Verify resolve within root returns root when input blank."""
     target = path_safety.resolve_within_root(None)
     assert target == jail_root
 
@@ -43,6 +45,7 @@ def test_resolve_within_root_returns_root_when_input_blank(jail_root: Path) -> N
 def test_resolve_within_root_uses_default_subdir_for_blank_input(
     jail_root: Path,
 ) -> None:
+    """Verify resolve within root uses default subdir for blank input."""
     target = path_safety.resolve_within_root("", default_subdir="livestreams")
     assert target == jail_root / "livestreams"
 
@@ -50,11 +53,13 @@ def test_resolve_within_root_uses_default_subdir_for_blank_input(
 def test_resolve_within_root_rejects_absolute_path_outside_root(
     jail_root: Path,
 ) -> None:
+    """Verify resolve within root rejects absolute path outside root."""
     with pytest.raises(ValidationError):
         path_safety.resolve_within_root("/etc/passwd")
 
 
 def test_resolve_within_root_rejects_traversal(jail_root: Path) -> None:
+    """Verify resolve within root rejects traversal."""
     with pytest.raises(ValidationError):
         path_safety.resolve_within_root("../escape")
 
@@ -101,11 +106,13 @@ def test_resolve_within_root_rejects_symlink_segment_inside_jail(
 
 
 def test_resolve_within_root_must_exist_rejects_missing(jail_root: Path) -> None:
+    """Verify resolve within root must exist rejects missing."""
     with pytest.raises(ValidationError):
         path_safety.resolve_within_root("never-created", must_exist=True)
 
 
 def test_ensure_within_root_passes_for_real_directory(jail_root: Path) -> None:
+    """Verify ensure within root passes for real directory."""
     inner = jail_root / "ok"
     inner.mkdir()
     path_safety.ensure_within_root(inner)
@@ -140,12 +147,14 @@ def test_ensure_within_root_rejects_post_mutation_symlink_swap(
 
 
 def test_relative_to_download_root_relative_input(jail_root: Path) -> None:
+    """Verify relative to download root relative input."""
     assert path_safety.relative_to_download_root("livestreams/abc.flv") == (
         "livestreams/abc.flv"
     )
 
 
 def test_relative_to_download_root_absolute_inside_root(jail_root: Path) -> None:
+    """Verify relative to download root absolute inside root."""
     inside = jail_root / "livestreams" / "abc.flv"
     assert path_safety.relative_to_download_root(inside) == os.path.join(
         "livestreams", "abc.flv"
@@ -169,4 +178,5 @@ def test_relative_to_download_root_absolute_outside_root_returns_basename(
 
 
 def test_relative_to_download_root_none_passthrough() -> None:
+    """Verify relative to download root none passthrough."""
     assert path_safety.relative_to_download_root(None) is None

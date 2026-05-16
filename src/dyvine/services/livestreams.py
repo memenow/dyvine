@@ -62,8 +62,8 @@ class LivestreamService:
     Public surface:
         - ``get_room_info(webcast_id)`` — resolve live metadata via the
           f2 handler.
-        - ``download_stream(url, output_path)`` — schedule a background
-          download for any URL the resolver can map to a webcast id.
+        - ``download_stream(URL, output_path)`` — schedule a background
+          download for any URL the resolver can map to a webcast ID.
         - ``get_download_status(operation_id)`` — return the persisted
           operation record.
 
@@ -73,6 +73,7 @@ class LivestreamService:
     to ``f2.apps.douyin.dl.DouyinDownloader.create_stream_tasks``; the
     service only verifies that the expected artefact exists on disk
     before flipping the operation to ``completed``.
+
     """
 
     # Class-level default so tests that instantiate via ``object.__new__``
@@ -470,7 +471,8 @@ class LivestreamService:
 
         Returns:
             A tuple of ``(hls_stream_map, flv_stream_map)`` where each map
-            is ``{quality_label: url}``.
+            is ``{quality_label: URL}``.
+
         """
         resolved_stream_map: dict[str, str] = {}
         resolved_flv_map: dict[str, str] = {}
@@ -518,7 +520,7 @@ class LivestreamService:
         """Download a Douyin livestream.
 
         Args:
-            url: The livestream room URL (e.g., https://live.douyin.com/123456789),
+            URL: The livestream room URL (e.g., https://live.douyin.com/123456789),
                 a user profile URL, or a bare numeric webcast ID.
             output_path: Optional directory path where the stream file is saved.
                 Defaults to ``data/douyin/downloads/livestreams``.
@@ -530,6 +532,7 @@ class LivestreamService:
         Raises:
             LivestreamError: If the URL is empty, the webcast ID cannot be
                 resolved, the user is offline, or no suitable stream is found.
+
         """
         normalized = url.strip()
         if not normalized:

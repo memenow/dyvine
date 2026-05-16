@@ -1,3 +1,5 @@
+"""Tests for settings validation and convenience properties."""
+
 from __future__ import annotations
 
 import pytest
@@ -16,6 +18,7 @@ from dyvine.core.settings import (
 
 
 def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify API settings defaults."""
     # The shared test conftest sets ``API_DEBUG=true`` so the
     # production-only validator in ``SecuritySettings`` does not fire on the
     # sentinel defaults. Drop it here so we are asserting the true
@@ -32,11 +35,13 @@ def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_api_settings_port_too_low() -> None:
+    """Verify API settings port too low."""
     with pytest.raises(ValidationError):
         APISettings(port=0)
 
 
 def test_api_settings_port_too_high() -> None:
+    """Verify API settings port too high."""
     with pytest.raises(ValidationError):
         APISettings(port=70000)
 
@@ -50,10 +55,11 @@ def test_security_settings_defaults_pass_in_debug(
     """The placeholder secret values are tolerated when ``API_DEBUG=true``.
 
     The cross-field check now lives on the composite ``Settings`` model
-    so that the validator sees the same ``api.debug`` value the rest of
+    so that the validator sees the same ``API.debug`` value the rest of
     the application reads. ``SecuritySettings`` on its own is therefore
     permissive — the gate fires only when the placeholder is paired with
     a non-debug build.
+
     """
     monkeypatch.setenv("API_DEBUG", "true")
     monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
@@ -65,6 +71,7 @@ def test_security_settings_defaults_pass_in_debug(
 def test_security_settings_rejects_defaults_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify security settings rejects defaults in production."""
     monkeypatch.setenv("API_DEBUG", "false")
     monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
@@ -78,11 +85,12 @@ def test_security_settings_rejects_defaults_when_api_debug_unset(
     """``API_DEBUG`` left unset must default to "production" semantics.
 
     Previously the ad-hoc ``os.getenv("API_DEBUG", "false")`` lookup
-    inside ``SecuritySettings`` could disagree with ``settings.api.debug``
+    inside ``SecuritySettings`` could disagree with ``settings.API.debug``
     when the value lived in ``.env`` rather than the live environment.
-    The composite-level validator now relies on ``self.api.debug``, which
+    The composite-level validator now relies on ``self.API.debug``, which
     pydantic-settings derives from the same payload as the rest of the
     config, so the unset case is rejected consistently.
+
     """
     monkeypatch.delenv("API_DEBUG", raising=False)
     monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
@@ -112,6 +120,7 @@ def test_security_settings_isolated_construct_is_permissive(
 
 
 def test_r2_settings_is_configured_true() -> None:
+    """Verify R2 settings is configured true."""
     s = R2Settings(
         account_id="acc",
         access_key_id="key",
@@ -123,6 +132,7 @@ def test_r2_settings_is_configured_true() -> None:
 
 
 def test_r2_settings_is_configured_false_missing_field() -> None:
+    """Verify R2 settings is configured false missing field."""
     s = R2Settings(
         account_id="acc",
         access_key_id="",
@@ -134,6 +144,7 @@ def test_r2_settings_is_configured_false_missing_field() -> None:
 
 
 def test_r2_settings_is_configured_false_missing_endpoint() -> None:
+    """Verify R2 settings is configured false missing endpoint."""
     s = R2Settings(
         account_id="acc",
         access_key_id="key",
@@ -145,6 +156,7 @@ def test_r2_settings_is_configured_false_missing_endpoint() -> None:
 
 
 def test_r2_settings_is_configured_false_all_empty() -> None:
+    """Verify R2 settings is configured false all empty."""
     s = R2Settings()
     assert s.is_configured is False
 
@@ -153,6 +165,7 @@ def test_r2_settings_is_configured_false_all_empty() -> None:
 
 
 def test_douyin_settings_headers_property() -> None:
+    """Verify douyin settings headers property."""
     s = DouyinSettings(cookie="ck", user_agent="ua", referer="ref")
     headers = s.headers
     assert headers["User-Agent"] == "ua"
@@ -161,6 +174,7 @@ def test_douyin_settings_headers_property() -> None:
 
 
 def test_douyin_settings_proxies_property() -> None:
+    """Verify douyin settings proxies property."""
     s = DouyinSettings(proxy_http="http://p", proxy_https="https://p")
     proxies = s.proxies
     assert proxies["http://"] == "http://p"
@@ -168,6 +182,7 @@ def test_douyin_settings_proxies_property() -> None:
 
 
 def test_douyin_settings_proxies_none_by_default() -> None:
+    """Verify douyin settings proxies none by default."""
     s = DouyinSettings()
     assert s.proxies["http://"] is None
     assert s.proxies["https://"] is None
@@ -177,6 +192,7 @@ def test_douyin_settings_proxies_none_by_default() -> None:
 
 
 def test_settings_convenience_properties() -> None:
+    """Verify settings convenience properties."""
     s = Settings()
     assert s.debug == s.api.debug
     assert s.version == s.api.version
@@ -186,6 +202,7 @@ def test_settings_convenience_properties() -> None:
 
 
 def test_settings_backward_compat_properties() -> None:
+    """Verify settings backward compat properties."""
     s = Settings()
     assert s.host == s.api.host
     assert s.port == s.api.port
@@ -197,6 +214,7 @@ def test_settings_backward_compat_properties() -> None:
 
 
 def test_get_settings_returns_settings_instance() -> None:
+    """Verify get settings returns settings instance."""
     get_settings.cache_clear()
     s = get_settings()
     assert isinstance(s, Settings)
@@ -204,6 +222,7 @@ def test_get_settings_returns_settings_instance() -> None:
 
 
 def test_get_settings_caches() -> None:
+    """Verify get settings caches."""
     get_settings.cache_clear()
     s1 = get_settings()
     s2 = get_settings()

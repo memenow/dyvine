@@ -1,3 +1,5 @@
+"""Tests for livestream schema validation."""
+
 from __future__ import annotations
 
 import pytest
@@ -11,6 +13,7 @@ from dyvine.schemas.livestreams import (
 
 
 def test_livestream_download_request_required_user_id() -> None:
+    """Verify livestream download request required user ID."""
     req = LiveStreamDownloadRequest(user_id="user01")
     assert req.user_id == "user01"
 
@@ -30,6 +33,7 @@ def test_livestream_download_request_rejects_traversal_output_path() -> None:
 
 
 def test_livestream_download_request_optional_output_path() -> None:
+    """Verify livestream download request optional output path."""
     req = LiveStreamDownloadRequest(user_id="user01")
     assert req.output_path is None
 
@@ -38,11 +42,13 @@ def test_livestream_download_request_optional_output_path() -> None:
 
 
 def test_livestream_download_request_missing_user_id_raises() -> None:
+    """Verify livestream download request missing user ID raises."""
     with pytest.raises(ValidationError):
         LiveStreamDownloadRequest()  # type: ignore[call-arg]
 
 
 def test_livestream_url_download_request_required_url() -> None:
+    """Verify livestream URL download request required URL."""
     req = LiveStreamURLDownloadRequest(url="https://live.douyin.com/123")
     assert str(req.url) == "https://live.douyin.com/123"
 
@@ -60,11 +66,13 @@ def test_livestream_url_download_request_rejects_non_http_scheme() -> None:
 
 
 def test_livestream_url_download_request_optional_output_path() -> None:
+    """Verify livestream URL download request optional output path."""
     req = LiveStreamURLDownloadRequest(url="https://live.douyin.com/1")
     assert req.output_path is None
 
 
 def test_livestream_download_response_fields() -> None:
+    """Verify livestream download response fields."""
     resp = LiveStreamDownloadResponse(
         operation_id="op1",
         operation_type="livestream_download",

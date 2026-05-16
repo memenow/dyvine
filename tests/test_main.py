@@ -1,3 +1,5 @@
+"""Tests for the FastAPI application entry point and health probes."""
+
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -55,6 +57,7 @@ def prime_ready_dependencies(
 
 
 def test_read_main():
+    """Verify read main."""
     with TestClient(app) as client:
         response = client.get("/")
         assert response.status_code == 200
@@ -71,6 +74,7 @@ def test_read_main():
 def test_readiness_probe_returns_ready_when_all_dependencies_ok(
     prime_ready_dependencies: TestClient,
 ) -> None:
+    """Verify readiness probe returns ready when all dependencies ok."""
     response = prime_ready_dependencies.get("/readyz")
 
     assert response.status_code == 200
@@ -87,6 +91,7 @@ def test_readiness_probe_returns_ready_when_all_dependencies_ok(
 def test_readiness_probe_returns_ready_with_request_id(
     prime_ready_dependencies: TestClient,
 ) -> None:
+    """Verify readiness probe returns ready with request ID."""
     request_id = str(uuid.uuid4())
     response = prime_ready_dependencies.get(
         "/readyz", headers={"X-Request-ID": request_id}
@@ -102,6 +107,7 @@ def test_readiness_probe_returns_ready_with_request_id(
 def test_readiness_probe_returns_not_ready_when_douyin_cookie_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify readiness probe returns not ready when douyin cookie missing."""
     with TestClient(app) as client:
         monkeypatch.setattr(settings.douyin, "cookie", "")
         response = client.get("/readyz")
@@ -115,10 +121,14 @@ def test_readiness_probe_returns_not_ready_when_douyin_cookie_missing(
 def test_readiness_probe_returns_not_ready_when_operation_store_broken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify readiness probe returns not ready when operation store broken."""
     monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
     _configure_r2(monkeypatch)
 
     async def _raise() -> None:
+        """Test helper for
+        test_readiness_probe_returns_not_ready_when_operation_store_broken.
+        """
         raise sqlite3.OperationalError("disk I/O error")
 
     with TestClient(app) as client:
@@ -135,6 +145,7 @@ def test_readiness_probe_returns_not_ready_when_operation_store_broken(
 def test_readiness_probe_returns_not_ready_when_r2_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify readiness probe returns not ready when R2 missing."""
     monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
     _configure_r2(
         monkeypatch,
@@ -159,8 +170,9 @@ def test_readiness_probe_returns_not_ready_when_r2_missing(
 def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Covers the bug where /readyz passed while ``settings.r2.endpoint`` was
+    """Covers the bug where /readyz passed while ``settings.R2.endpoint`` was
     empty, even though ``R2StorageService`` disables itself in that state.
+
     """
     monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
     _configure_r2(monkeypatch, endpoint="")
@@ -177,6 +189,7 @@ def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
 
 
 def test_invalid_request_id_is_regenerated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify invalid request ID is regenerated."""
     with TestClient(app) as client:
         monkeypatch.setattr(settings.douyin, "cookie", "")
         response = client.get("/livez", headers={"X-Request-ID": "invalid"})
@@ -242,6 +255,7 @@ def test_health_check_returns_200_when_douyin_cookie_missing(
 
 
 def test_metrics_endpoint_exposed() -> None:
+    """Verify metrics endpoint exposed."""
     with TestClient(app) as client:
         response = client.get("/metrics/")
         assert response.status_code == 200
@@ -249,6 +263,7 @@ def test_metrics_endpoint_exposed() -> None:
 
 
 def test_metrics_uses_bounded_label_for_unmatched_routes() -> None:
+    """Verify metrics uses bounded label for unmatched routes."""
     with TestClient(app) as client:
         client.get("/definitely-not-a-real-route")
         response = client.get("/metrics/")

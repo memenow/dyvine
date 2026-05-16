@@ -1,6 +1,6 @@
 """User-facing FastAPI router.
 
-Endpoints exposed under ``/api/v1/users``:
+Endpoints exposed under ``/API/v1/users``:
 
 - ``GET /{user_id}`` — fetch the public Douyin profile.
 - ``POST /{user_id}/content:download`` — schedule an asynchronous
@@ -60,9 +60,7 @@ router = APIRouter(
                 "application/json": {
                     "example": {
                         "error": True,
-                        "message": (
-                            "Path escapes the configured download root"
-                        ),
+                        "message": ("Path escapes the configured download root"),
                         "error_code": "ValidationError",
                         "status_code": 422,
                         "correlation_id": "550e8400-e29b-41d4-a716-446655440000",

@@ -1,3 +1,5 @@
+"""Tests for user schema validation."""
+
 from __future__ import annotations
 
 import pytest
@@ -11,11 +13,13 @@ from dyvine.schemas.users import (
 
 
 def test_user_download_request_required_user_id() -> None:
+    """Verify user download request required user ID."""
     req = UserDownloadRequest(user_id="u123")
     assert req.user_id == "u123"
 
 
 def test_user_download_request_defaults() -> None:
+    """Verify user download request defaults."""
     req = UserDownloadRequest(user_id="u")
     assert req.include_posts is True
     assert req.include_likes is False
@@ -23,6 +27,7 @@ def test_user_download_request_defaults() -> None:
 
 
 def test_user_download_request_missing_user_id_raises() -> None:
+    """Verify user download request missing user ID raises."""
     with pytest.raises(ValidationError):
         UserDownloadRequest()  # type: ignore[call-arg]
 
@@ -61,6 +66,7 @@ def test_user_response_avatar_url_empty_coerces_to_none() -> None:
 
 
 def test_user_response_optional_fields_none() -> None:
+    """Verify user response optional fields none."""
     resp = UserResponse(
         user_id="u2",
         nickname="n",
@@ -75,6 +81,7 @@ def test_user_response_optional_fields_none() -> None:
 
 
 def test_download_response_all_fields() -> None:
+    """Verify download response all fields."""
     resp = DownloadResponse(
         operation_id="t1",
         operation_type="user_content_download",
@@ -93,6 +100,7 @@ def test_download_response_all_fields() -> None:
 
 
 def test_download_response_optional_fields_none() -> None:
+    """Verify download response optional fields none."""
     resp = DownloadResponse(
         operation_id="t2",
         operation_type="user_content_download",

@@ -90,9 +90,10 @@ class ImageInfo(BaseModel):
     """Image information model.
 
     Attributes:
-        url: Image URL
+        URL: Image URL
         width: Image width in pixels
         height: Image height in pixels
+
     """
 
     url: HttpUrl = Field(..., description="Image URL")

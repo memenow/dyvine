@@ -1,6 +1,6 @@
 """Livestream-facing FastAPI router.
 
-Endpoints exposed under ``/api/v1/livestreams``:
+Endpoints exposed under ``/API/v1/livestreams``:
 
 - ``POST /users/{user_id}/stream:download`` — schedule a livestream
   download for a user whose profile URL resolves to an active room.

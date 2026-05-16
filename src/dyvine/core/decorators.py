@@ -119,12 +119,14 @@ def handle_errors(
         return HTTPException(status_code=500, detail="Internal server error")
 
     def decorator(func: Callable) -> Callable:
+        """Build the wrapper that applies the configured error mapping."""
         if inspect.isasyncgenfunction(func):
 
             @wraps(func)
             async def async_gen_wrapper(
                 *args: Any, **kwargs: Any
             ) -> AsyncIterator[Any]:
+                """Translate exceptions raised while iterating an async generator."""
                 agen = func(*args, **kwargs)
                 try:
                     async for item in agen:
@@ -144,6 +146,7 @@ def handle_errors(
 
         @wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Translate exceptions raised by a coroutine endpoint."""
             try:
                 return await func(*args, **kwargs)
             except HTTPException:

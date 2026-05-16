@@ -1,3 +1,5 @@
+"""Tests for post service parsing, pagination, and bulk downloads."""
+
 from __future__ import annotations
 
 import asyncio
@@ -39,33 +41,39 @@ def _build_service(
 
 
 def test_determine_post_type_live() -> None:
+    """Verify determine post type live."""
     svc = _build_service()
     assert svc._determine_post_type({"aweme_type": 1}) == PostType.LIVE
 
 
 def test_determine_post_type_collection() -> None:
+    """Verify determine post type collection."""
     svc = _build_service()
     assert svc._determine_post_type({"aweme_type": 3}) == PostType.COLLECTION
 
 
 def test_determine_post_type_story() -> None:
+    """Verify determine post type story."""
     svc = _build_service()
     assert svc._determine_post_type({"aweme_type": 4}) == PostType.STORY
 
 
 def test_determine_post_type_video() -> None:
+    """Verify determine post type video."""
     svc = _build_service()
     post = {"aweme_type": 0, "video": {"play_addr": {"url_list": ["http://v"]}}}
     assert svc._determine_post_type(post) == PostType.VIDEO
 
 
 def test_determine_post_type_images() -> None:
+    """Verify determine post type images."""
     svc = _build_service()
     post = {"aweme_type": 0, "images": [{"url_list": ["http://i"]}]}
     assert svc._determine_post_type(post) == PostType.IMAGES
 
 
 def test_determine_post_type_mixed() -> None:
+    """Verify determine post type mixed."""
     svc = _build_service()
     post = {
         "aweme_type": 0,
@@ -76,11 +84,13 @@ def test_determine_post_type_mixed() -> None:
 
 
 def test_determine_post_type_unknown_no_media() -> None:
+    """Verify determine post type unknown no media."""
     svc = _build_service()
     assert svc._determine_post_type({"aweme_type": 0}) == PostType.UNKNOWN
 
 
 def test_determine_post_type_invalid_aweme_type() -> None:
+    """Verify determine post type invalid aweme type."""
     svc = _build_service()
     assert svc._determine_post_type({"aweme_type": "bad"}) == PostType.UNKNOWN
 
@@ -89,6 +99,7 @@ def test_determine_post_type_invalid_aweme_type() -> None:
 
 
 def test_extract_video_info_valid() -> None:
+    """Verify extract video info valid."""
     svc = _build_service()
     post = {
         "video": {
@@ -107,11 +118,13 @@ def test_extract_video_info_valid() -> None:
 
 
 def test_extract_video_info_no_video() -> None:
+    """Verify extract video info no video."""
     svc = _build_service()
     assert svc._extract_video_info({}) is None
 
 
 def test_extract_video_info_empty_url_list() -> None:
+    """Verify extract video info empty URL list."""
     svc = _build_service()
     post = {"video": {"play_addr": {"url_list": []}}}
     assert svc._extract_video_info(post) is None
@@ -121,6 +134,7 @@ def test_extract_video_info_empty_url_list() -> None:
 
 
 def test_extract_image_info_valid() -> None:
+    """Verify extract image info valid."""
     svc = _build_service()
     post = {
         "images": [
@@ -138,11 +152,13 @@ def test_extract_image_info_valid() -> None:
 
 
 def test_extract_image_info_no_images() -> None:
+    """Verify extract image info no images."""
     svc = _build_service()
     assert svc._extract_image_info({}) is None
 
 
 def test_extract_image_info_invalid_entries() -> None:
+    """Verify extract image info invalid entries."""
     svc = _build_service()
     post = {"images": ["not-a-dict", 42]}
     assert svc._extract_image_info(post) is None
@@ -152,6 +168,7 @@ def test_extract_image_info_invalid_entries() -> None:
 
 
 def test_extract_image_urls_valid() -> None:
+    """Verify extract image urls valid."""
     svc = _build_service()
     post = {
         "images": [
@@ -164,6 +181,7 @@ def test_extract_image_urls_valid() -> None:
 
 
 def test_extract_image_urls_empty() -> None:
+    """Verify extract image urls empty."""
     svc = _build_service()
     assert svc._extract_image_urls({}) == []
 
@@ -173,6 +191,7 @@ def test_extract_image_urls_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_get_post_detail_success() -> None:
+    """Verify get post detail success."""
     handler = MagicMock()
     post_mock = MagicMock()
     post_mock._to_dict.return_value = {
@@ -201,6 +220,7 @@ async def test_get_post_detail_success() -> None:
 
 @pytest.mark.asyncio
 async def test_get_post_detail_not_found() -> None:
+    """Verify get post detail not found."""
     handler = MagicMock()
     handler.fetch_one_video = AsyncMock(return_value=None)
 
@@ -211,6 +231,7 @@ async def test_get_post_detail_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_get_post_detail_invalid_create_time() -> None:
+    """Verify get post detail invalid create time."""
     handler = MagicMock()
     post_mock = MagicMock()
     post_mock._to_dict.return_value = {
@@ -226,6 +247,7 @@ async def test_get_post_detail_invalid_create_time() -> None:
 
 @pytest.mark.asyncio
 async def test_get_post_detail_handler_error() -> None:
+    """Verify get post detail handler error."""
     handler = MagicMock()
     handler.fetch_one_video = AsyncMock(side_effect=RuntimeError("api fail"))
 
@@ -239,6 +261,7 @@ async def test_get_post_detail_handler_error() -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_posts_success() -> None:
+    """Verify get user posts success."""
     handler = MagicMock()
     posts_filter = MagicMock()
     posts_filter._to_raw.return_value = {
@@ -256,6 +279,7 @@ async def test_get_user_posts_success() -> None:
     }
 
     async def _iter(*a, **kw):
+        """Test helper for test_get_user_posts_success."""
         yield posts_filter
 
     handler.fetch_user_post_videos = _iter
@@ -271,9 +295,11 @@ async def test_get_user_posts_success() -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_posts_empty() -> None:
+    """Verify get user posts empty."""
     handler = MagicMock()
 
     async def _iter(*a, **kw):
+        """Test helper for test_get_user_posts_empty."""
         return
         yield  # make this an async generator
 
@@ -287,6 +313,7 @@ async def test_get_user_posts_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_get_user_posts_empty_aweme_list() -> None:
+    """Verify get user posts empty aweme list."""
     handler = MagicMock()
     posts_filter = MagicMock()
     posts_filter._to_raw.return_value = {
@@ -296,6 +323,7 @@ async def test_get_user_posts_empty_aweme_list() -> None:
     }
 
     async def _iter(*a, **kw):
+        """Test helper for test_get_user_posts_empty_aweme_list."""
         yield posts_filter
 
     handler.fetch_user_post_videos = _iter
@@ -326,6 +354,7 @@ async def test_get_user_posts_returns_none_cursor_on_stuck_upstream() -> None:
     }
 
     async def _iter(*a, **kw):
+        """Test helper for test_get_user_posts_returns_none_cursor_on_stuck_upstream."""
         yield posts_filter
 
     handler.fetch_user_post_videos = _iter
@@ -340,11 +369,13 @@ async def test_get_user_posts_returns_none_cursor_on_stuck_upstream() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_posts_batch_success() -> None:
+    """Verify fetch posts batch success."""
     handler = MagicMock()
     posts_filter = MagicMock()
     posts_filter._to_dict.return_value = {"aweme_list": [{"aweme_id": "1"}]}
 
     async def _iter(*a, **kw):
+        """Test helper for test_fetch_posts_batch_success."""
         yield posts_filter
 
     handler.fetch_user_post_videos = _iter
@@ -355,9 +386,11 @@ async def test_fetch_posts_batch_success() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_posts_batch_empty() -> None:
+    """Verify fetch posts batch empty."""
     handler = MagicMock()
 
     async def _iter(*a, **kw):
+        """Test helper for test_fetch_posts_batch_empty."""
         return
         yield
 
@@ -372,6 +405,7 @@ async def test_fetch_posts_batch_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_download_post_content_success() -> None:
+    """Verify download post content success."""
     handler = MagicMock()
     handler.downloader = MagicMock()
     handler.downloader.create_download_tasks = AsyncMock()
@@ -388,6 +422,7 @@ async def test_download_post_content_success() -> None:
 
 @pytest.mark.asyncio
 async def test_start_bulk_download_user_not_found(tmp_path) -> None:
+    """Verify start bulk download user not found."""
     from dyvine.core.exceptions import UserNotFoundError
 
     handler = MagicMock()
@@ -419,6 +454,9 @@ async def test_start_bulk_download_returns_pending_response_immediately(
     scheduled: list[asyncio.Future[None]] = []
 
     def fake_create_task(coro: Any, **_kwargs: Any) -> asyncio.Future[None]:
+        """Test helper for
+        test_start_bulk_download_returns_pending_response_immediately.
+        """
         if hasattr(coro, "close"):
             coro.close()
         future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
@@ -529,6 +567,7 @@ async def test_run_bulk_download_records_failure_when_user_disappears(
 
 @pytest.mark.asyncio
 async def test_download_post_content_error() -> None:
+    """Verify download post content error."""
     handler = MagicMock()
     handler.downloader = MagicMock()
     handler.downloader.create_download_tasks = AsyncMock(
@@ -593,6 +632,7 @@ async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
         async def fake_fetch(
             sec_user_id: str, cursor: int
         ) -> dict:  # type: ignore[override]
+            """Test helper for test_run_bulk_download_breaks_on_empty_aweme_list."""
             nonlocal call_count
             call_count += 1
             if call_count > 5:  # safety net; the fix should cap at 1.
@@ -656,6 +696,9 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
         call_count = 0
 
         async def sticky_fetch(sec_user_id: str, cursor: int) -> dict:
+            """Test helper for
+            test_run_bulk_download_caps_pagination_under_sticky_cursor.
+            """
             nonlocal call_count
             call_count += 1
             if call_count > 200:  # safety net; the cap should fire long before.
@@ -743,6 +786,7 @@ async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
         async def failing_fetch(
             sec_user_id: str, cursor: int
         ) -> dict:  # type: ignore[override]
+            """Test helper for test_run_bulk_download_stops_on_batch_error."""
             nonlocal call_count
             call_count += 1
             if call_count > 3:
@@ -809,6 +853,9 @@ async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
         call_count = 0
 
         async def flaky_fetch(sec_user_id: str, cursor: int) -> dict:
+            """Test helper for
+            test_run_bulk_download_records_partial_when_batch_fails_mid_run.
+            """
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -822,6 +869,9 @@ async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
             raise RuntimeError("upstream blew up on page 2")
 
         async def fake_process(posts: dict, stats: dict, _user_path: Path) -> int:
+            """Test helper for
+            test_run_bulk_download_records_partial_when_batch_fails_mid_run.
+            """
             stats[PostType.VIDEO] += len(posts.get("aweme_list", []))
             return 0
 
@@ -880,6 +930,9 @@ async def test_run_bulk_download_clamps_in_loop_progress_when_overcount(
         svc = _build_service(handler, operation_store=store)
 
         async def overcount_fetch(sec_user_id: str, cursor: int) -> dict:
+            """Test helper for
+            test_run_bulk_download_clamps_in_loop_progress_when_overcount.
+            """
             # Single page returns five items even though aweme_count == 2.
             return {
                 "aweme_list": [
@@ -890,6 +943,9 @@ async def test_run_bulk_download_clamps_in_loop_progress_when_overcount(
             }
 
         async def fake_process(posts: dict, stats: dict, _user_path: Path) -> None:
+            """Test helper for
+            test_run_bulk_download_clamps_in_loop_progress_when_overcount.
+            """
             stats[PostType.VIDEO] += len(posts.get("aweme_list", []))
 
         with patch.object(svc, "_fetch_posts_batch", side_effect=overcount_fetch):
@@ -938,6 +994,7 @@ async def test_run_bulk_download_persists_runtime_download_stats(
     original_update = store.update_operation
 
     async def capture_update(operation_id: str, **fields: Any) -> Any:
+        """Test helper for test_run_bulk_download_persists_runtime_download_stats."""
         if (
             fields.get("message") == "Bulk download in progress"
             and fields.get("completed_items", 0) > 0
@@ -950,6 +1007,7 @@ async def test_run_bulk_download_persists_runtime_download_stats(
         download_stats: dict[PostType, int],
         path: Path,
     ) -> int:
+        """Test helper for test_run_bulk_download_persists_runtime_download_stats."""
         assert path == user_path
         download_stats[PostType.VIDEO] += 1
         download_stats[PostType.IMAGES] += 1
@@ -1000,6 +1058,7 @@ async def test_run_bulk_download_persists_runtime_download_stats(
 
 @pytest.mark.asyncio
 async def test_get_bulk_download_status_returns_persisted_state(tmp_path) -> None:
+    """Verify get bulk download status returns persisted state."""
     store = OperationStore(str(tmp_path / "operations.db"))
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
@@ -1037,6 +1096,7 @@ async def test_get_bulk_download_status_returns_persisted_state(tmp_path) -> Non
 
 @pytest.mark.asyncio
 async def test_get_bulk_download_status_raises_for_unknown_id(tmp_path) -> None:
+    """Verify get bulk download status raises for unknown ID."""
     store = OperationStore(str(tmp_path / "operations.db"))
     svc = _build_service(operation_store=store)
 
@@ -1048,6 +1108,7 @@ async def test_get_bulk_download_status_raises_for_unknown_id(tmp_path) -> None:
 async def test_get_bulk_download_status_rejects_non_post_operation(
     tmp_path,
 ) -> None:
+    """Verify get bulk download status rejects non post operation."""
     store = OperationStore(str(tmp_path / "operations.db"))
     operation = await store.create_operation(
         operation_type="livestream_download",
@@ -1103,6 +1164,9 @@ async def test_process_posts_batch_dispatches_by_type_and_counts_failures(
     async def fake_download(
         post: dict[str, Any], post_type: PostType, target: Any
     ) -> None:
+        """Test helper for
+        test_process_posts_batch_dispatches_by_type_and_counts_failures.
+        """
         call_count["n"] += 1
         if post.get("aweme_id") == "4":
             raise RuntimeError("simulated upstream failure")

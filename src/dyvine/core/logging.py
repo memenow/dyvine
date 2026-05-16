@@ -68,6 +68,14 @@ class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging."""
 
     def format(self, record: logging.LogRecord) -> str:
+        """Serialize a log record into the JSON logging contract.
+
+        Args:
+            record: Standard library log record to serialize.
+
+        Returns:
+            JSON string containing the normalized log fields.
+        """
         log_data = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
@@ -143,6 +151,11 @@ class ContextLogger:
     """Logger with context and performance tracking."""
 
     def __init__(self, name: str) -> None:
+        """Create a context-aware wrapper around a named logger.
+
+        Args:
+            name: Logger name passed to ``logging.getLogger``.
+        """
         self.logger = logging.getLogger(name)
 
     @property
@@ -156,9 +169,19 @@ class ContextLogger:
         return dict(_context_var.get() or {})
 
     def set_correlation_id(self, correlation_id: str | None) -> None:
+        """Store the current correlation ID for this context.
+
+        Args:
+            correlation_id: Request or background-task correlation ID, or ``None``.
+        """
         _correlation_id_var.set(correlation_id)
 
     def add_context(self, **kwargs: Any) -> "ContextLogger":
+        """Merge key/value pairs into the current logging context.
+
+        Returns:
+            This logger wrapper, allowing fluent context setup.
+        """
         context = dict(_context_var.get() or {})
         context.update(kwargs)
         _context_var.set(context)
@@ -170,6 +193,11 @@ class ContextLogger:
 
     @asynccontextmanager
     async def track_time(self, operation: str) -> AsyncGenerator[None, None]:
+        """Log elapsed time for an asynchronous operation.
+
+        Args:
+            operation: Operation label included in the completion log record.
+        """
         start = perf_counter()
         try:
             yield
@@ -181,6 +209,11 @@ class ContextLogger:
 
     @asynccontextmanager
     async def track_memory(self, operation: str) -> AsyncGenerator[None, None]:
+        """Log RSS memory delta for an asynchronous operation.
+
+        Args:
+            operation: Operation label included in the memory log record.
+        """
         process = psutil.Process()
         start_mem = process.memory_info().rss
         try:
@@ -203,6 +236,15 @@ class ContextLogger:
         exc_info: bool = False,
         **kwargs: Any,
     ) -> None:
+        """Emit a log record with the current correlation and context fields.
+
+        Args:
+            level: Standard library logging level.
+            msg: Log message format string.
+            *args: Positional arguments forwarded to the wrapped logger.
+            exc_info: Whether to attach active exception information.
+            **kwargs: Additional keyword arguments forwarded to the wrapped logger.
+        """
         extra = kwargs.pop("extra", {})
         correlation_id = _correlation_id_var.get()
         context = _context_var.get()
@@ -213,17 +255,22 @@ class ContextLogger:
         self.logger.log(level, msg, *args, exc_info=exc_info, extra=extra, **kwargs)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log a DEBUG message with the current context."""
         self._log(logging.DEBUG, msg, *args, **kwargs)
 
     def info(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log an INFO message with the current context."""
         self._log(logging.INFO, msg, *args, **kwargs)
 
     def warning(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log a WARNING message with the current context."""
         self._log(logging.WARNING, msg, *args, **kwargs)
 
     def error(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log an ERROR message with the current context."""
         self._log(logging.ERROR, msg, *args, **kwargs)
 
     def exception(self, msg: str, *args: Any, **kwargs: Any) -> None:
+        """Log an ERROR message with active exception information."""
         kwargs["exc_info"] = True
         self._log(logging.ERROR, msg, *args, **kwargs)

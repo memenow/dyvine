@@ -1,3 +1,5 @@
+"""Tests for structured logging and request-scoped context."""
+
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +33,7 @@ def _make_record(
     level: int = logging.INFO,
     exc_info: tuple | None = None,
 ) -> logging.LogRecord:
+    """Test helper for this module."""
     record = logging.LogRecord(
         name="test",
         level=level,
@@ -44,6 +47,7 @@ def _make_record(
 
 
 def test_json_formatter_basic_output() -> None:
+    """Verify JSON formatter basic output."""
     fmt = JSONFormatter()
     record = _make_record("hi")
     output = fmt.format(record)
@@ -55,6 +59,7 @@ def test_json_formatter_basic_output() -> None:
 
 
 def test_json_formatter_includes_exception_info() -> None:
+    """Verify JSON formatter includes exception info."""
     fmt = JSONFormatter()
     try:
         raise ValueError("test-err")
@@ -70,6 +75,7 @@ def test_json_formatter_includes_exception_info() -> None:
 
 
 def test_json_formatter_includes_correlation_id() -> None:
+    """Verify JSON formatter includes correlation ID."""
     fmt = JSONFormatter()
     record = _make_record("ctx")
     record.correlation_id = "abc-123"  # type: ignore[attr-defined]
@@ -82,30 +88,35 @@ def test_json_formatter_includes_correlation_id() -> None:
 
 
 def test_context_logger_init() -> None:
+    """Verify context logger init."""
     cl = ContextLogger("mylogger")
     assert cl.correlation_id is None
     assert cl.context == {}
 
 
 def test_context_logger_set_correlation_id() -> None:
+    """Verify context logger set correlation ID."""
     cl = ContextLogger("test")
     cl.set_correlation_id("cid-1")
     assert cl.correlation_id == "cid-1"
 
 
 def test_context_logger_add_context_returns_self() -> None:
+    """Verify context logger add context returns self."""
     cl = ContextLogger("test")
     result = cl.add_context(k="v")
     assert result is cl
 
 
 def test_context_logger_add_context_stores_values() -> None:
+    """Verify context logger add context stores values."""
     cl = ContextLogger("test")
     cl.add_context(a=1, b=2)
     assert cl.context == {"a": 1, "b": 2}
 
 
 def test_context_logger_log_includes_correlation_id() -> None:
+    """Verify context logger log includes correlation ID."""
     cl = ContextLogger("test.corr")
     cl.set_correlation_id("cid-test")
     with patch.object(cl.logger, "log") as mock_log:
@@ -115,6 +126,7 @@ def test_context_logger_log_includes_correlation_id() -> None:
 
 
 def test_context_logger_log_includes_context() -> None:
+    """Verify context logger log includes context."""
     cl = ContextLogger("test.ctx")
     cl.add_context(env="dev")
     with patch.object(cl.logger, "log") as mock_log:
@@ -125,6 +137,7 @@ def test_context_logger_log_includes_context() -> None:
 
 @pytest.mark.asyncio
 async def test_track_time_logs_duration() -> None:
+    """Verify track time logs duration."""
     cl = ContextLogger("test.time")
     with patch.object(cl.logger, "log") as mock_log:
         async with cl.track_time("op"):
@@ -136,6 +149,7 @@ async def test_track_time_logs_duration() -> None:
 
 @pytest.mark.asyncio
 async def test_track_memory_logs_memory_diff() -> None:
+    """Verify track memory logs memory diff."""
     mock_process = MagicMock()
     mem_start = MagicMock()
     mem_start.rss = 100 * 1024 * 1024
@@ -157,6 +171,7 @@ async def test_track_memory_logs_memory_diff() -> None:
 
 
 def test_context_logger_exception_sets_exc_info() -> None:
+    """Verify context logger exception sets exc info."""
     cl = ContextLogger("test.exc")
     with patch.object(cl.logger, "log") as mock_log:
         cl.exception("fail")
@@ -166,9 +181,11 @@ def test_context_logger_exception_sets_exc_info() -> None:
 
 @pytest.mark.asyncio
 async def test_context_logger_uses_task_local_context() -> None:
+    """Verify context logger uses task local context."""
     cl = ContextLogger("test.contextvars")
 
     async def emit(correlation_id: str) -> str | None:
+        """Test helper for test_context_logger_uses_task_local_context."""
         cl.set_correlation_id(correlation_id)
         await asyncio.sleep(0)
         return cl.correlation_id

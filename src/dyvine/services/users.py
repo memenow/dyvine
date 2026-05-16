@@ -95,15 +95,15 @@ def sanitize_filename(filename: str) -> str:
         >>> sanitize_filename("My Video 📱 <2024>.mp4")
         "My_Video_2024.mp4"
 
-        >>> sanitize_filename("文件名/with\\special:chars")
-        "with_special_chars"
+        >>> sanitize_filename("Résumé/with\\special:chars")
+        "Rsum_with_special_chars"
 
         >>> sanitize_filename("🎥📹🎬")
         "untitled"
 
     Note:
         This function is designed for content downloaded from Douyin which
-        often contains emojis, Chinese characters, and special symbols in
+        often contains emojis, non-ASCII text, and special symbols in
         titles and descriptions.
     """
     # Remove emoji and non-ASCII characters for compatibility
@@ -602,6 +602,7 @@ class UserService:
         # path the kernel surfaced on a non-UTF-8 filesystem never
         # reaches this callback.
         def _on_rmtree_error(func: Any, path: str, exc: BaseException) -> None:
+            """Log a workspace cleanup failure without interrupting finalization."""
             logger.warning(
                 "Failed to remove temp file during workspace cleanup",
                 extra={

@@ -1,3 +1,5 @@
+"""Tests for post router endpoints."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -23,6 +25,7 @@ from dyvine.services.posts import UserPostsPage
 
 @pytest.fixture
 def mock_post_service() -> MagicMock:
+    """Test helper for this module."""
     svc = MagicMock()
     svc.get_post_detail = AsyncMock()
     svc.get_user_posts = AsyncMock()
@@ -36,6 +39,7 @@ def mock_post_service() -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_get_post_success(mock_post_service: MagicMock) -> None:
+    """Verify get post success."""
     from dyvine.routers.posts import get_post
 
     detail = PostDetail(aweme_id="1234567890", create_time=0, post_type=PostType.VIDEO)
@@ -47,6 +51,7 @@ async def test_get_post_success(mock_post_service: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_get_post_not_found(mock_post_service: MagicMock) -> None:
+    """Verify get post not found."""
     from dyvine.routers.posts import get_post
 
     mock_post_service.get_post_detail.side_effect = PostNotFoundError("nf")
@@ -61,6 +66,7 @@ async def test_get_post_not_found(mock_post_service: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_list_user_posts_success(mock_post_service: MagicMock) -> None:
+    """Verify list user posts success."""
     from dyvine.routers.posts import list_user_posts
 
     mock_post_service.get_user_posts.return_value = UserPostsPage(
@@ -144,6 +150,7 @@ async def test_list_user_posts_omits_token_when_feed_exhausted(
 async def test_list_user_posts_user_not_found(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify list user posts user not found."""
     from dyvine.routers.posts import list_user_posts
 
     mock_post_service.get_user_posts.side_effect = UserNotFoundError("nf")
@@ -162,6 +169,7 @@ async def test_list_user_posts_user_not_found(
 async def test_download_user_posts_returns_pending_response(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify download user posts returns pending response."""
     from dyvine.routers.posts import download_user_posts
 
     resp = BulkDownloadResponse(
@@ -215,6 +223,7 @@ def test_download_user_posts_route_returns_202() -> None:
 
 
 def test_decode_page_token_round_trips() -> None:
+    """Verify decode page token round trips."""
     from dyvine.routers.posts import _decode_page_token, _encode_page_token
 
     token = _encode_page_token(987)
@@ -233,11 +242,12 @@ def test_decode_page_token_falls_back_to_zero_for_invalid_input() -> None:
 
 
 def test_router_registers_operation_route_before_post_id() -> None:
-    """``/operations/{id}`` must take precedence over ``/{post_id}``.
+    """``/operations/{ID}`` must take precedence over ``/{post_id}``.
 
-    The previous router registration order made ``GET /operations/{id}``
+    The previous router registration order made ``GET /operations/{ID}``
     unreachable because ``/{post_id}`` matched first; this check guards
     against a future revert.
+
     """
     from dyvine.routers.posts import router
 
@@ -251,6 +261,7 @@ def test_router_registers_operation_route_before_post_id() -> None:
 async def test_download_user_posts_user_not_found(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify download user posts user not found."""
     from dyvine.routers.posts import download_user_posts
 
     mock_post_service.start_bulk_download.side_effect = UserNotFoundError("nf")
@@ -284,6 +295,7 @@ async def test_download_user_posts_service_error_maps_to_5xx(
 async def test_download_user_posts_unexpected_error_returns_500(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify download user posts unexpected error returns 500."""
     from dyvine.routers.posts import download_user_posts
 
     mock_post_service.start_bulk_download.side_effect = RuntimeError("boom")
@@ -302,6 +314,7 @@ async def test_download_user_posts_unexpected_error_returns_500(
 async def test_get_bulk_download_operation_success(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify get bulk download operation success."""
     from dyvine.routers.posts import get_bulk_download_operation
 
     resp = BulkDownloadResponse(
@@ -326,6 +339,7 @@ async def test_get_bulk_download_operation_success(
 async def test_get_bulk_download_operation_not_found(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify get bulk download operation not found."""
     from dyvine.routers.posts import get_bulk_download_operation
 
     mock_post_service.get_bulk_download_status.side_effect = OperationNotFoundError(
@@ -343,6 +357,7 @@ async def test_get_bulk_download_operation_not_found(
 async def test_get_bulk_download_operation_unexpected_error(
     mock_post_service: MagicMock,
 ) -> None:
+    """Verify get bulk download operation unexpected error."""
     from dyvine.routers.posts import get_bulk_download_operation
 
     mock_post_service.get_bulk_download_status.side_effect = RuntimeError("boom")

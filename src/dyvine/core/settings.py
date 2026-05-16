@@ -10,7 +10,7 @@ each scoped by a distinct environment-variable prefix:
   download root, and livestream-specific HTTP headers.
 
 A model-level validator (`_validate_security_in_production`) refuses
-to instantiate the container when `api.debug` is `false` and either
+to instantiate the container when `API.debug` is `false` and either
 `security.secret_key` or `security.api_key` (when `require_api_key`
 is on) still match the placeholder `change-me-in-production`
 sentinel. The cross-field check lives on the composite class so the
@@ -24,7 +24,7 @@ each test sees pristine settings.
 
 Convenience properties (`debug`, `version`, `prefix`, the legacy
 `douyin_*` accessors) keep older call sites working without forcing
-them through the nested `settings.api.*` / `settings.douyin.*`
+them through the nested `settings.API.*` / `settings.douyin.*`
 addresses.
 """
 
@@ -45,7 +45,7 @@ class APISettings(BaseSettings):
 
     Attributes:
         version: Application version string.
-        prefix: API URL prefix (e.g., '/api/v1').
+        prefix: API URL prefix (e.g., '/API/v1').
         project_name: Human-readable project name.
         debug: Enable debug mode with verbose logging.
         host: Server bind address.
@@ -56,6 +56,7 @@ class APISettings(BaseSettings):
     Environment Variables:
         All attributes can be configured via environment variables with
         the 'API_' prefix (e.g., API_DEBUG, API_PORT).
+
     """
 
     version: str = Field(default="1.0.0", description="Application version string")
@@ -288,12 +289,12 @@ class Settings(BaseSettings):
     `DouyinSettings` so a single import gives access to every Pydantic-
     validated env-driven knob the application reads. The model-level
     `_validate_security_in_production` validator refuses to instantiate
-    when `api.debug` is False and a placeholder secret remains.
+    when `API.debug` is False and a placeholder secret remains.
 
     Attributes:
-        api: Server, CORS, and operation DB configuration.
+        API: Server, CORS, and operation DB configuration.
         security: Secret + API keys and the `require_api_key` gate.
-        r2: Cloudflare R2 credentials and endpoint.
+        R2: Cloudflare R2 credentials and endpoint.
         douyin: Session cookie, headers, proxy, download root, and
             livestream-specific HTTP headers.
 
@@ -304,17 +305,18 @@ class Settings(BaseSettings):
 
             if settings.debug:
                 print(f"Running {settings.project_name} v{settings.version}")
-                print(f"Listening on {settings.api.host}:{settings.api.port}")
+                print(f"Listening on {settings.API.host}:{settings.API.port}")
 
         Override for tests by mutating the parsed instance::
 
-            settings.api.operation_db_path = str(tmp_path / "operations.db")
+            settings.API.operation_db_path = str(tmp_path / "operations.db")
 
         Or via env vars in `.env` / the process environment::
 
             API_DEBUG=true
             API_PORT=8080
             DOUYIN_COOKIE=your_cookie_here
+
     """
 
     # Define nested settings as fields
@@ -325,13 +327,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_security_in_production(self) -> Self:
-        """Reject placeholder secret values when ``api.debug`` is False.
+        """Reject placeholder secret values when ``API.debug`` is False.
 
         The cross-field check lives on the composite container so the
-        validator sees ``api.debug`` from the same parsed payload that
+        validator sees ``API.debug`` from the same parsed payload that
         populated ``security``. Reading ``API_DEBUG`` straight off
         ``os.environ`` (the previous approach) silently disagreed with
-        ``api.debug`` whenever the value lived in a ``.env`` file rather
+        ``API.debug`` whenever the value lived in a ``.env`` file rather
         than a real environment variable.
 
         ``api_key`` is only validated when ``require_api_key`` is on, so
@@ -341,6 +343,7 @@ class Settings(BaseSettings):
         check. ``secret_key`` is always validated because it backs
         cryptographic operations that are not gated by the API-key
         dependency.
+
         """
         if self.api.debug:
             return self

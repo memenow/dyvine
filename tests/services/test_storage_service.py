@@ -1,3 +1,5 @@
+"""Tests for storage service path and metadata helpers."""
+
 from __future__ import annotations
 
 import base64
@@ -9,12 +11,14 @@ from dyvine.services.storage import ContentType, R2StorageService, StorageError
 
 
 def build_service_without_init() -> R2StorageService:
+    """Test helper for this module."""
     service = object.__new__(R2StorageService)
     service._executor = None  # type: ignore[attr-defined]
     return service  # type: ignore[return-value]
 
 
 def test_generate_ugc_path_includes_expected_segments() -> None:
+    """Verify generate ugc path includes expected segments."""
     service = build_service_without_init()
 
     path = R2StorageService.generate_ugc_path(
@@ -38,6 +42,7 @@ def test_generate_ugc_path_includes_expected_segments() -> None:
 
 
 def test_generate_ugc_path_rejects_unsupported_content_type() -> None:
+    """Verify generate ugc path rejects unsupported content type."""
     service = build_service_without_init()
 
     with pytest.raises(StorageError):
@@ -50,11 +55,12 @@ def test_generate_ugc_path_rejects_unsupported_content_type() -> None:
 
 
 def test_generate_metadata_encodes_author() -> None:
+    """Verify generate metadata encodes author."""
     service = build_service_without_init()
 
     metadata = R2StorageService.generate_metadata(
         service,
-        author="测试作者",
+        author="Renée Author",
         category=ContentType.POSTS,
         content_type="image/png",
         source="unit-tests",
@@ -63,7 +69,7 @@ def test_generate_metadata_encodes_author() -> None:
     )
 
     decoded_author = base64.b64decode(metadata["author"]).decode()
-    assert decoded_author == "测试作者"
+    assert decoded_author == "Renée Author"
     assert metadata["category"] == ContentType.POSTS.value
     assert metadata["content-type"] == "image/png"
     assert metadata["language"] == "en-US"

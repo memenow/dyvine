@@ -1,3 +1,5 @@
+"""Tests for R2 lifecycle rule execution and audit logging."""
+
 from __future__ import annotations
 
 import json
@@ -62,6 +64,7 @@ def _build_manager(
 
 @pytest.mark.asyncio
 async def test_apply_rule_deletion() -> None:
+    """Verify apply rule deletion."""
     mgr = _build_manager()
     now = datetime.now(UTC)
     obj = {"Key": "old.mp4", "LastModified": now - timedelta(days=200)}
@@ -75,6 +78,7 @@ async def test_apply_rule_deletion() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_rule_transition() -> None:
+    """Verify apply rule transition."""
     mgr = _build_manager()
     now = datetime.now(UTC)
     obj = {
@@ -92,6 +96,7 @@ async def test_apply_rule_transition() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_rule_no_action() -> None:
+    """Verify apply rule no action."""
     mgr = _build_manager()
     now = datetime.now(UTC)
     obj = {"Key": "new.mp4", "LastModified": now - timedelta(days=1)}
@@ -109,6 +114,7 @@ async def test_apply_rule_no_action() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_lifecycle_rules_deletes_old() -> None:
+    """Verify apply lifecycle rules deletes old."""
     now = datetime.now(UTC)
     old_obj = {"Key": "livestream/old.mp4", "LastModified": now - timedelta(days=200)}
 
@@ -123,6 +129,7 @@ async def test_apply_lifecycle_rules_deletes_old() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_lifecycle_rules_transitions() -> None:
+    """Verify apply lifecycle rules transitions."""
     now = datetime.now(UTC)
     obj = {
         "Key": "livestream/rec.mp4",
@@ -145,6 +152,7 @@ async def test_apply_lifecycle_rules_transitions() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_lifecycle_rules_skips_current() -> None:
+    """Verify apply lifecycle rules skips current."""
     now = datetime.now(UTC)
     obj = {"Key": "livestream/new.mp4", "LastModified": now - timedelta(days=1)}
     mgr = _build_manager(
@@ -168,6 +176,7 @@ async def test_apply_lifecycle_rules_skips_current() -> None:
 
 @pytest.mark.asyncio
 async def test_write_audit_log_format() -> None:
+    """Verify write audit log format."""
     mgr = _build_manager(
         audit_config={
             "enabled": True,
@@ -192,6 +201,7 @@ async def test_write_audit_log_format() -> None:
 
 
 def test_load_config_success() -> None:
+    """Verify load config success."""
     mgr = object.__new__(LifecycleManager)
     mgr.storage = MagicMock()
 
@@ -203,6 +213,7 @@ def test_load_config_success() -> None:
 
 
 def test_load_config_file_not_found_raises() -> None:
+    """Verify load config file not found raises."""
     mgr = object.__new__(LifecycleManager)
     mgr.storage = MagicMock()
 
@@ -215,6 +226,7 @@ def test_load_config_file_not_found_raises() -> None:
 
 
 def test_rotate_audit_logs_removes_old_files() -> None:
+    """Verify rotate audit logs removes old files."""
     mgr = _build_manager(
         audit_config={"enabled": True, "log_format": "", "log_retention_days": 30}
     )

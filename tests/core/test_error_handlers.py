@@ -1,3 +1,5 @@
+"""Tests for FastAPI exception handlers and normalized error responses."""
+
 from __future__ import annotations
 
 import json
@@ -21,6 +23,7 @@ from dyvine.core.exceptions import (
 
 
 def _make_request(correlation_id: str | None = None) -> MagicMock:
+    """Test helper for this module."""
     req = MagicMock()
     req.state = MagicMock()
     if correlation_id is not None:
@@ -36,6 +39,7 @@ def _make_request(correlation_id: str | None = None) -> MagicMock:
 
 
 def test_error_response_basic() -> None:
+    """Verify error response basic."""
     resp = ErrorResponse.create_response(400, "bad request")
     assert resp.status_code == 400
     body = resp.body.decode()
@@ -43,18 +47,21 @@ def test_error_response_basic() -> None:
 
 
 def test_error_response_includes_details() -> None:
+    """Verify error response includes details."""
     resp = ErrorResponse.create_response(400, "bad", details={"field": "name"})
     body = resp.body.decode()
     assert "name" in body
 
 
 def test_error_response_includes_correlation_id() -> None:
+    """Verify error response includes correlation ID."""
     resp = ErrorResponse.create_response(400, "bad", correlation_id="abc-123")
     body = resp.body.decode()
     assert "abc-123" in body
 
 
 def test_error_response_includes_traceback_when_enabled() -> None:
+    """Verify error response includes traceback when enabled."""
     try:
         raise ValueError("test-exc")
     except ValueError as e:
@@ -66,6 +73,7 @@ def test_error_response_includes_traceback_when_enabled() -> None:
 
 
 def test_error_response_omits_traceback_when_disabled() -> None:
+    """Verify error response omits traceback when disabled."""
     try:
         raise ValueError("test-exc")
     except ValueError as e:
@@ -81,6 +89,7 @@ def test_error_response_omits_traceback_when_disabled() -> None:
 
 @pytest.mark.asyncio
 async def test_dyvine_error_handler_not_found_returns_404() -> None:
+    """Verify dyvine error handler not found returns 404."""
     req = _make_request("cid-1")
     resp = await dyvine_error_handler(req, UserNotFoundError("gone"))
     assert resp.status_code == 404
@@ -88,6 +97,7 @@ async def test_dyvine_error_handler_not_found_returns_404() -> None:
 
 @pytest.mark.asyncio
 async def test_dyvine_error_handler_service_error_returns_500() -> None:
+    """Verify dyvine error handler service error returns 500."""
     req = _make_request("cid-2")
     resp = await dyvine_error_handler(req, ServiceError("boom"))
     assert resp.status_code == 500
@@ -113,6 +123,7 @@ async def test_dyvine_error_handler_generic_dyvine_returns_400() -> None:
 
 @pytest.mark.asyncio
 async def test_dyvine_error_handler_authentication_returns_401() -> None:
+    """Verify dyvine error handler authentication returns 401."""
     from dyvine.core.exceptions import AuthenticationError
 
     req = _make_request("cid-3b")
@@ -122,6 +133,7 @@ async def test_dyvine_error_handler_authentication_returns_401() -> None:
 
 @pytest.mark.asyncio
 async def test_dyvine_error_handler_rate_limit_returns_429() -> None:
+    """Verify dyvine error handler rate limit returns 429."""
     from dyvine.core.exceptions import RateLimitError
 
     req = _make_request("cid-3c")
@@ -134,6 +146,7 @@ async def test_dyvine_error_handler_rate_limit_returns_429() -> None:
 
 @pytest.mark.asyncio
 async def test_generic_exception_handler_returns_500() -> None:
+    """Verify generic exception handler returns 500."""
     req = _make_request("cid-4")
     resp = await generic_exception_handler(req, RuntimeError("unexpected"))
     assert resp.status_code == 500
@@ -145,6 +158,7 @@ async def test_generic_exception_handler_returns_500() -> None:
 async def test_generic_exception_handler_traceback_in_debug(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify generic exception handler traceback in debug."""
     from dyvine.core import settings as settings_mod
 
     monkeypatch.setattr(settings_mod.settings.api, "debug", True)
@@ -156,6 +170,7 @@ async def test_generic_exception_handler_traceback_in_debug(
 
 @pytest.mark.asyncio
 async def test_http_exception_handler_normalizes_response() -> None:
+    """Verify HTTP exception handler normalizes response."""
     req = _make_request("cid-6")
     resp = await http_exception_handler(
         req, HTTPException(status_code=404, detail="nf")
@@ -167,6 +182,7 @@ async def test_http_exception_handler_normalizes_response() -> None:
 
 @pytest.mark.asyncio
 async def test_http_exception_handler_preserves_headers() -> None:
+    """Verify HTTP exception handler preserves headers."""
     req = _make_request("cid-7")
     resp = await http_exception_handler(
         req,
@@ -182,6 +198,7 @@ async def test_http_exception_handler_preserves_headers() -> None:
 
 @pytest.mark.asyncio
 async def test_http_exception_handler_handles_none_detail() -> None:
+    """Verify HTTP exception handler handles none detail."""
     req = _make_request("cid-8")
     exc = HTTPException(status_code=500, detail=None)
     # Starlette substitutes a default HTTP phrase when ``detail`` is ``None``;
@@ -198,6 +215,7 @@ async def test_http_exception_handler_handles_none_detail() -> None:
 
 
 def test_register_error_handlers_adds_handlers() -> None:
+    """Verify register error handlers adds handlers."""
     app = MagicMock()
     register_error_handlers(app)
     assert app.add_exception_handler.call_count == 3

@@ -1,3 +1,5 @@
+"""Tests for livestream router endpoints."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +17,7 @@ from dyvine.services.livestreams import DownloadError, LivestreamError
 
 @pytest.fixture
 def mock_livestream_service() -> MagicMock:
+    """Test helper for this module."""
     svc = MagicMock()
     svc.download_stream = AsyncMock()
     svc.get_download_status = AsyncMock()
@@ -28,6 +31,7 @@ def mock_livestream_service() -> MagicMock:
 async def test_download_livestream_success(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream success."""
     from dyvine.routers.livestreams import download_livestream
 
     mock_livestream_service.download_stream.return_value = LiveStreamDownloadResponse(
@@ -50,6 +54,7 @@ async def test_download_livestream_success(
 async def test_download_livestream_user_not_found(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream user not found."""
     from dyvine.routers.livestreams import download_livestream
 
     mock_livestream_service.download_stream.side_effect = UserNotFoundError("nf")
@@ -63,6 +68,7 @@ async def test_download_livestream_user_not_found(
 async def test_download_livestream_download_error(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream download error."""
     from dyvine.routers.livestreams import download_livestream
 
     mock_livestream_service.download_stream.side_effect = DownloadError("fail")
@@ -76,6 +82,7 @@ async def test_download_livestream_download_error(
 async def test_download_livestream_livestream_error(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream livestream error."""
     from dyvine.routers.livestreams import download_livestream
 
     mock_livestream_service.download_stream.side_effect = LivestreamError("no stream")
@@ -89,6 +96,7 @@ async def test_download_livestream_livestream_error(
 async def test_download_livestream_unexpected_error(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream unexpected error."""
     from dyvine.routers.livestreams import download_livestream
 
     mock_livestream_service.download_stream.side_effect = RuntimeError("boom")
@@ -105,6 +113,7 @@ async def test_download_livestream_unexpected_error(
 async def test_download_livestream_url_success(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream URL success."""
     from dyvine.routers.livestreams import download_livestream_url
 
     mock_livestream_service.download_stream.return_value = LiveStreamDownloadResponse(
@@ -129,6 +138,7 @@ async def test_download_livestream_url_success(
 async def test_download_livestream_url_livestream_error(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify download livestream URL livestream error."""
     from dyvine.routers.livestreams import download_livestream_url
 
     mock_livestream_service.download_stream.side_effect = LivestreamError("no")
@@ -146,6 +156,7 @@ async def test_download_livestream_url_livestream_error(
 async def test_get_download_status_success(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify get download status success."""
     from dyvine.routers.livestreams import get_download_status
 
     mock_livestream_service.get_download_status.return_value = (
@@ -172,6 +183,7 @@ async def test_get_download_status_success(
 async def test_get_download_status_not_found(
     mock_livestream_service: MagicMock,
 ) -> None:
+    """Verify get download status not found."""
     from dyvine.routers.livestreams import get_download_status
 
     mock_livestream_service.get_download_status.side_effect = OperationNotFoundError(

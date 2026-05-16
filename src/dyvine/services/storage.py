@@ -634,6 +634,9 @@ class R2StorageService:
         ]
 
         def _fetch_metadata(key: str | None) -> dict[str, str]:
+            """Fetch object metadata for a listed key, returning empty metadata on
+            failure.
+            """
             if not key:
                 return {}
             try:
