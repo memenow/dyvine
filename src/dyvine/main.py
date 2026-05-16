@@ -294,7 +294,7 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
         INFO: Request started {
             "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
             "method": "GET",
-            "path": "/API/v1/users/123",
+            "path": "/api/v1/users/123",
             "client": "192.168.1.100"
         }
 
@@ -426,7 +426,7 @@ async def root() -> dict[str, Any]:
 
     Example:
         ```bash
-        curl -X GET "https://API.example.com/"
+        curl -X GET "https://api.example.com/"
         ```
 
         Response:
@@ -437,7 +437,7 @@ async def root() -> dict[str, Any]:
             "docs": "/docs",
             "redoc": "/redoc",
             "status": "operational",
-            "api_prefix": "/API/v1",
+            "api_prefix": "/api/v1",
             "features": ["users", "posts", "livestreams"]
         }
         ```
@@ -620,7 +620,7 @@ async def health_check(request: Request) -> JSONResponse:
 
     Example:
         ```bash
-        curl -X GET "https://API.example.com/health"
+        curl -X GET "https://api.example.com/health"
         ```
 
         Response:

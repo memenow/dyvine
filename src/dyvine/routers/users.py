@@ -1,6 +1,6 @@
 """User-facing FastAPI router.
 
-Endpoints exposed under ``/API/v1/users``:
+Endpoints exposed under ``/api/v1/users``:
 
 - ``GET /{user_id}`` — fetch the public Douyin profile.
 - ``POST /{user_id}/content:download`` — schedule an asynchronous

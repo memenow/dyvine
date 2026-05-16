@@ -55,7 +55,7 @@ def test_security_settings_defaults_pass_in_debug(
     """The placeholder secret values are tolerated when ``API_DEBUG=true``.
 
     The cross-field check now lives on the composite ``Settings`` model
-    so that the validator sees the same ``API.debug`` value the rest of
+    so that the validator sees the same ``api.debug`` value the rest of
     the application reads. ``SecuritySettings`` on its own is therefore
     permissive — the gate fires only when the placeholder is paired with
     a non-debug build.
@@ -85,9 +85,9 @@ def test_security_settings_rejects_defaults_when_api_debug_unset(
     """``API_DEBUG`` left unset must default to "production" semantics.
 
     Previously the ad-hoc ``os.getenv("API_DEBUG", "false")`` lookup
-    inside ``SecuritySettings`` could disagree with ``settings.API.debug``
+    inside ``SecuritySettings`` could disagree with ``settings.api.debug``
     when the value lived in ``.env`` rather than the live environment.
-    The composite-level validator now relies on ``self.API.debug``, which
+    The composite-level validator now relies on ``self.api.debug``, which
     pydantic-settings derives from the same payload as the rest of the
     config, so the unset case is rejected consistently.
 

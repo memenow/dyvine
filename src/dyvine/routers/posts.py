@@ -1,6 +1,6 @@
 """Post-facing FastAPI router.
 
-Endpoints exposed under ``/API/v1/posts``:
+Endpoints exposed under ``/api/v1/posts``:
 
 - ``GET /{post_id}`` — return the materialised ``PostDetail`` for a
   Douyin ``aweme_id``.
