@@ -1,7 +1,7 @@
 """R2 storage lifecycle helper.
 
 `LifecycleManager` reads retention and transition rules from
-``core/storage_lifecycle.JSON`` and applies them to objects stored in
+``core/storage_lifecycle.json`` and applies them to objects stored in
 R2 by walking each content-type prefix and either deleting expired
 objects or recording a transition entry (R2 itself does not yet
 support storage-class transitions, so the entry only documents the
@@ -42,7 +42,7 @@ class LifecycleError(Exception):
 
 
 class LifecycleManager:
-    """Apply R2 retention and transition rules from `storage_lifecycle.JSON`.
+    """Apply R2 retention and transition rules from `storage_lifecycle.json`.
 
     Reads the JSON ruleset at construction time and exposes
     ``apply_lifecycle_rules`` which walks each content-type prefix in
