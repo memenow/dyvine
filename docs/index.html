@@ -96,7 +96,7 @@
         <span class="pill">FastAPI</span>
         <span class="pill">SQLite operation store</span>
         <span class="pill">Cloudflare R2 optional</span>
-        <span class="pill">Last reviewed: 2026-05-29</span>
+        <span class="pill">Last reviewed: 2026-05-31</span>
       </div>
     </header>
 
@@ -111,6 +111,7 @@
         <li><a href="#deployment">Deployment</a></li>
         <li><a href="#development">Development</a></li>
         <li><a href="#security-notes">Security Notes</a></li>
+        <li><a href="#maintenance-notes">Maintenance Notes</a></li>
       </ol>
     </nav>
 
@@ -237,18 +238,18 @@ GET  /api/v1/livestreams/operations/{operation_id}</code></pre>
       <p>The URL endpoint validates the host against an allowlist of <code>*.douyin.com</code> domains to prevent SSRF.</p>
 
       <h3>Examples</h3>
-      <pre><code>curl -H "X-API-Key: $API_KEY" \
+      <pre><code>curl -H "X-API-Key: $SECURITY_API_KEY" \
      "http://localhost:8000/api/v1/users/USER_ID"
 
-curl -X POST -H "X-API-Key: $API_KEY" \
+curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
      "http://localhost:8000/api/v1/posts/users/USER_ID/posts:download"
 
-curl -X POST -H "X-API-Key: $API_KEY" \
+curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
      -H "Content-Type: application/json" \
      -d '{"url": "https://live.douyin.com/123456789"}' \
      "http://localhost:8000/api/v1/livestreams/stream:download"
 
-curl -H "X-API-Key: $API_KEY" \
+curl -H "X-API-Key: $SECURITY_API_KEY" \
      "http://localhost:8000/api/v1/livestreams/operations/OPERATION_ID"</code></pre>
 
       <h3>Operation Response</h3>
@@ -397,6 +398,17 @@ make test          # pytest</code></pre>
       <p>
         License details are available in <a href="../LICENSE">LICENSE</a>.
       </p>
+    </section>
+
+    <section id="maintenance-notes">
+      <h2>Maintenance Notes</h2>
+      <ul>
+        <li><code>README.md</code> is the concise maintainer entry point; keep it in sync with this page.</li>
+        <li><code>AGENTS.md</code> and <code>CLAUDE.md</code> contain repository-local agent guidance and GitNexus workflow reminders.</li>
+        <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
+        <li>Runtime downloads, operation-store SQLite files, WAL/SHM files, logs, and generated caches are local artifacts and should not be committed.</li>
+        <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
+      </ul>
     </section>
 
     <footer>

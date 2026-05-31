@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from dyvine.core import dependencies
 
@@ -58,6 +59,54 @@ def test_get_service_container_returns_singleton(
     container_two = dependencies.get_service_container()
 
     assert container_one is container_two
+
+
+def test_require_api_key_allows_missing_header_when_gate_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify the dependency is a no-op behind another auth layer."""
+    monkeypatch.setattr(dependencies.settings.security, "require_api_key", False)
+    monkeypatch.setattr(dependencies.settings.security, "api_key", "expected")
+
+    assert dependencies.require_api_key(None) is None
+
+
+def test_require_api_key_rejects_missing_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify missing API keys are rejected when the gate is enabled."""
+    monkeypatch.setattr(dependencies.settings.security, "require_api_key", True)
+    monkeypatch.setattr(dependencies.settings.security, "api_key", "expected")
+
+    with pytest.raises(HTTPException) as exc_info:
+        dependencies.require_api_key(None)
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid or missing API key"
+    assert exc_info.value.headers == {"WWW-Authenticate": "ApiKey"}
+
+
+def test_require_api_key_rejects_wrong_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify non-matching API keys are rejected."""
+    monkeypatch.setattr(dependencies.settings.security, "require_api_key", True)
+    monkeypatch.setattr(dependencies.settings.security, "api_key", "expected")
+
+    with pytest.raises(HTTPException) as exc_info:
+        dependencies.require_api_key("wrong")
+
+    assert exc_info.value.status_code == 401
+
+
+def test_require_api_key_accepts_matching_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify matching API keys pass the dependency."""
+    monkeypatch.setattr(dependencies.settings.security, "require_api_key", True)
+    monkeypatch.setattr(dependencies.settings.security, "api_key", "expected")
+
+    assert dependencies.require_api_key("expected") is None
 
 
 @pytest.mark.asyncio
