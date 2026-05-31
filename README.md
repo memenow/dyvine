@@ -98,13 +98,13 @@ All feature-router requests require `X-API-Key` unless
 `SECURITY_REQUIRE_API_KEY=false` is set behind another authenticated layer.
 
 ```bash
-curl -H "X-API-Key: $API_KEY" \
+curl -H "X-API-Key: $SECURITY_API_KEY" \
   "http://localhost:8000/api/v1/users/USER_ID"
 
-curl -X POST -H "X-API-Key: $API_KEY" \
+curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
   "http://localhost:8000/api/v1/posts/users/USER_ID/posts:download"
 
-curl -X POST -H "X-API-Key: $API_KEY" \
+curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"url": "https://live.douyin.com/123456789"}' \
   "http://localhost:8000/api/v1/livestreams/stream:download"
@@ -113,7 +113,7 @@ curl -X POST -H "X-API-Key: $API_KEY" \
 Poll operation status through the matching domain endpoint:
 
 ```bash
-curl -H "X-API-Key: $API_KEY" \
+curl -H "X-API-Key: $SECURITY_API_KEY" \
   "http://localhost:8000/api/v1/posts/operations/OPERATION_ID"
 ```
 
