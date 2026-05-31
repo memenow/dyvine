@@ -96,7 +96,7 @@
         <span class="pill">FastAPI</span>
         <span class="pill">SQLite operation store</span>
         <span class="pill">Cloudflare R2 optional</span>
-        <span class="pill">Last reviewed: 2026-05-29</span>
+        <span class="pill">Last reviewed: 2026-05-31</span>
       </div>
     </header>
 
@@ -111,6 +111,7 @@
         <li><a href="#deployment">Deployment</a></li>
         <li><a href="#development">Development</a></li>
         <li><a href="#security-notes">Security Notes</a></li>
+        <li><a href="#maintenance-notes">Maintenance Notes</a></li>
       </ol>
     </nav>
 
@@ -397,6 +398,17 @@ make test          # pytest</code></pre>
       <p>
         License details are available in <a href="../LICENSE">LICENSE</a>.
       </p>
+    </section>
+
+    <section id="maintenance-notes">
+      <h2>Maintenance Notes</h2>
+      <ul>
+        <li><code>README.md</code> is the concise maintainer entry point; keep it in sync with this page.</li>
+        <li><code>AGENTS.md</code> and <code>CLAUDE.md</code> contain repository-local agent guidance and GitNexus workflow reminders.</li>
+        <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
+        <li>Runtime downloads, operation-store SQLite files, WAL/SHM files, logs, and generated caches are local artifacts and should not be committed.</li>
+        <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
+      </ul>
     </section>
 
     <footer>
