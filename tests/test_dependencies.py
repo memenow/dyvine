@@ -27,9 +27,11 @@ def reset_container_cache() -> None:
 @pytest.mark.asyncio
 async def test_service_container_initializes_with_douyin_handler(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
     """Verify service container initializes with douyin handler."""
     captured_kwargs: dict[str, object] = {}
+    monkeypatch.setattr(dependencies.settings.douyin, "download_root", str(tmp_path))
 
     def build_handler(kwargs: dict[str, object]) -> DummyHandler:
         """Test helper for test_service_container_initializes_with_douyin_handler."""
@@ -45,6 +47,7 @@ async def test_service_container_initializes_with_douyin_handler(
     assert isinstance(handler, DummyHandler)
     assert captured_kwargs.get("mode") == "all"
     assert captured_kwargs.get("interval") == "all"
+    assert captured_kwargs.get("path") == str(tmp_path)
     assert captured_kwargs.get("max_tasks") == 3
 
 

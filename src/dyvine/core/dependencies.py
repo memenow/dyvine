@@ -275,7 +275,7 @@ class ServiceContainer:
             "mode": "all",
             "interval": "all",
             "cookie": settings.douyin.cookie,
-            "path": "downloads",
+            "path": settings.douyin.download_root,
             "max_retries": 5,
             "timeout": 30,
             "chunk_size": 1024 * 1024,

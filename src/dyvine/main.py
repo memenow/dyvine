@@ -66,6 +66,7 @@ from prometheus_client import Counter, Histogram, make_asgi_app
 from .core.dependencies import get_service_container
 from .core.error_handlers import register_error_handlers
 from .core.logging import ContextLogger, setup_logging
+from .core.path_safety import ensure_within_root, get_task_workspace_root
 from .core.settings import settings
 from .routers import livestreams, posts, users
 
@@ -79,6 +80,25 @@ http_request_duration_seconds = Histogram(
     "HTTP request duration for Dyvine",
     ["method", "route", "status_code"],
 )
+logger = ContextLogger(__name__)
+
+
+def _local_retention_workspace_ready() -> bool:
+    """Verify the configured task workspace root can be created and written."""
+    workspace_root = get_task_workspace_root()
+    probe = workspace_root / f".readyz-{uuid.uuid4().hex}"
+    try:
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        ensure_within_root(workspace_root)
+        probe.write_text("", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning(
+            "Local retention workspace is not writable",
+            extra={"path": str(workspace_root), "error": str(exc)},
+        )
+        return False
+    return True
 
 
 @asynccontextmanager
@@ -526,6 +546,11 @@ async def readiness_probe(request: Request) -> JSONResponse:
     # whenever R2 is unconfigured. Keep readiness aligned with the effective
     # download path so a no-R2 deployment is not held out of service.
     local_retention_effective = settings.douyin.retain_local_downloads or not r2_ok
+    local_retention_ok = True
+    local_retention_status = "not_required"
+    if local_retention_effective:
+        local_retention_ok = _local_retention_workspace_ready()
+        local_retention_status = "available" if local_retention_ok else "unavailable"
     if r2_ok:
         r2_status = "configured"
     else:
@@ -536,6 +561,7 @@ async def readiness_probe(request: Request) -> JSONResponse:
         and container_ok
         and operation_store_ok
         and (r2_ok or local_retention_effective)
+        and (not local_retention_effective or local_retention_ok)
     )
     readiness_status_code = (
         status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE
@@ -549,6 +575,7 @@ async def readiness_probe(request: Request) -> JSONResponse:
                 "service_container": container_status,
                 "operation_store": operation_store_status,
                 "r2_storage": r2_status,
+                "local_retention_storage": local_retention_status,
             },
             "correlation_id": correlation_id,
         },

@@ -12,7 +12,14 @@ import pytest
 
 from dyvine.core.exceptions import OperationNotFoundError
 from dyvine.core.operations import OperationStore
+from dyvine.core.settings import settings
 from dyvine.services.users import DownloadResponse, UserService
+
+
+@pytest.fixture(autouse=True)
+def isolate_download_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Point user download workspaces at each test's temporary directory."""
+    monkeypatch.setattr(settings.douyin, "download_root", str(tmp_path / "downloads"))
 
 
 @pytest.mark.asyncio
@@ -782,7 +789,7 @@ async def test_process_download_uploads_only_files_changed_in_current_batch(
     )
 
     assert uploaded_names == ["first.mp4", "second.mp4"]
-    task_dir = tmp_path / users_mod.TEMP_DOWNLOAD_ROOT / operation.operation_id
+    task_dir = users_mod.get_task_workspace_root() / operation.operation_id
     assert (task_dir / "retain-r2-user" / "first.mp4").exists()
     assert (task_dir / "retain-r2-user" / "second.mp4").exists()
 
@@ -889,7 +896,7 @@ async def test_process_download_retries_stale_upload_failures(
     assert upload_attempts == ["first.mp4", "first.mp4", "second.mp4"]
     refreshed = await service.operation_store.get_operation(operation.operation_id)
     assert refreshed.status == "completed"
-    task_dir = tmp_path / users_mod.TEMP_DOWNLOAD_ROOT / operation.operation_id
+    task_dir = users_mod.get_task_workspace_root() / operation.operation_id
     assert not task_dir.exists(), "clean archival runs still sweep the workspace"
 
 
@@ -966,10 +973,14 @@ async def test_process_download_retains_workspace_when_r2_unconfigured(
         max_items=1,
     )
 
-    workspace_root = (tmp_path / users_mod.TEMP_DOWNLOAD_ROOT).resolve()
+    workspace_root = users_mod.get_task_workspace_root()
     task_dir = workspace_root / operation.operation_id
     assert task_dir.exists(), "retain mode must keep the per-task workspace"
     assert list(task_dir.glob("**/*.mp4")), "the downloaded file must survive"
+    refreshed = await service.operation_store.get_operation(operation.operation_id)
+    assert refreshed.download_path == str(
+        Path("tasks") / operation.operation_id / "retain-user"
+    )
 
 
 def test_prune_retained_workspace_evicts_oldest_over_cap(tmp_path: Path) -> None:
@@ -1182,7 +1193,7 @@ async def test_concurrent_downloads_use_isolated_temp_directories(
     Schedules two downloads through ``asyncio.gather`` with distinct
     ``user_id`` values and a stub fetcher that records which directory
     f2 was asked to write into. Both invocations must see workspaces
-    rooted at ``downloads/<task_id>`` and the cleanup branch must
+    rooted at ``DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>`` and the cleanup branch must
     leave neither task's files behind.
     """
     from dyvine.services import users as users_mod
@@ -1297,12 +1308,10 @@ async def test_concurrent_downloads_use_isolated_temp_directories(
     )
 
     # The downloader was handed two distinct per-task workspaces, each
-    # rooted at ``downloads/<task_id>``. ``TEMP_DOWNLOAD_ROOT`` is a
-    # relative path, so resolve both sides against the cwd before
-    # comparing.
+    # rooted at ``DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>``.
     assert len(seen_dirs) == 2
     assert seen_dirs[0] != seen_dirs[1]
-    workspace_root = (tmp_path / users_mod.TEMP_DOWNLOAD_ROOT).resolve()
+    workspace_root = users_mod.get_task_workspace_root()
     for directory in seen_dirs:
         assert directory.resolve().parent == workspace_root
         assert directory.name in {op_a.operation_id, op_b.operation_id}

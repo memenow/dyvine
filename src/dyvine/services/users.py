@@ -12,7 +12,7 @@
 
 The fetch loop (`_process_download`) walks the f2 paginated feed,
 downloads each batch into a per-task workspace under
-``downloads/<task_id>``, optionally pushes every artefact into
+``DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>``, optionally pushes every artefact into
 Cloudflare R2 via the shared ``R2StorageService``, and finalises the
 operation row with a clamped ``progress`` value plus a terminal
 ``status``. In R2-archival mode the workspace is removed in a
@@ -48,6 +48,11 @@ from ..core.exceptions import (
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
+from ..core.path_safety import (
+    ensure_within_root,
+    get_task_workspace_root,
+    relative_to_download_root,
+)
 from ..core.settings import settings
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
@@ -64,14 +69,9 @@ PAGE_SIZE = 100
 # the loop body.
 PAGE_FETCH_DELAY_SECONDS = 5.0
 
-# Parent directory that holds per-task download workspaces. Each running
-# ``_process_download`` invocation gets its own ``TEMP_DOWNLOAD_ROOT /
-# <task_id>`` subdirectory so two concurrent tasks cannot stomp on each
-# other's files or have the cleanup branch in one task delete the other's
-# in-flight downloads. In R2-archival mode each workspace is swept once
-# its files are uploaded; in local-retention mode the files are kept here
-# instead (see ``_should_retain_workspace``).
-TEMP_DOWNLOAD_ROOT = Path("downloads")
+# Name of the marker file placed in operation-owned workspaces. It lets the
+# retention cap prune only Dyvine task directories under the configured
+# download root, leaving unrelated user/bulk-download directories alone.
 TASK_WORKSPACE_MARKER = ".dyvine-task-workspace"
 
 
@@ -201,10 +201,10 @@ class UserService:
         - ``get_download_status(task_id)`` — current persisted state.
 
     Internal state is otherwise stateless: every download starts in a
-    fresh per-task workspace under ``downloads/<task_id>`` so two
-    concurrent downloads cannot stomp on each other's files. The
-    workspace is removed in a ``finally`` branch even on failure, unless
-    local-retention mode is active (see ``_should_retain_workspace``).
+    fresh per-task workspace under ``DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>``
+    so two concurrent downloads cannot stomp on each other's files. The
+    workspace is removed after successful archival unless local-retention
+    mode is active (see ``_should_retain_workspace``).
     """
 
     def __init__(
@@ -605,8 +605,8 @@ class UserService:
         """Remove a per-task download workspace and all of its contents.
 
         Only the workspace itself is touched; the shared
-        ``TEMP_DOWNLOAD_ROOT`` parent is preserved so concurrent tasks
-        keep their own ``downloads/<task_id>`` siblings intact.
+        configured task workspace parent is preserved so concurrent tasks
+        keep their own ``tasks/<task_id>`` siblings intact.
 
         Args:
             temp_dir: Per-task workspace path. ``None`` and missing
@@ -820,10 +820,11 @@ class UserService:
         downloading_likes_only = not include_posts and include_likes
         mode_label = "like" if downloading_likes_only else "post"
 
-        # Each task gets its own workspace under ``TEMP_DOWNLOAD_ROOT`` so
-        # concurrent downloads cannot share files, and the cleanup branch
-        # only ever touches one task's directory.
+        # Each task gets its own workspace under the configured task root so
+        # concurrent downloads cannot share files, and the cleanup branch only
+        # ever touches one task's directory.
         temp_dir: Path | None = None
+        user_dir: Path | None = None
         downloaded_count = 0
         total_posts = 0
         failed_uploads = 0
@@ -842,9 +843,12 @@ class UserService:
                 error=None,
             )
 
-            TEMP_DOWNLOAD_ROOT.mkdir(exist_ok=True)
-            temp_dir = TEMP_DOWNLOAD_ROOT / task_id
+            workspace_root = get_task_workspace_root()
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            ensure_within_root(workspace_root)
+            temp_dir = workspace_root / task_id
             temp_dir.mkdir(parents=True, exist_ok=True)
+            ensure_within_root(temp_dir)
             (temp_dir / TASK_WORKSPACE_MARKER).touch()
 
             handler_kwargs = self._build_handler_kwargs(
@@ -892,6 +896,12 @@ class UserService:
             # Create user directory inside the per-task workspace.
             user_dir = temp_dir / user_data.nickname
             user_dir.mkdir(exist_ok=True)
+            ensure_within_root(user_dir)
+            retained_download_path = relative_to_download_root(user_dir)
+            if retain_workspace:
+                await self.operation_store.update_operation(
+                    task_id, download_path=retained_download_path
+                )
 
             # Use the handler to download user posts.
             max_cursor = 0
@@ -1110,6 +1120,11 @@ class UserService:
                     },
                 )
 
+            if failed_uploads > 0 and user_dir is not None:
+                await self.operation_store.update_operation(
+                    task_id, download_path=relative_to_download_root(user_dir)
+                )
+
             await self._finalize_status(
                 task_id=task_id,
                 downloaded=downloaded_count,
@@ -1137,7 +1152,7 @@ class UserService:
                 # R2 upload failures are also retained so the only local copy is
                 # not discarded by the cleanup branch.
                 self._prune_retained_workspace(
-                    TEMP_DOWNLOAD_ROOT,
+                    get_task_workspace_root(),
                     settings.douyin.retain_max_gb,
                     protect=temp_dir,
                 )

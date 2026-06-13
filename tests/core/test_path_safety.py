@@ -153,6 +153,13 @@ def test_relative_to_download_root_relative_input(jail_root: Path) -> None:
     )
 
 
+def test_get_task_workspace_root_uses_download_root(jail_root: Path) -> None:
+    """Task workspaces live under the configured download root."""
+    assert path_safety.get_task_workspace_root() == (
+        jail_root / path_safety.TASK_WORKSPACE_SUBDIR
+    )
+
+
 def test_relative_to_download_root_absolute_inside_root(jail_root: Path) -> None:
     """Verify relative to download root absolute inside root."""
     inside = jail_root / "livestreams" / "abc.flv"
