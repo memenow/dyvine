@@ -12,11 +12,13 @@
 
 The fetch loop (`_process_download`) walks the f2 paginated feed,
 downloads each batch into a per-task workspace under
-``temp_downloads/<task_id>``, optionally pushes every artefact into
+``DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>``, optionally pushes every artefact into
 Cloudflare R2 via the shared ``R2StorageService``, and finalises the
 operation row with a clamped ``progress`` value plus a terminal
-``status``. The workspace is removed in a ``finally`` branch so a
-failed run does not leave files on disk.
+``status``. In R2-archival mode the workspace is removed in a
+``finally`` branch after successful archival; in local-retention mode
+(``DOUYIN_RETAIN_LOCAL_DOWNLOADS``, or whenever R2 is unconfigured) it is
+kept and trimmed to an optional size cap instead.
 
 External dependencies are wrapped in `try`/`finally`:
 ``DouyinHandler`` is closed via ``_safely_close_handler`` to avoid
@@ -29,6 +31,7 @@ import asyncio
 import json
 import re
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -45,6 +48,11 @@ from ..core.exceptions import (
 from ..core.logging import ContextLogger
 from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
+from ..core.path_safety import (
+    ensure_within_root,
+    get_task_workspace_root,
+    relative_to_download_root,
+)
 from ..core.settings import settings
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
@@ -61,12 +69,10 @@ PAGE_SIZE = 100
 # the loop body.
 PAGE_FETCH_DELAY_SECONDS = 5.0
 
-# Parent directory that holds per-task download workspaces. Each running
-# ``_process_download`` invocation gets its own ``TEMP_DOWNLOAD_ROOT /
-# <task_id>`` subdirectory so two concurrent tasks cannot stomp on each
-# other's files or have the cleanup branch in one task delete the other's
-# in-flight downloads.
-TEMP_DOWNLOAD_ROOT = Path("temp_downloads")
+# Name of the marker file placed in operation-owned workspaces. It lets the
+# retention cap prune only Dyvine task directories under the configured
+# download root, leaving unrelated user/bulk-download directories alone.
+TASK_WORKSPACE_MARKER = ".dyvine-task-workspace"
 
 
 def sanitize_filename(filename: str) -> str:
@@ -195,9 +201,10 @@ class UserService:
         - ``get_download_status(task_id)`` — current persisted state.
 
     Internal state is otherwise stateless: every download starts in a
-    fresh per-task workspace under ``temp_downloads/<task_id>`` so two
-    concurrent downloads cannot stomp on each other's files. The
-    workspace is removed in a ``finally`` branch even on failure.
+    fresh per-task workspace under ``DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>``
+    so two concurrent downloads cannot stomp on each other's files. The
+    workspace is removed after successful archival unless local-retention
+    mode is active (see ``_should_retain_workspace``).
     """
 
     def __init__(
@@ -433,22 +440,39 @@ class UserService:
         return int(aweme_count) if isinstance(aweme_count, int) else 0
 
     async def _upload_directory_to_r2(
-        self, user_dir: Path, user_id: str, user_data: Any
+        self,
+        user_dir: Path,
+        user_id: str,
+        user_data: Any,
+        *,
+        delete_after_upload: bool = True,
+        file_paths: Iterable[Path] | None = None,
+        failed_paths: set[Path] | None = None,
     ) -> tuple[int, int]:
         """Upload every file under ``user_dir`` to R2 storage.
 
         Walks the directory recursively, derives a content type from each
         file extension, generates the corresponding R2 path/metadata, and
-        uploads. Local files are deleted only after a successful upload so
-        a failed upload leaves the file on disk for the cleanup step to
-        sweep -- this keeps the download workspace empty between batches
-        without losing the file when the user retries.
+        uploads. When ``delete_after_upload`` is true a file is deleted only
+        after a successful upload so a failed upload leaves it on disk for
+        the cleanup step to sweep -- this keeps the download workspace empty
+        between batches without losing the file when the user retries.
+        Local-retention mode passes ``delete_after_upload=False`` so a local
+        copy survives even after a successful archival upload.
 
         Args:
             user_dir: Local directory holding files just produced by f2.
             user_id: Douyin user identifier used to derive R2 paths.
             user_data: Profile payload supplying the author name for
                 metadata.
+            delete_after_upload: Remove each local file once it uploads
+                successfully. Disabled in local-retention mode so the file
+                stays on the local volume.
+            file_paths: Optional explicit file set to upload. When omitted,
+                every file under ``user_dir`` is uploaded.
+            failed_paths: Optional mutable set populated with files that did
+                not upload successfully. Callers use it to retry stale upload
+                failures before cleaning up a workspace.
 
         Returns:
             Tuple of ``(uploaded_count, failed_count)`` so the caller can
@@ -456,7 +480,8 @@ class UserService:
         """
         uploaded_count = 0
         failed_count = 0
-        for file_path in user_dir.glob("**/*"):
+        candidates = file_paths if file_paths is not None else user_dir.glob("**/*")
+        for file_path in sorted(candidates):
             if not file_path.is_file():
                 continue
             try:
@@ -476,10 +501,13 @@ class UserService:
                 await self.storage.upload_file(
                     file_path, r2_path, metadata, content_type
                 )
-                file_path.unlink()
+                if delete_after_upload:
+                    file_path.unlink()
                 uploaded_count += 1
             except Exception as e:
                 failed_count += 1
+                if failed_paths is not None:
+                    failed_paths.add(file_path)
                 logger.error(
                     "Failed to upload file to R2",
                     extra={"file_path": str(file_path), "error": str(e)},
@@ -577,8 +605,8 @@ class UserService:
         """Remove a per-task download workspace and all of its contents.
 
         Only the workspace itself is touched; the shared
-        ``TEMP_DOWNLOAD_ROOT`` parent is preserved so concurrent tasks
-        keep their own ``temp_downloads/<task_id>`` siblings intact.
+        configured task workspace parent is preserved so concurrent tasks
+        keep their own ``tasks/<task_id>`` siblings intact.
 
         Args:
             temp_dir: Per-task workspace path. ``None`` and missing
@@ -613,6 +641,142 @@ class UserService:
             )
 
         shutil.rmtree(temp_dir, onexc=_on_rmtree_error)
+
+    @staticmethod
+    def _r2_upload_enabled() -> bool:
+        """Whether finished files should be pushed to R2.
+
+        Uploading needs complete R2 credentials; without them every upload
+        would fail, so the loop skips the attempt entirely (and keeps files
+        locally) rather than flooding the logs with upload errors.
+        """
+        return settings.r2.is_configured
+
+    @staticmethod
+    def _should_retain_workspace() -> bool:
+        """Whether to keep per-task files after the run instead of deleting them.
+
+        True when ``DOUYIN_RETAIN_LOCAL_DOWNLOADS`` is set, or whenever R2 is
+        not configured -- in that case the files have nowhere to be archived,
+        so deleting them in the ``finally`` branch would discard the only
+        copy.
+        """
+        return settings.douyin.retain_local_downloads or not settings.r2.is_configured
+
+    @staticmethod
+    def _dir_size_bytes(path: Path) -> int:
+        """Return the recursive on-disk size of ``path`` in bytes.
+
+        Files that vanish mid-walk (a concurrent task sweeping its own
+        workspace) are skipped rather than raising, so the size estimate is
+        safe to compute from the download ``finally`` branch.
+        """
+        total = 0
+        for child in path.glob("**/*"):
+            try:
+                if child.is_file():
+                    total += child.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    @staticmethod
+    def _file_snapshot(path: Path) -> dict[Path, tuple[int, int, int]]:
+        """Capture file fingerprints under ``path`` keyed by relative path."""
+        snapshot: dict[Path, tuple[int, int, int]] = {}
+        for child in path.glob("**/*"):
+            try:
+                if not child.is_file():
+                    continue
+                stat = child.stat()
+                snapshot[child.relative_to(path)] = (
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    stat.st_ctime_ns,
+                )
+            except OSError:
+                continue
+        return snapshot
+
+    @staticmethod
+    def _files_changed_since(
+        path: Path, before: dict[Path, tuple[int, int, int]]
+    ) -> list[Path]:
+        """Return files that are new or changed compared with ``before``."""
+        changed: list[Path] = []
+        for child in path.glob("**/*"):
+            try:
+                if not child.is_file():
+                    continue
+                stat = child.stat()
+                fingerprint = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+                if before.get(child.relative_to(path)) != fingerprint:
+                    changed.append(child)
+            except OSError:
+                continue
+        return changed
+
+    @staticmethod
+    def _prune_retained_workspace(
+        root: Path, max_gb: float, protect: Path | None = None
+    ) -> None:
+        """Evict the oldest retained workspaces until the tree fits ``max_gb``.
+
+        Local-retention mode keeps every task's files under ``root`` instead
+        of deleting them, so left unbounded the tree grows until the volume
+        fills. When ``max_gb`` is positive this trims it back under the cap by
+        removing the least-recently-modified task directories first; ``protect``
+        (the just-finished task) is never evicted so a run cannot delete the
+        files it just produced. ``max_gb <= 0`` disables pruning.
+
+        Like ``_cleanup_temp_dir`` this runs from the download ``finally``
+        branch and must never raise: a prune failure is logged and swallowed
+        so it cannot mask the task's real outcome.
+        """
+        if max_gb <= 0 or not root.exists():
+            return
+        cap_bytes = int(max_gb * 1024**3)
+        try:
+            entries = [
+                child
+                for child in root.iterdir()
+                if child.is_dir() and (child / TASK_WORKSPACE_MARKER).is_file()
+            ]
+        except OSError as exc:
+            logger.warning(
+                "Failed to scan retained workspace for pruning",
+                extra={"root": str(root), "error": str(exc)},
+            )
+            return
+
+        protected = protect.resolve() if protect is not None else None
+        sized = [(entry, UserService._dir_size_bytes(entry)) for entry in entries]
+        total = sum(size for _, size in sized)
+        if total <= cap_bytes:
+            return
+
+        def _mtime(entry: Path) -> float:
+            try:
+                return entry.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        # Oldest first so the freshest downloads survive the trim.
+        for entry, size in sorted(sized, key=lambda item: _mtime(item[0])):
+            if total <= cap_bytes:
+                break
+            if protected is not None and entry.resolve() == protected:
+                continue
+            UserService._cleanup_temp_dir(entry)
+            total -= size
+            logger.info(
+                "Pruned retained workspace to respect size cap",
+                extra={
+                    "path": str(entry),
+                    "freed_bytes": size,
+                    "cap_bytes": cap_bytes,
+                },
+            )
 
     async def _process_download(
         self,
@@ -656,13 +820,19 @@ class UserService:
         downloading_likes_only = not include_posts and include_likes
         mode_label = "like" if downloading_likes_only else "post"
 
-        # Each task gets its own workspace under ``TEMP_DOWNLOAD_ROOT`` so
-        # concurrent downloads cannot share files, and the cleanup branch
-        # only ever touches one task's directory.
+        # Each task gets its own workspace under the configured task root so
+        # concurrent downloads cannot share files, and the cleanup branch only
+        # ever touches one task's directory.
         temp_dir: Path | None = None
+        user_dir: Path | None = None
         downloaded_count = 0
         total_posts = 0
         failed_uploads = 0
+        pending_upload_files: set[Path] = set()
+        # Decide upload/retention up front so the ``finally`` branch can pick
+        # cleanup vs. retention even if the run aborts before the first batch.
+        upload_enabled = self._r2_upload_enabled()
+        retain_workspace = self._should_retain_workspace()
         try:
             await self.operation_store.update_operation(
                 task_id,
@@ -673,9 +843,13 @@ class UserService:
                 error=None,
             )
 
-            TEMP_DOWNLOAD_ROOT.mkdir(exist_ok=True)
-            temp_dir = TEMP_DOWNLOAD_ROOT / task_id
+            workspace_root = get_task_workspace_root()
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            ensure_within_root(workspace_root)
+            temp_dir = workspace_root / task_id
             temp_dir.mkdir(parents=True, exist_ok=True)
+            ensure_within_root(temp_dir)
+            (temp_dir / TASK_WORKSPACE_MARKER).touch()
 
             handler_kwargs = self._build_handler_kwargs(
                 user_id=user_id,
@@ -722,6 +896,12 @@ class UserService:
             # Create user directory inside the per-task workspace.
             user_dir = temp_dir / user_data.nickname
             user_dir.mkdir(exist_ok=True)
+            ensure_within_root(user_dir)
+            retained_download_path = relative_to_download_root(user_dir)
+            if retain_workspace:
+                await self.operation_store.update_operation(
+                    task_id, download_path=retained_download_path
+                )
 
             # Use the handler to download user posts.
             max_cursor = 0
@@ -818,26 +998,61 @@ class UserService:
                             progress,
                         )
 
+                    batch_snapshot = (
+                        self._file_snapshot(user_dir) if upload_enabled else {}
+                    )
+
                     # Download files to the per-task workspace.
                     await handler.downloader.create_download_tasks(
                         handler_kwargs, aweme_data._to_list(), user_dir
                     )
 
-                    # Push the freshly downloaded files to R2 and track
-                    # any failures so the final status can be downgraded.
-                    batch_uploaded, batch_failed = await self._upload_directory_to_r2(
-                        user_dir, user_id, user_data
-                    )
-                    failed_uploads += batch_failed
-                    logger.debug(
-                        "R2 upload batch finished",
-                        extra={
-                            "task_id": task_id,
-                            "user_id": user_id,
-                            "uploaded": batch_uploaded,
-                            "failed": batch_failed,
-                        },
-                    )
+                    # Push the freshly downloaded files to R2 and track any
+                    # failures so the final status can be downgraded. When R2
+                    # is unconfigured the upload is skipped entirely (it would
+                    # only fail) and the files are kept locally instead.
+                    if upload_enabled:
+                        batch_files = self._files_changed_since(
+                            user_dir, batch_snapshot
+                        )
+                        candidate_files = {
+                            path for path in pending_upload_files if path.exists()
+                        }
+                        candidate_files.update(batch_files)
+                        batch_failed_paths: set[Path] = set()
+                        batch_uploaded, batch_failed = (
+                            await self._upload_directory_to_r2(
+                                user_dir,
+                                user_id,
+                                user_data,
+                                delete_after_upload=not retain_workspace,
+                                file_paths=candidate_files,
+                                failed_paths=batch_failed_paths,
+                            )
+                        )
+                        pending_upload_files = {
+                            path for path in batch_failed_paths if path.exists()
+                        }
+                        failed_uploads = len(pending_upload_files)
+                        logger.debug(
+                            "R2 upload batch finished",
+                            extra={
+                                "task_id": task_id,
+                                "user_id": user_id,
+                                "uploaded": batch_uploaded,
+                                "failed": batch_failed,
+                                "candidate_files": len(candidate_files),
+                            },
+                        )
+                    else:
+                        logger.debug(
+                            "R2 upload skipped; retaining files locally",
+                            extra={
+                                "task_id": task_id,
+                                "user_id": user_id,
+                                "retain_workspace": retain_workspace,
+                            },
+                        )
 
                     # Update cursor for next page
                     if (
@@ -880,6 +1095,36 @@ class UserService:
                     # loop spins.
                     has_more = False
 
+            if upload_enabled and pending_upload_files:
+                retry_failed_paths: set[Path] = set()
+                retry_uploaded, retry_failed = await self._upload_directory_to_r2(
+                    user_dir,
+                    user_id,
+                    user_data,
+                    delete_after_upload=not retain_workspace,
+                    file_paths={path for path in pending_upload_files if path.exists()},
+                    failed_paths=retry_failed_paths,
+                )
+                pending_upload_files = {
+                    path for path in retry_failed_paths if path.exists()
+                }
+                failed_uploads = len(pending_upload_files)
+                logger.debug(
+                    "R2 upload retry finished",
+                    extra={
+                        "task_id": task_id,
+                        "user_id": user_id,
+                        "uploaded": retry_uploaded,
+                        "failed": retry_failed,
+                        "remaining_failed_files": failed_uploads,
+                    },
+                )
+
+            if failed_uploads > 0 and user_dir is not None:
+                await self.operation_store.update_operation(
+                    task_id, download_path=relative_to_download_root(user_dir)
+                )
+
             await self._finalize_status(
                 task_id=task_id,
                 downloaded=downloaded_count,
@@ -901,4 +1146,15 @@ class UserService:
             )
 
         finally:
-            self._cleanup_temp_dir(temp_dir)
+            if retain_workspace or failed_uploads > 0:
+                # Local-retention mode (explicit DOUYIN_RETAIN_LOCAL_DOWNLOADS,
+                # or R2 unconfigured) keeps the per-task workspace. Unresolved
+                # R2 upload failures are also retained so the only local copy is
+                # not discarded by the cleanup branch.
+                self._prune_retained_workspace(
+                    get_task_workspace_root(),
+                    settings.douyin.retain_max_gb,
+                    protect=temp_dir,
+                )
+            else:
+                self._cleanup_temp_dir(temp_dir)

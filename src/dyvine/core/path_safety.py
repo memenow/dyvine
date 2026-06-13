@@ -15,10 +15,17 @@ from pathlib import Path
 from .exceptions import ValidationError
 from .settings import settings
 
+TASK_WORKSPACE_SUBDIR = "tasks"
+
 
 def get_download_root() -> Path:
     """Return the absolute, normalised download jail root."""
     return Path(settings.douyin.download_root).expanduser().resolve()
+
+
+def get_task_workspace_root() -> Path:
+    """Return the root that holds operation-owned download workspaces."""
+    return get_download_root() / TASK_WORKSPACE_SUBDIR
 
 
 def _reject_symlink_segments(target: Path, root: Path) -> None:

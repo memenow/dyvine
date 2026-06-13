@@ -192,8 +192,17 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
       <p>
         Optional R2 archival requires <code>R2_ACCOUNT_ID</code>, <code>R2_ACCESS_KEY_ID</code>,
         <code>R2_SECRET_ACCESS_KEY</code>, <code>R2_BUCKET_NAME</code>, and <code>R2_ENDPOINT</code>.
-        The storage service auto-disables when any R2 field is empty. The readiness probe fails until
-        all R2 fields and the Douyin cookie are set.
+        The storage service auto-disables when any R2 field is empty. By default the readiness probe
+        fails until all R2 fields and the Douyin cookie are set.
+      </p>
+      <p>
+        Set <code>DOUYIN_RETAIN_LOCAL_DOWNLOADS=true</code> to run in local-retention mode: each task's
+        files are kept under <code>DOUYIN_DOWNLOAD_ROOT/tasks/&lt;task_id&gt;</code> instead of being swept after upload,
+        R2 is dropped from the readiness gate (reported as <code>disabled</code>), and the upload step is
+        skipped while R2 is unconfigured. <code>/readyz</code> also verifies that this retained workspace
+        can be created and written. Retention also applies implicitly whenever R2 is unset, so a
+        finished download is never discarded. Bound the retained workspace with
+        <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
       </p>
     </section>
 

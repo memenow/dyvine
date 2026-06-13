@@ -71,13 +71,18 @@ Configuration is environment-driven through `dyvine.core.settings`:
 | --- | --- |
 | `API_` | Server bind settings, CORS, API prefix, operation DB path |
 | `SECURITY_` | Secret key, API key, and router auth gate |
-| `DOUYIN_` | Cookie, headers, proxy settings, download root, livestream headers |
+| `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode |
 | `R2_` | Cloudflare R2 account, key, bucket, and endpoint |
 
-`API_DEBUG=false` rejects placeholder production secrets. R2 is optional, but
-`/readyz` reports `not_ready` until every R2 field and `DOUYIN_COOKIE` are set.
-`/health` remains informational and returns `200 OK` even when dependencies are
-missing.
+`API_DEBUG=false` rejects placeholder production secrets. R2 is optional: by
+default `/readyz` reports `not_ready` until every R2 field and `DOUYIN_COOKIE`
+are set, but enabling local-retention mode
+(`DOUYIN_RETAIN_LOCAL_DOWNLOADS=true`) keeps each download under
+`DOUYIN_DOWNLOAD_ROOT/tasks/<task_id>`, drops R2 from the readiness gate, and
+reports it as `disabled`. When R2 is left unconfigured the service retains
+downloads implicitly rather than discarding them. `/readyz` also verifies that
+the retained workspace can be created and written. `/health` remains
+informational and returns `200 OK` even when dependencies are missing.
 
 ## Common Commands
 

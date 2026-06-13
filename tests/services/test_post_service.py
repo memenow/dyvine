@@ -15,6 +15,7 @@ from dyvine.core.exceptions import (
 )
 from dyvine.core.operations import OperationStore
 from dyvine.schemas.posts import DownloadStatus, PostType
+from dyvine.services import posts as posts_mod
 from dyvine.services.posts import PostService
 
 
@@ -385,6 +386,78 @@ async def test_fetch_posts_batch_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_posts_batch_prefers_raw_aweme_list() -> None:
+    """Use raw f2 payloads when normalized dict output drops aweme_list."""
+    handler = MagicMock()
+    posts_filter = MagicMock()
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [{"aweme_id": "raw-post"}],
+        "has_more": False,
+        "max_cursor": 0,
+    }
+    posts_filter._to_dict.return_value = {"aweme_list": []}
+
+    async def _iter(*a, **kw):
+        """Test helper for test_fetch_posts_batch_prefers_raw_aweme_list."""
+        yield posts_filter
+
+    handler.fetch_user_post_videos = _iter
+    svc = _build_service(handler)
+    result = await svc._fetch_posts_batch("u1", 0)
+    assert result["aweme_list"] == [{"aweme_id": "raw-post"}]
+
+
+@pytest.mark.asyncio
+async def test_fetch_posts_batch_prefers_to_list_downloader_shape() -> None:
+    """Use f2's per-post list projection when available for bulk downloads."""
+    handler = MagicMock()
+    posts_filter = MagicMock()
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [
+            {
+                "aweme_id": "raw-post",
+                "video": {
+                    "bit_rate": [
+                        {"play_addr": {"url_list": ["https://example.com/raw.mp4"]}}
+                    ]
+                },
+            }
+        ],
+        "has_more": False,
+        "max_cursor": 0,
+    }
+    posts_filter._to_list.return_value = [
+        {
+            "aweme_id": "flat-post",
+            "aweme_type": 0,
+            "private_status": 0,
+            "video_play_addr": ["https://example.com/flat.mp4"],
+        }
+    ]
+    posts_filter._to_dict.return_value = {}
+
+    async def _iter(*a, **kw):
+        """Test helper for
+        test_fetch_posts_batch_prefers_to_list_downloader_shape.
+        """
+        yield posts_filter
+
+    handler.fetch_user_post_videos = _iter
+    svc = _build_service(handler)
+    result = await svc._fetch_posts_batch("u1", 0)
+    assert result["aweme_list"] == [
+        {
+            "aweme_id": "flat-post",
+            "aweme_type": 0,
+            "private_status": 0,
+            "video_play_addr": ["https://example.com/flat.mp4"],
+        }
+    ]
+    assert result["has_more"] is False
+    assert result["max_cursor"] == 0
+
+
+@pytest.mark.asyncio
 async def test_fetch_posts_batch_empty() -> None:
     """Verify fetch posts batch empty."""
     handler = MagicMock()
@@ -415,6 +488,119 @@ async def test_download_post_content_success() -> None:
     svc = _build_service(handler)
     await svc._download_post_content({"aweme_id": "123"}, PostType.VIDEO, Path("/tmp"))
     handler.downloader.create_download_tasks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_download_post_content_normalizes_raw_video_payload() -> None:
+    """Raw Douyin posts are adapted before they are passed to f2."""
+    handler = MagicMock()
+    handler.downloader = MagicMock()
+    handler.downloader.create_download_tasks = AsyncMock()
+    handler.kwargs = {}
+    from pathlib import Path
+
+    raw_post = {
+        "aweme_id": "123",
+        "aweme_type": 0,
+        "author": {"sec_uid": "sec-user"},
+        "status": {"private_status": 0, "is_prohibited": False},
+        "video": {
+            "bit_rate": [{"play_addr": {"url_list": ["https://example.com/video.mp4"]}}]
+        },
+    }
+
+    svc = _build_service(handler)
+    await svc._download_post_content(raw_post, PostType.VIDEO, Path("/tmp"))
+
+    _, payload, _ = handler.downloader.create_download_tasks.await_args.args
+    sent_post = payload[0]
+    assert sent_post["sec_user_id"] == "sec-user"
+    assert sent_post["private_status"] == 0
+    assert sent_post["is_prohibited"] is False
+    assert sent_post["video_play_addr"] == ["https://example.com/video.mp4"]
+
+
+def test_downloader_payload_helpers_cover_nested_media_shapes() -> None:
+    """Raw media helpers normalize images, live photos, and URL containers."""
+    raw_post = {
+        "aweme_id": "mixed-media",
+        "author": {"sec_user_id": "sec-from-author"},
+        "status": {"private_status": 1, "is_prohibited": True},
+        "video": {"play_addr": {"url_list": ["https://example.com/fallback.mp4"]}},
+        "images": [
+            {
+                "url_list": [
+                    "https://example.com/one.webp",
+                    "https://example.com/two.webp",
+                ],
+                "video": {"play_addr": {"url_list": ["https://example.com/live.mp4"]}},
+            },
+            {"url_list": ["https://example.com/three.webp"]},
+            "not-a-dict",
+            {"video": {}},
+        ],
+    }
+
+    prepared = posts_mod._prepare_post_for_downloader(raw_post)
+
+    assert prepared["sec_user_id"] == "sec-from-author"
+    assert prepared["private_status"] == 1
+    assert prepared["is_prohibited"] is True
+    assert prepared["video_play_addr"] == ["https://example.com/fallback.mp4"]
+    assert prepared["images"] == [
+        ["https://example.com/one.webp", "https://example.com/two.webp"],
+        "https://example.com/three.webp",
+    ]
+    assert prepared["images_video"] == ["https://example.com/live.mp4"]
+
+    prepared_existing = posts_mod._prepare_post_for_downloader(
+        {
+            "aweme_id": "existing-live-photo",
+            "images_video": [
+                {
+                    "url_list": [
+                        "https://example.com/existing-a.mp4",
+                        "https://example.com/existing-b.mp4",
+                    ]
+                }
+            ],
+        }
+    )
+    assert prepared_existing["images_video"] == [
+        ["https://example.com/existing-a.mp4", "https://example.com/existing-b.mp4"]
+    ]
+
+
+def test_downloader_payload_helpers_ignore_invalid_shapes() -> None:
+    """Helper adapters return empty values for unsupported SDK shapes."""
+
+    class MissingConverters:
+        """Object without f2 conversion helpers."""
+
+    class InvalidConverters:
+        """Object whose conversion helpers return unsupported shapes."""
+
+        def _to_raw(self) -> list[str]:
+            return ["not", "a", "mapping"]
+
+        def _to_list(self) -> str:
+            return "not-a-list"
+
+    assert posts_mod._mapping_from(MissingConverters(), "_to_raw") is None
+    assert posts_mod._mapping_from(InvalidConverters(), "_to_raw") is None
+    assert posts_mod._list_from(MissingConverters(), "_to_list") is None
+    assert posts_mod._list_from(InvalidConverters(), "_to_list") is None
+    assert posts_mod._list_from(
+        type("MixedList", (), {"_to_list": lambda self: [{"ok": 1}, "bad"]})(),
+        "_to_list",
+    ) == [{"ok": 1}]
+
+    assert posts_mod._video_urls_from_raw_post({"video": "bad"}) == []
+    assert posts_mod._url_list_from("ftp://example.com/file.mp4") == []
+    assert posts_mod._url_list_from({"url_list": "https://example.com/file.mp4"}) == [
+        "https://example.com/file.mp4"
+    ]
+    assert posts_mod._url_list_from(123) == []
 
 
 # ── start_bulk_download (async, mocked) ─────────────────────────────────

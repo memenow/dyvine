@@ -38,6 +38,11 @@ def _configure_r2(
     monkeypatch.setattr(settings.r2, "endpoint", endpoint)
 
 
+def _configure_download_root(monkeypatch: pytest.MonkeyPatch, root: object) -> None:
+    """Point readiness checks at an isolated download root."""
+    monkeypatch.setattr(settings.douyin, "download_root", str(root))
+
+
 @pytest.fixture
 def prime_ready_dependencies(
     monkeypatch: pytest.MonkeyPatch,
@@ -85,6 +90,7 @@ def test_readiness_probe_returns_ready_when_all_dependencies_ok(
         "service_container": "initialized",
         "operation_store": "available",
         "r2_storage": "configured",
+        "local_retention_storage": "not_required",
     }
 
 
@@ -142,11 +148,99 @@ def test_readiness_probe_returns_not_ready_when_operation_store_broken(
         assert data["dependencies"]["operation_store"] == "unavailable"
 
 
-def test_readiness_probe_returns_not_ready_when_r2_missing(
+def test_readiness_probe_ready_when_r2_missing_uses_implicit_retention(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
-    """Verify readiness probe returns not ready when R2 missing."""
+    """R2 is optional when downloads implicitly retain local files."""
     monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
+    _configure_download_root(monkeypatch, tmp_path / "downloads")
+    _configure_r2(
+        monkeypatch,
+        account_id="",
+        access_key_id="",
+        secret_access_key="",
+        bucket_name="",
+        endpoint="",
+    )
+
+    with TestClient(app) as client:
+        container = app.state.container
+        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
+        response = client.get("/readyz")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["dependencies"]["r2_storage"] == "disabled"
+        assert data["dependencies"]["local_retention_storage"] == "available"
+
+
+def test_readiness_probe_ready_in_local_retention_mode_without_r2(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Local-retention mode makes R2 optional for readiness.
+
+    When ``DOUYIN_RETAIN_LOCAL_DOWNLOADS`` is enabled the service archives to
+    the local volume, so absent R2 credentials are expected and must not hold
+    the Pod out of the load balancer. ``/readyz`` must report ready with R2
+    marked ``disabled`` instead of failing with ``missing_credentials``.
+    """
+    monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
+    monkeypatch.setattr(settings.douyin, "retain_local_downloads", True)
+    _configure_download_root(monkeypatch, tmp_path / "downloads")
+    _configure_r2(
+        monkeypatch,
+        account_id="",
+        access_key_id="",
+        secret_access_key="",
+        bucket_name="",
+        endpoint="",
+    )
+
+    with TestClient(app) as client:
+        container = app.state.container
+        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
+        response = client.get("/readyz")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["dependencies"]["r2_storage"] == "disabled"
+        assert data["dependencies"]["local_retention_storage"] == "available"
+
+
+def test_readiness_probe_ready_when_r2_endpoint_missing_uses_implicit_retention(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Readiness mirrors the download path when R2 is not fully configured."""
+    monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
+    _configure_download_root(monkeypatch, tmp_path / "downloads")
+    _configure_r2(monkeypatch, endpoint="")
+
+    with TestClient(app) as client:
+        container = app.state.container
+        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
+        response = client.get("/readyz")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["dependencies"]["r2_storage"] == "disabled"
+        assert data["dependencies"]["local_retention_storage"] == "available"
+
+
+def test_readiness_probe_not_ready_when_local_retention_root_unwritable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """No-R2 readiness fails when retained files cannot be written locally."""
+    blocking_file = tmp_path / "downloads"
+    blocking_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
+    _configure_download_root(monkeypatch, blocking_file)
     _configure_r2(
         monkeypatch,
         account_id="",
@@ -164,28 +258,8 @@ def test_readiness_probe_returns_not_ready_when_r2_missing(
         assert response.status_code == 503
         data = response.json()
         assert data["status"] == "not_ready"
-        assert data["dependencies"]["r2_storage"] == "missing_credentials"
-
-
-def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Covers the bug where /readyz passed while ``settings.R2.endpoint`` was
-    empty, even though ``R2StorageService`` disables itself in that state.
-
-    """
-    monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
-    _configure_r2(monkeypatch, endpoint="")
-
-    with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
-        response = client.get("/readyz")
-
-        assert response.status_code == 503
-        data = response.json()
-        assert data["status"] == "not_ready"
-        assert data["dependencies"]["r2_storage"] == "missing_credentials"
+        assert data["dependencies"]["r2_storage"] == "disabled"
+        assert data["dependencies"]["local_retention_storage"] == "unavailable"
 
 
 def test_invalid_request_id_is_regenerated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -224,11 +298,36 @@ def test_health_check_returns_200_when_r2_missing(
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        # Dependency snapshot is informational only.
-        assert data["dependencies"]["r2_storage"] == "missing_credentials"
+        # Dependency snapshot is informational only; downloads retain locally
+        # when no R2 configuration is available.
+        assert data["dependencies"]["r2_storage"] == "disabled"
         correlation_id = data["correlation_id"]
         assert correlation_id == response.headers["X-Correlation-ID"]
         uuid.UUID(correlation_id)
+
+
+def test_health_check_reports_r2_disabled_in_local_retention_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/health`` reports intentionally disabled R2 as informational."""
+    with TestClient(app) as client:
+        monkeypatch.setattr(settings.douyin, "cookie", "cookie")
+        monkeypatch.setattr(settings.douyin, "retain_local_downloads", True)
+        _configure_r2(
+            monkeypatch,
+            account_id="",
+            access_key_id="",
+            secret_access_key="",
+            bucket_name="",
+            endpoint="",
+        )
+
+        response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["dependencies"]["r2_storage"] == "disabled"
 
 
 def test_health_check_returns_200_when_douyin_cookie_missing(
