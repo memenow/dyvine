@@ -15,6 +15,7 @@ from dyvine.core.exceptions import (
 )
 from dyvine.core.operations import OperationStore
 from dyvine.schemas.posts import DownloadStatus, PostType
+from dyvine.services import posts as posts_mod
 from dyvine.services.posts import PostService
 
 
@@ -517,6 +518,89 @@ async def test_download_post_content_normalizes_raw_video_payload() -> None:
     assert sent_post["private_status"] == 0
     assert sent_post["is_prohibited"] is False
     assert sent_post["video_play_addr"] == ["https://example.com/video.mp4"]
+
+
+def test_downloader_payload_helpers_cover_nested_media_shapes() -> None:
+    """Raw media helpers normalize images, live photos, and URL containers."""
+    raw_post = {
+        "aweme_id": "mixed-media",
+        "author": {"sec_user_id": "sec-from-author"},
+        "status": {"private_status": 1, "is_prohibited": True},
+        "video": {"play_addr": {"url_list": ["https://example.com/fallback.mp4"]}},
+        "images": [
+            {
+                "url_list": [
+                    "https://example.com/one.webp",
+                    "https://example.com/two.webp",
+                ],
+                "video": {"play_addr": {"url_list": ["https://example.com/live.mp4"]}},
+            },
+            {"url_list": ["https://example.com/three.webp"]},
+            "not-a-dict",
+            {"video": {}},
+        ],
+    }
+
+    prepared = posts_mod._prepare_post_for_downloader(raw_post)
+
+    assert prepared["sec_user_id"] == "sec-from-author"
+    assert prepared["private_status"] == 1
+    assert prepared["is_prohibited"] is True
+    assert prepared["video_play_addr"] == ["https://example.com/fallback.mp4"]
+    assert prepared["images"] == [
+        ["https://example.com/one.webp", "https://example.com/two.webp"],
+        "https://example.com/three.webp",
+    ]
+    assert prepared["images_video"] == ["https://example.com/live.mp4"]
+
+    prepared_existing = posts_mod._prepare_post_for_downloader(
+        {
+            "aweme_id": "existing-live-photo",
+            "images_video": [
+                {
+                    "url_list": [
+                        "https://example.com/existing-a.mp4",
+                        "https://example.com/existing-b.mp4",
+                    ]
+                }
+            ],
+        }
+    )
+    assert prepared_existing["images_video"] == [
+        ["https://example.com/existing-a.mp4", "https://example.com/existing-b.mp4"]
+    ]
+
+
+def test_downloader_payload_helpers_ignore_invalid_shapes() -> None:
+    """Helper adapters return empty values for unsupported SDK shapes."""
+
+    class MissingConverters:
+        """Object without f2 conversion helpers."""
+
+    class InvalidConverters:
+        """Object whose conversion helpers return unsupported shapes."""
+
+        def _to_raw(self) -> list[str]:
+            return ["not", "a", "mapping"]
+
+        def _to_list(self) -> str:
+            return "not-a-list"
+
+    assert posts_mod._mapping_from(MissingConverters(), "_to_raw") is None
+    assert posts_mod._mapping_from(InvalidConverters(), "_to_raw") is None
+    assert posts_mod._list_from(MissingConverters(), "_to_list") is None
+    assert posts_mod._list_from(InvalidConverters(), "_to_list") is None
+    assert posts_mod._list_from(
+        type("MixedList", (), {"_to_list": lambda self: [{"ok": 1}, "bad"]})(),
+        "_to_list",
+    ) == [{"ok": 1}]
+
+    assert posts_mod._video_urls_from_raw_post({"video": "bad"}) == []
+    assert posts_mod._url_list_from("ftp://example.com/file.mp4") == []
+    assert posts_mod._url_list_from({"url_list": "https://example.com/file.mp4"}) == [
+        "https://example.com/file.mp4"
+    ]
+    assert posts_mod._url_list_from(123) == []
 
 
 # ── start_bulk_download (async, mocked) ─────────────────────────────────

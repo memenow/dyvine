@@ -912,6 +912,28 @@ def test_prune_retained_workspace_noop_when_cap_zero(tmp_path: Path) -> None:
     assert task.exists(), "pruning must be disabled when the cap is zero"
 
 
+def test_file_snapshot_reports_only_new_or_changed_files(tmp_path: Path) -> None:
+    """Snapshot helpers ignore directories and return changed file paths."""
+    root = tmp_path / "downloads"
+    root.mkdir()
+    (root / "nested").mkdir()
+    existing = root / "nested" / "existing.mp4"
+    existing.write_bytes(b"first")
+
+    before = UserService._file_snapshot(root)
+    assert UserService._files_changed_since(root, before) == []
+
+    existing.write_bytes(b"changed")
+    new_file = root / "new.webp"
+    new_file.write_bytes(b"new")
+
+    changed = {
+        path.relative_to(root)
+        for path in UserService._files_changed_since(root, before)
+    }
+    assert changed == {Path("nested/existing.mp4"), Path("new.webp")}
+
+
 @pytest.mark.asyncio
 async def test_finalize_status_clamps_progress_when_downloaded_exceeds_total(
     tmp_path: Path,

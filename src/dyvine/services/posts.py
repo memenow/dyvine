@@ -1033,13 +1033,13 @@ def _prepare_post_for_downloader(post: dict[str, Any]) -> dict[str, Any]:
         if video_urls:
             prepared["video_play_addr"] = video_urls
 
-    normalized_images = _image_urls_from_raw_post(prepared)
-    if normalized_images:
-        prepared["images"] = normalized_images
-
     normalized_live_images = _image_video_urls_from_raw_post(prepared)
     if normalized_live_images:
         prepared["images_video"] = normalized_live_images
+
+    normalized_images = _image_urls_from_raw_post(prepared)
+    if normalized_images:
+        prepared["images"] = normalized_images
 
     return prepared
 

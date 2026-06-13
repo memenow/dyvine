@@ -263,6 +263,30 @@ def test_health_check_returns_200_when_r2_missing(
         uuid.UUID(correlation_id)
 
 
+def test_health_check_reports_r2_disabled_in_local_retention_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/health`` reports intentionally disabled R2 as informational."""
+    with TestClient(app) as client:
+        monkeypatch.setattr(settings.douyin, "cookie", "cookie")
+        monkeypatch.setattr(settings.douyin, "retain_local_downloads", True)
+        _configure_r2(
+            monkeypatch,
+            account_id="",
+            access_key_id="",
+            secret_access_key="",
+            bucket_name="",
+            endpoint="",
+        )
+
+        response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["dependencies"]["r2_storage"] == "disabled"
+
+
 def test_health_check_returns_200_when_douyin_cookie_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
