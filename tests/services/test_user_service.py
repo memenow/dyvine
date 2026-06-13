@@ -621,8 +621,12 @@ async def test_upload_directory_to_r2_counts_partial_failures(
     user_data = MagicMock()
     user_data.nickname = "nick"
 
+    failed_paths: set[Path] = set()
     uploaded, failed = await service._upload_directory_to_r2(
-        user_dir, user_id="user-123", user_data=user_data
+        user_dir,
+        user_id="user-123",
+        user_data=user_data,
+        failed_paths=failed_paths,
     )
 
     assert (uploaded, failed) == (2, 1)
@@ -631,6 +635,7 @@ async def test_upload_directory_to_r2_counts_partial_failures(
     assert not file_ok_one.exists()
     assert not file_ok_two.exists()
     assert file_failing.exists()
+    assert failed_paths == {file_failing}
 
 
 @pytest.mark.asyncio
@@ -783,6 +788,112 @@ async def test_process_download_uploads_only_files_changed_in_current_batch(
 
 
 @pytest.mark.asyncio
+async def test_process_download_retries_stale_upload_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Failed uploads from earlier pages are retried before cleanup."""
+    from dyvine.services import users as users_mod
+
+    monkeypatch.chdir(tmp_path)
+
+    mock_user_data = MagicMock()
+    mock_user_data.nickname = "retry-user"
+    mock_user_data.aweme_count = 2
+
+    first_batch = MagicMock()
+    first_batch.has_aweme = True
+    first_batch.aweme_id = ["aw1"]
+    first_batch.has_more = True
+    first_batch.max_cursor = 1
+    first_batch._to_list = MagicMock(return_value=[])
+
+    second_batch = MagicMock()
+    second_batch.has_aweme = True
+    second_batch.aweme_id = ["aw2"]
+    second_batch.has_more = False
+    second_batch.max_cursor = 2
+    second_batch._to_list = MagicMock(return_value=[])
+
+    async def fake_fetch_posts(*_args: Any, max_cursor: int, **_kwargs: Any) -> Any:
+        """Yield two pages so the first page's failed file can be retried."""
+        if max_cursor == 0:
+            yield first_batch
+        elif max_cursor == 1:
+            yield second_batch
+
+    class FakeDownloader:
+        """Downloader double that writes one file per page."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def create_download_tasks(
+            self, _kwargs: dict[str, Any], _items: list[Any], user_dir: Path
+        ) -> None:
+            """Write a deterministic page file for upload retry assertions."""
+            self.calls += 1
+            filename = "first.mp4" if self.calls == 1 else "second.mp4"
+            (Path(user_dir) / filename).write_bytes(filename.encode("utf-8"))
+
+    class FakeHandler:
+        """Handler double exposing the fake profile, fetch, and downloader."""
+
+        def __init__(self, _kwargs: dict[str, Any]) -> None:
+            self.downloader = FakeDownloader()
+
+        fetch_user_profile = AsyncMock(return_value=mock_user_data)
+        fetch_user_post_videos = staticmethod(fake_fetch_posts)
+
+    upload_attempts: list[str] = []
+    first_upload_failed = False
+
+    async def fake_upload_file(
+        local_path: Path,
+        _r2_path: str,
+        _metadata: dict[str, str],
+        _content_type: str,
+    ) -> None:
+        """Fail the first file once, then allow the retry to archive it."""
+        nonlocal first_upload_failed
+        name = Path(local_path).name
+        upload_attempts.append(name)
+        if name == "first.mp4" and not first_upload_failed:
+            first_upload_failed = True
+            raise users_mod.ServiceError("transient upload outage")
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
+
+    service = UserService()
+    monkeypatch.setattr(service, "_r2_upload_enabled", lambda: True)
+    monkeypatch.setattr(service, "_should_retain_workspace", lambda: False)
+    service.storage.generate_ugc_path = MagicMock(return_value="r2/path")
+    service.storage.generate_metadata = MagicMock(return_value={"category": "posts"})
+    monkeypatch.setattr(service.storage, "upload_file", fake_upload_file)
+
+    operation = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="retry-user",
+        status="pending",
+        message="scheduled",
+    )
+
+    await service._process_download(
+        operation.operation_id,
+        user_id="retry-user",
+        include_posts=True,
+        include_likes=False,
+        max_items=None,
+    )
+
+    assert upload_attempts == ["first.mp4", "first.mp4", "second.mp4"]
+    refreshed = await service.operation_store.get_operation(operation.operation_id)
+    assert refreshed.status == "completed"
+    task_dir = tmp_path / users_mod.TEMP_DOWNLOAD_ROOT / operation.operation_id
+    assert not task_dir.exists(), "clean archival runs still sweep the workspace"
+
+
+@pytest.mark.asyncio
 async def test_process_download_retains_workspace_when_r2_unconfigured(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -878,11 +989,16 @@ def test_prune_retained_workspace_evicts_oldest_over_cap(tmp_path: Path) -> None
         """Test helper for test_prune_retained_workspace_evicts_oldest_over_cap."""
         task = root / name
         task.mkdir()
+        (task / users_mod.TASK_WORKSPACE_MARKER).touch()
         (task / "blob.bin").write_bytes(b"x" * size)
         os.utime(task, (mtime, mtime))
         return task
 
     one_mib = 1024 * 1024
+    unrelated = root / "bulk-post-user"
+    unrelated.mkdir()
+    (unrelated / "old-download.mp4").write_bytes(b"x" * one_mib)
+    os.utime(unrelated, (500.0, 500.0))
     oldest = make_task("oldest", one_mib, mtime=1_000.0)
     newer = make_task("newer", one_mib, mtime=2_000.0)
     newest = make_task("newest", one_mib, mtime=3_000.0)
@@ -895,6 +1011,7 @@ def test_prune_retained_workspace_evicts_oldest_over_cap(tmp_path: Path) -> None
     assert oldest.exists(), "the protected current task must never be evicted"
     assert not newer.exists(), "the next-oldest unprotected workspace is evicted"
     assert newest.exists(), "newer workspaces survive once the tree fits the cap"
+    assert unrelated.exists(), "unmarked download directories are outside prune scope"
 
 
 def test_prune_retained_workspace_noop_when_cap_zero(tmp_path: Path) -> None:
@@ -905,6 +1022,7 @@ def test_prune_retained_workspace_noop_when_cap_zero(tmp_path: Path) -> None:
     root.mkdir()
     task = root / "task-1"
     task.mkdir()
+    (task / users_mod.TASK_WORKSPACE_MARKER).touch()
     (task / "blob.bin").write_bytes(b"x" * 4096)
 
     users_mod.UserService._prune_retained_workspace(root, 0.0)

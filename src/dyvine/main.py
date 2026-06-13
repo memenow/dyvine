@@ -521,22 +521,21 @@ async def readiness_probe(request: Request) -> JSONResponse:
     # persist downloaded content. Delegate to ``R2Settings.is_configured``
     # so ``/readyz`` and ``R2StorageService`` stay in lockstep on the
     # exact fields a real upload needs.
-    # R2 is the archival target, but a deployment can run in local-retention
-    # mode (DOUYIN_RETAIN_LOCAL_DOWNLOADS), keeping downloads on the local
-    # volume instead of pushing to R2. In that mode missing R2 credentials are
-    # expected, so R2 stops gating readiness and the Pod is not held out of the
-    # load balancer for an intentionally-absent dependency.
-    r2_required = not settings.douyin.retain_local_downloads
     r2_ok = settings.r2.is_configured
+    # R2 is the archival target, but downloads fall back to local retention
+    # whenever R2 is unconfigured. Keep readiness aligned with the effective
+    # download path so a no-R2 deployment is not held out of service.
+    local_retention_effective = settings.douyin.retain_local_downloads or not r2_ok
     if r2_ok:
         r2_status = "configured"
-    elif r2_required:
-        r2_status = "missing_credentials"
     else:
         r2_status = "disabled"
 
     ready = (
-        douyin_ok and container_ok and operation_store_ok and (r2_ok or not r2_required)
+        douyin_ok
+        and container_ok
+        and operation_store_ok
+        and (r2_ok or local_retention_effective)
     )
     readiness_status_code = (
         status.HTTP_200_OK if ready else status.HTTP_503_SERVICE_UNAVAILABLE
@@ -675,9 +674,11 @@ async def health_check(request: Request) -> JSONResponse:
     # configuration but never affect the HTTP status code. Use ``/readyz``
     # if you need the dependency-aware gate.
     douyin_status = "configured" if settings.douyin.cookie else "missing_credentials"
-    if settings.r2.is_configured:
+    r2_ok = settings.r2.is_configured
+    local_retention_effective = settings.douyin.retain_local_downloads or not r2_ok
+    if r2_ok:
         r2_status = "configured"
-    elif settings.douyin.retain_local_downloads:
+    elif local_retention_effective:
         # Intentionally absent in local-retention mode; not a fault.
         r2_status = "disabled"
     else:

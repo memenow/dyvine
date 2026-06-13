@@ -142,10 +142,10 @@ def test_readiness_probe_returns_not_ready_when_operation_store_broken(
         assert data["dependencies"]["operation_store"] == "unavailable"
 
 
-def test_readiness_probe_returns_not_ready_when_r2_missing(
+def test_readiness_probe_ready_when_r2_missing_uses_implicit_retention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify readiness probe returns not ready when R2 missing."""
+    """R2 is optional when downloads implicitly retain local files."""
     monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
     _configure_r2(
         monkeypatch,
@@ -161,10 +161,10 @@ def test_readiness_probe_returns_not_ready_when_r2_missing(
         monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         response = client.get("/readyz")
 
-        assert response.status_code == 503
+        assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "not_ready"
-        assert data["dependencies"]["r2_storage"] == "missing_credentials"
+        assert data["status"] == "ready"
+        assert data["dependencies"]["r2_storage"] == "disabled"
 
 
 def test_readiness_probe_ready_in_local_retention_mode_without_r2(
@@ -199,13 +199,10 @@ def test_readiness_probe_ready_in_local_retention_mode_without_r2(
         assert data["dependencies"]["r2_storage"] == "disabled"
 
 
-def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
+def test_readiness_probe_ready_when_r2_endpoint_missing_uses_implicit_retention(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Covers the bug where /readyz passed while ``settings.R2.endpoint`` was
-    empty, even though ``R2StorageService`` disables itself in that state.
-
-    """
+    """Readiness mirrors the download path when R2 is not fully configured."""
     monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
     _configure_r2(monkeypatch, endpoint="")
 
@@ -214,10 +211,10 @@ def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
         monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         response = client.get("/readyz")
 
-        assert response.status_code == 503
+        assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "not_ready"
-        assert data["dependencies"]["r2_storage"] == "missing_credentials"
+        assert data["status"] == "ready"
+        assert data["dependencies"]["r2_storage"] == "disabled"
 
 
 def test_invalid_request_id_is_regenerated(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,8 +253,9 @@ def test_health_check_returns_200_when_r2_missing(
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        # Dependency snapshot is informational only.
-        assert data["dependencies"]["r2_storage"] == "missing_credentials"
+        # Dependency snapshot is informational only; downloads retain locally
+        # when no R2 configuration is available.
+        assert data["dependencies"]["r2_storage"] == "disabled"
         correlation_id = data["correlation_id"]
         assert correlation_id == response.headers["X-Correlation-ID"]
         uuid.UUID(correlation_id)

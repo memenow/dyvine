@@ -16,9 +16,9 @@ downloads each batch into a per-task workspace under
 Cloudflare R2 via the shared ``R2StorageService``, and finalises the
 operation row with a clamped ``progress`` value plus a terminal
 ``status``. In R2-archival mode the workspace is removed in a
-``finally`` branch so a failed run does not leave files on disk; in
-local-retention mode (``DOUYIN_RETAIN_LOCAL_DOWNLOADS``, or whenever R2
-is unconfigured) it is kept and trimmed to an optional size cap instead.
+``finally`` branch after successful archival; in local-retention mode
+(``DOUYIN_RETAIN_LOCAL_DOWNLOADS``, or whenever R2 is unconfigured) it is
+kept and trimmed to an optional size cap instead.
 
 External dependencies are wrapped in `try`/`finally`:
 ``DouyinHandler`` is closed via ``_safely_close_handler`` to avoid
@@ -72,6 +72,7 @@ PAGE_FETCH_DELAY_SECONDS = 5.0
 # its files are uploaded; in local-retention mode the files are kept here
 # instead (see ``_should_retain_workspace``).
 TEMP_DOWNLOAD_ROOT = Path("downloads")
+TASK_WORKSPACE_MARKER = ".dyvine-task-workspace"
 
 
 def sanitize_filename(filename: str) -> str:
@@ -446,6 +447,7 @@ class UserService:
         *,
         delete_after_upload: bool = True,
         file_paths: Iterable[Path] | None = None,
+        failed_paths: set[Path] | None = None,
     ) -> tuple[int, int]:
         """Upload every file under ``user_dir`` to R2 storage.
 
@@ -468,6 +470,9 @@ class UserService:
                 stays on the local volume.
             file_paths: Optional explicit file set to upload. When omitted,
                 every file under ``user_dir`` is uploaded.
+            failed_paths: Optional mutable set populated with files that did
+                not upload successfully. Callers use it to retry stale upload
+                failures before cleaning up a workspace.
 
         Returns:
             Tuple of ``(uploaded_count, failed_count)`` so the caller can
@@ -501,6 +506,8 @@ class UserService:
                 uploaded_count += 1
             except Exception as e:
                 failed_count += 1
+                if failed_paths is not None:
+                    failed_paths.add(file_path)
                 logger.error(
                     "Failed to upload file to R2",
                     extra={"file_path": str(file_path), "error": str(e)},
@@ -730,7 +737,11 @@ class UserService:
             return
         cap_bytes = int(max_gb * 1024**3)
         try:
-            entries = [child for child in root.iterdir() if child.is_dir()]
+            entries = [
+                child
+                for child in root.iterdir()
+                if child.is_dir() and (child / TASK_WORKSPACE_MARKER).is_file()
+            ]
         except OSError as exc:
             logger.warning(
                 "Failed to scan retained workspace for pruning",
@@ -816,6 +827,7 @@ class UserService:
         downloaded_count = 0
         total_posts = 0
         failed_uploads = 0
+        pending_upload_files: set[Path] = set()
         # Decide upload/retention up front so the ``finally`` branch can pick
         # cleanup vs. retention even if the run aborts before the first batch.
         upload_enabled = self._r2_upload_enabled()
@@ -833,6 +845,7 @@ class UserService:
             TEMP_DOWNLOAD_ROOT.mkdir(exist_ok=True)
             temp_dir = TEMP_DOWNLOAD_ROOT / task_id
             temp_dir.mkdir(parents=True, exist_ok=True)
+            (temp_dir / TASK_WORKSPACE_MARKER).touch()
 
             handler_kwargs = self._build_handler_kwargs(
                 user_id=user_id,
@@ -992,16 +1005,25 @@ class UserService:
                         batch_files = self._files_changed_since(
                             user_dir, batch_snapshot
                         )
+                        candidate_files = {
+                            path for path in pending_upload_files if path.exists()
+                        }
+                        candidate_files.update(batch_files)
+                        batch_failed_paths: set[Path] = set()
                         batch_uploaded, batch_failed = (
                             await self._upload_directory_to_r2(
                                 user_dir,
                                 user_id,
                                 user_data,
                                 delete_after_upload=not retain_workspace,
-                                file_paths=batch_files,
+                                file_paths=candidate_files,
+                                failed_paths=batch_failed_paths,
                             )
                         )
-                        failed_uploads += batch_failed
+                        pending_upload_files = {
+                            path for path in batch_failed_paths if path.exists()
+                        }
+                        failed_uploads = len(pending_upload_files)
                         logger.debug(
                             "R2 upload batch finished",
                             extra={
@@ -1009,7 +1031,7 @@ class UserService:
                                 "user_id": user_id,
                                 "uploaded": batch_uploaded,
                                 "failed": batch_failed,
-                                "candidate_files": len(batch_files),
+                                "candidate_files": len(candidate_files),
                             },
                         )
                     else:
@@ -1063,6 +1085,31 @@ class UserService:
                     # loop spins.
                     has_more = False
 
+            if upload_enabled and pending_upload_files:
+                retry_failed_paths: set[Path] = set()
+                retry_uploaded, retry_failed = await self._upload_directory_to_r2(
+                    user_dir,
+                    user_id,
+                    user_data,
+                    delete_after_upload=not retain_workspace,
+                    file_paths={path for path in pending_upload_files if path.exists()},
+                    failed_paths=retry_failed_paths,
+                )
+                pending_upload_files = {
+                    path for path in retry_failed_paths if path.exists()
+                }
+                failed_uploads = len(pending_upload_files)
+                logger.debug(
+                    "R2 upload retry finished",
+                    extra={
+                        "task_id": task_id,
+                        "user_id": user_id,
+                        "uploaded": retry_uploaded,
+                        "failed": retry_failed,
+                        "remaining_failed_files": failed_uploads,
+                    },
+                )
+
             await self._finalize_status(
                 task_id=task_id,
                 downloaded=downloaded_count,
@@ -1084,11 +1131,11 @@ class UserService:
             )
 
         finally:
-            if retain_workspace:
+            if retain_workspace or failed_uploads > 0:
                 # Local-retention mode (explicit DOUYIN_RETAIN_LOCAL_DOWNLOADS,
-                # or R2 unconfigured): keep the per-task workspace so downloads
-                # are never silently discarded, then enforce the optional size
-                # cap so the retained tree cannot grow without bound.
+                # or R2 unconfigured) keeps the per-task workspace. Unresolved
+                # R2 upload failures are also retained so the only local copy is
+                # not discarded by the cleanup branch.
                 self._prune_retained_workspace(
                     TEMP_DOWNLOAD_ROOT,
                     settings.douyin.retain_max_gb,
