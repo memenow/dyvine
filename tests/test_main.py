@@ -167,6 +167,38 @@ def test_readiness_probe_returns_not_ready_when_r2_missing(
         assert data["dependencies"]["r2_storage"] == "missing_credentials"
 
 
+def test_readiness_probe_ready_in_local_retention_mode_without_r2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local-retention mode makes R2 optional for readiness.
+
+    When ``DOUYIN_RETAIN_LOCAL_DOWNLOADS`` is enabled the service archives to
+    the local volume, so absent R2 credentials are expected and must not hold
+    the Pod out of the load balancer. ``/readyz`` must report ready with R2
+    marked ``disabled`` instead of failing with ``missing_credentials``.
+    """
+    monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
+    monkeypatch.setattr(settings.douyin, "retain_local_downloads", True)
+    _configure_r2(
+        monkeypatch,
+        account_id="",
+        access_key_id="",
+        secret_access_key="",
+        bucket_name="",
+        endpoint="",
+    )
+
+    with TestClient(app) as client:
+        container = app.state.container
+        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
+        response = client.get("/readyz")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ready"
+        assert data["dependencies"]["r2_storage"] == "disabled"
+
+
 def test_readiness_probe_returns_not_ready_when_r2_endpoint_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

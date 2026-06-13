@@ -273,6 +273,7 @@ class ServiceContainer:
             "headers": settings.douyin.headers,
             "proxies": settings.douyin.proxies,
             "mode": "all",
+            "interval": "all",
             "cookie": settings.douyin.cookie,
             "path": "downloads",
             "max_retries": 5,

@@ -207,10 +207,15 @@ class DouyinSettings(BaseSettings):
         proxy_https: HTTPS proxy URL (optional).
         download_root: Filesystem root that bounds every user-supplied
             output path.
+        retain_local_downloads: Keep per-task files locally instead of
+            deleting them after each run (implied when R2 is unconfigured).
+        retain_max_gb: Optional GiB cap that prunes the oldest retained
+            workspaces once exceeded; ``0`` disables pruning.
 
     Environment Variables:
         DOUYIN_COOKIE, DOUYIN_USER_AGENT, DOUYIN_REFERER,
-        DOUYIN_PROXY_HTTP, DOUYIN_PROXY_HTTPS, DOUYIN_DOWNLOAD_ROOT.
+        DOUYIN_PROXY_HTTP, DOUYIN_PROXY_HTTPS, DOUYIN_DOWNLOAD_ROOT,
+        DOUYIN_RETAIN_LOCAL_DOWNLOADS, DOUYIN_RETAIN_MAX_GB.
 
     Note:
         A valid cookie is required for most Douyin API operations.
@@ -253,6 +258,25 @@ class DouyinSettings(BaseSettings):
     live_sec_ch_ua: str = Field(
         default='"Not A(Brand";v="99", "Google Chrome";v="131", "Chromium";v="131"',
         description="sec-ch-ua header value for livestream requests",
+    )
+    retain_local_downloads: bool = Field(
+        default=False,
+        description=(
+            "Keep each task's downloaded files in the local workspace "
+            "instead of deleting them after the run. Treated as enabled "
+            "whenever R2 is not configured, so a completed download is "
+            "never silently discarded with nowhere to archive it."
+        ),
+    )
+    retain_max_gb: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Soft cap, in GiB, on the retained-downloads workspace. When "
+            "greater than zero, the oldest per-task directories are pruned "
+            "after each run until the total falls back under the cap. Zero "
+            "leaves the workspace unbounded (pruning disabled)."
+        ),
     )
 
     @property

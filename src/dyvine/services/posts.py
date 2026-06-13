@@ -774,7 +774,22 @@ class PostService:
                 posts_filter = await posts_iterator.__anext__()
             except StopAsyncIteration:
                 return {}
-            return dict(posts_filter._to_dict())
+
+            raw_data = _mapping_from(posts_filter, "_to_raw")
+            list_data = _list_from(posts_filter, "_to_list")
+            if list_data:
+                batch_data = dict(raw_data or {})
+                batch_data["aweme_list"] = list_data
+                return batch_data
+
+            dict_data = _mapping_from(posts_filter, "_to_dict")
+            if raw_data is not None and (
+                raw_data.get("aweme_list")
+                or dict_data is None
+                or not dict_data.get("aweme_list")
+            ):
+                return raw_data
+            return dict_data or {}
         finally:
             aclose = getattr(posts_iterator, "aclose", None)
             if callable(aclose):
@@ -878,8 +893,9 @@ class PostService:
         )
 
         try:
+            post_payload = _prepare_post_for_downloader(post)
             await self.handler.downloader.create_download_tasks(
-                self.handler.kwargs, [post], user_path
+                self.handler.kwargs, [post_payload], user_path
             )
 
         except Exception as e:
@@ -970,6 +986,138 @@ class PostService:
 # serialization shape easy to unit test and avoids leaking sqlite-aware
 # logic into the response model.
 # ----------------------------------------------------------------------
+
+
+def _mapping_from(obj: Any, method_name: str) -> dict[str, Any] | None:
+    """Return a dict from a zero-argument conversion method when available."""
+    method = getattr(obj, method_name, None)
+    if not callable(method):
+        return None
+    value = method()
+    if isinstance(value, dict):
+        return dict(value)
+    return None
+
+
+def _list_from(obj: Any, method_name: str) -> list[dict[str, Any]] | None:
+    """Return a list of dictionaries from a zero-argument conversion method."""
+    method = getattr(obj, method_name, None)
+    if not callable(method):
+        return None
+    value = method()
+    if not isinstance(value, list):
+        return None
+    items = [dict(item) for item in value if isinstance(item, dict)]
+    return items or None
+
+
+def _prepare_post_for_downloader(post: dict[str, Any]) -> dict[str, Any]:
+    """Adapt raw Douyin post payloads to the f2 downloader field contract."""
+    prepared = dict(post)
+
+    author = prepared.get("author")
+    if not prepared.get("sec_user_id") and isinstance(author, dict):
+        sec_user_id = author.get("sec_uid") or author.get("sec_user_id")
+        if isinstance(sec_user_id, str) and sec_user_id:
+            prepared["sec_user_id"] = sec_user_id
+
+    status = prepared.get("status")
+    if isinstance(status, dict):
+        if "private_status" not in prepared:
+            prepared["private_status"] = status.get("private_status")
+        if "is_prohibited" not in prepared:
+            prepared["is_prohibited"] = status.get("is_prohibited")
+
+    if not prepared.get("video_play_addr"):
+        video_urls = _video_urls_from_raw_post(prepared)
+        if video_urls:
+            prepared["video_play_addr"] = video_urls
+
+    normalized_images = _image_urls_from_raw_post(prepared)
+    if normalized_images:
+        prepared["images"] = normalized_images
+
+    normalized_live_images = _image_video_urls_from_raw_post(prepared)
+    if normalized_live_images:
+        prepared["images_video"] = normalized_live_images
+
+    return prepared
+
+
+def _video_urls_from_raw_post(post: dict[str, Any]) -> list[str]:
+    """Extract playable video URLs from raw or semi-normalized post data."""
+    video = post.get("video")
+    if not isinstance(video, dict):
+        return []
+
+    bit_rates = video.get("bit_rate")
+    if isinstance(bit_rates, list):
+        for bit_rate in bit_rates:
+            if isinstance(bit_rate, dict):
+                urls = _url_list_from(bit_rate.get("play_addr"))
+                if urls:
+                    return urls
+
+    return _url_list_from(video.get("play_addr"))
+
+
+def _image_urls_from_raw_post(post: dict[str, Any]) -> list[str | list[str]]:
+    """Extract image URLs in the shape expected by f2's image downloader."""
+    images = post.get("images")
+    if not isinstance(images, list):
+        return []
+
+    normalized: list[str | list[str]] = []
+    for image in images:
+        urls = _url_list_from(image)
+        if urls:
+            normalized.append(_url_or_urls(urls))
+    return normalized
+
+
+def _image_video_urls_from_raw_post(post: dict[str, Any]) -> list[str | list[str]]:
+    """Extract live-photo video URLs from raw image entries."""
+    existing = post.get("images_video")
+    if isinstance(existing, list):
+        normalized_existing = [
+            _url_or_urls(urls) for item in existing if (urls := _url_list_from(item))
+        ]
+        if normalized_existing:
+            return normalized_existing
+
+    images = post.get("images")
+    if not isinstance(images, list):
+        return []
+
+    normalized: list[str | list[str]] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        video = image.get("video")
+        if not isinstance(video, dict):
+            continue
+        urls = _url_list_from(video.get("play_addr"))
+        if urls:
+            normalized.append(_url_or_urls(urls))
+    return normalized
+
+
+def _url_list_from(value: Any) -> list[str]:
+    """Return HTTP URLs from a string, list, or Douyin URL container dict."""
+    if isinstance(value, str):
+        return [value] if value.startswith("http") else []
+    if isinstance(value, list):
+        return [
+            item for item in value if isinstance(item, str) and item.startswith("http")
+        ]
+    if isinstance(value, dict):
+        return _url_list_from(value.get("url_list"))
+    return []
+
+
+def _url_or_urls(urls: list[str]) -> str | list[str]:
+    """Collapse single-link fallbacks while preserving multi-link alternatives."""
+    return urls[0] if len(urls) == 1 else urls
 
 
 def _serialize_download_stats(stats: dict[PostType, int]) -> dict[str, int]:

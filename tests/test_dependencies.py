@@ -44,6 +44,7 @@ async def test_service_container_initializes_with_douyin_handler(
     handler = container.douyin_handler
     assert isinstance(handler, DummyHandler)
     assert captured_kwargs.get("mode") == "all"
+    assert captured_kwargs.get("interval") == "all"
     assert captured_kwargs.get("max_tasks") == 3
 
 

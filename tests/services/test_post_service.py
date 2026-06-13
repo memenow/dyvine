@@ -385,6 +385,78 @@ async def test_fetch_posts_batch_success() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_posts_batch_prefers_raw_aweme_list() -> None:
+    """Use raw f2 payloads when normalized dict output drops aweme_list."""
+    handler = MagicMock()
+    posts_filter = MagicMock()
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [{"aweme_id": "raw-post"}],
+        "has_more": False,
+        "max_cursor": 0,
+    }
+    posts_filter._to_dict.return_value = {"aweme_list": []}
+
+    async def _iter(*a, **kw):
+        """Test helper for test_fetch_posts_batch_prefers_raw_aweme_list."""
+        yield posts_filter
+
+    handler.fetch_user_post_videos = _iter
+    svc = _build_service(handler)
+    result = await svc._fetch_posts_batch("u1", 0)
+    assert result["aweme_list"] == [{"aweme_id": "raw-post"}]
+
+
+@pytest.mark.asyncio
+async def test_fetch_posts_batch_prefers_to_list_downloader_shape() -> None:
+    """Use f2's per-post list projection when available for bulk downloads."""
+    handler = MagicMock()
+    posts_filter = MagicMock()
+    posts_filter._to_raw.return_value = {
+        "aweme_list": [
+            {
+                "aweme_id": "raw-post",
+                "video": {
+                    "bit_rate": [
+                        {"play_addr": {"url_list": ["https://example.com/raw.mp4"]}}
+                    ]
+                },
+            }
+        ],
+        "has_more": False,
+        "max_cursor": 0,
+    }
+    posts_filter._to_list.return_value = [
+        {
+            "aweme_id": "flat-post",
+            "aweme_type": 0,
+            "private_status": 0,
+            "video_play_addr": ["https://example.com/flat.mp4"],
+        }
+    ]
+    posts_filter._to_dict.return_value = {}
+
+    async def _iter(*a, **kw):
+        """Test helper for
+        test_fetch_posts_batch_prefers_to_list_downloader_shape.
+        """
+        yield posts_filter
+
+    handler.fetch_user_post_videos = _iter
+    svc = _build_service(handler)
+    result = await svc._fetch_posts_batch("u1", 0)
+    assert result["aweme_list"] == [
+        {
+            "aweme_id": "flat-post",
+            "aweme_type": 0,
+            "private_status": 0,
+            "video_play_addr": ["https://example.com/flat.mp4"],
+        }
+    ]
+    assert result["has_more"] is False
+    assert result["max_cursor"] == 0
+
+
+@pytest.mark.asyncio
 async def test_fetch_posts_batch_empty() -> None:
     """Verify fetch posts batch empty."""
     handler = MagicMock()
@@ -415,6 +487,36 @@ async def test_download_post_content_success() -> None:
     svc = _build_service(handler)
     await svc._download_post_content({"aweme_id": "123"}, PostType.VIDEO, Path("/tmp"))
     handler.downloader.create_download_tasks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_download_post_content_normalizes_raw_video_payload() -> None:
+    """Raw Douyin posts are adapted before they are passed to f2."""
+    handler = MagicMock()
+    handler.downloader = MagicMock()
+    handler.downloader.create_download_tasks = AsyncMock()
+    handler.kwargs = {}
+    from pathlib import Path
+
+    raw_post = {
+        "aweme_id": "123",
+        "aweme_type": 0,
+        "author": {"sec_uid": "sec-user"},
+        "status": {"private_status": 0, "is_prohibited": False},
+        "video": {
+            "bit_rate": [{"play_addr": {"url_list": ["https://example.com/video.mp4"]}}]
+        },
+    }
+
+    svc = _build_service(handler)
+    await svc._download_post_content(raw_post, PostType.VIDEO, Path("/tmp"))
+
+    _, payload, _ = handler.downloader.create_download_tasks.await_args.args
+    sent_post = payload[0]
+    assert sent_post["sec_user_id"] == "sec-user"
+    assert sent_post["private_status"] == 0
+    assert sent_post["is_prohibited"] is False
+    assert sent_post["video_play_addr"] == ["https://example.com/video.mp4"]
 
 
 # ── start_bulk_download (async, mocked) ─────────────────────────────────
