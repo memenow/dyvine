@@ -127,6 +127,17 @@ class WatchService:
             else backfill_on_create
         )
 
+        # Fast path: if a subscription already exists for this user, return it
+        # idempotently WITHOUT paying for -- or failing on -- a baseline
+        # snapshot. Without this, a transient profile/upstream error during the
+        # snapshot would turn an idempotent retry into an error instead of the
+        # documented 200-with-existing-row. The locked re-check below remains
+        # the authority against a concurrent create.
+        existing = await self.watch_store.get_subscription_by_user(user_id)
+        if existing is not None:
+            self._start_loop(existing)
+            return existing, False
+
         # Snapshot the current feed BEFORE taking the lock so a non-backfill
         # subscription records a baseline of existing aweme_ids without
         # holding the lock across an upstream call. The newest-first feed
@@ -297,6 +308,14 @@ class WatchService:
         moment work *starts*, so a slow check pushes the next tick later
         rather than letting ticks pile up. Both due-times start "now" so a
         freshly created or resumed subscription is checked immediately.
+
+        Live and post checks run serially in this single loop and the post
+        check awaits its download inline, so a long post run (a fresh backfill
+        or catch-up after downtime) delays *this* subscription's next live
+        check until it finishes. That is an accepted trade-off of the
+        single-loop design: livestreams are long enough that a few minutes'
+        detection delay is tolerable, and every subscription has its own loop,
+        so one user's backfill never stalls another user's live detection.
         """
         next_live = time.monotonic()
         next_post = time.monotonic()
@@ -408,20 +427,22 @@ class WatchService:
             )
             return
 
-        if result.failed_count:
-            # Hold the checkpoint whenever any post in the freshly-fetched
-            # window failed to download. The newest-first early-stop would
-            # otherwise advance the boundary past a never-stored post and skip
-            # it forever; instead the next cycle re-scans this window (f2
-            # overwrites already-fetched posts idempotently) and retries the
-            # failures. This is the "advanced only after a successful run"
-            # contract this method's docstring promises.
+        if result.failed_count or result.truncated:
+            # Hold the checkpoint whenever the fetched window was incomplete:
+            # either a post failed to download, or pagination hit the page cap
+            # with more pages still available. The newest-first early-stop
+            # would otherwise advance the boundary past a never-stored post and
+            # skip it forever; instead the next cycle re-scans this window (f2
+            # overwrites already-fetched posts idempotently) and retries. This
+            # is the "advance only after a successful run" contract this
+            # method's docstring promises.
             logger.warning(
-                "watch: holding checkpoint after partial post download",
+                "watch: holding checkpoint after incomplete post run",
                 extra={
                     "subscription_id": record.subscription_id,
                     "new_count": result.new_count,
                     "failed_count": result.failed_count,
+                    "truncated": result.truncated,
                 },
             )
             return

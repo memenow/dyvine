@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import aiohttp
+import httpx
 
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -72,7 +72,7 @@ class DyvineBatchDownloader:
         self.headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
 
     async def _submit_download(
-        self, session: aiohttp.ClientSession, user_id: str
+        self, session: httpx.AsyncClient, user_id: str
     ) -> DownloadJob:
         if self.include_likes:
             url = (
@@ -83,29 +83,25 @@ class DyvineBatchDownloader:
             url = f"{self.api_url}/api/v1/posts/users/{user_id}/posts:download"
 
         try:
-            async with session.post(
-                url, headers=self.headers, timeout=self.timeout
-            ) as resp:
-                data = await resp.json()
-                if resp.status == 202:
-                    job = DownloadJob(
-                        user_id=user_id,
-                        operation_id=data.get("operation_id"),
-                        status="submitted",
-                        message=data.get("message", "Download scheduled"),
-                    )
-                    print(
-                        f"  [已提交] 用户 {user_id} -> operation_id: {job.operation_id}"
-                    )
-                    return job
-                else:
-                    return DownloadJob(
-                        user_id=user_id,
-                        status="failed",
-                        message=data.get("message", f"HTTP {resp.status}"),
-                        error_details=str(data),
-                    )
-        except TimeoutError:
+            resp = await session.post(url, headers=self.headers, timeout=self.timeout)
+            data = resp.json()
+            if resp.status_code == 202:
+                job = DownloadJob(
+                    user_id=user_id,
+                    operation_id=data.get("operation_id"),
+                    status="submitted",
+                    message=data.get("message", "Download scheduled"),
+                )
+                print(f"  [已提交] 用户 {user_id} -> operation_id: {job.operation_id}")
+                return job
+            else:
+                return DownloadJob(
+                    user_id=user_id,
+                    status="failed",
+                    message=data.get("message", f"HTTP {resp.status_code}"),
+                    error_details=str(data),
+                )
+        except (httpx.TimeoutException, TimeoutError):
             return DownloadJob(
                 user_id=user_id,
                 status="failed",
@@ -121,7 +117,7 @@ class DyvineBatchDownloader:
             )
 
     async def _poll_status(
-        self, session: aiohttp.ClientSession, job: DownloadJob
+        self, session: httpx.AsyncClient, job: DownloadJob
     ) -> DownloadJob:
         if self.include_likes:
             url = f"{self.api_url}/api/v1/users/operations/{job.operation_id}"
@@ -129,28 +125,37 @@ class DyvineBatchDownloader:
             url = f"{self.api_url}/api/v1/posts/operations/{job.operation_id}"
 
         try:
-            async with session.get(
-                url, headers=self.headers, timeout=self.timeout
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    job.status = data.get("status", "unknown")
-                    job.message = data.get("message", "")
+            resp = await session.get(url, headers=self.headers, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                job.status = data.get("status", "unknown")
+                job.message = data.get("message", "")
+                if self.include_likes:
+                    # The likes path polls /users/operations/{id}, which returns
+                    # the generic OperationResponse (total_items / completed_items,
+                    # progress in 0-100, no per-post failed count). Map those onto
+                    # the job's bulk-style counters so progress is not stuck at 0/0.
+                    job.progress = data.get("progress", 0.0) / 100
+                    job.total_posts = data.get("total_items", 0) or 0
+                    job.total_downloaded = data.get("completed_items", 0) or 0
+                    job.failed_count = 0
+                    job.error_details = data.get("error")
+                else:
                     job.progress = data.get("progress", 0.0)
                     job.total_posts = data.get("total_posts", 0)
                     job.total_downloaded = data.get("total_downloaded", 0)
                     job.failed_count = data.get("failed_count", 0)
                     job.error_details = data.get("error_details")
 
-                    if job.status in ("completed", "failed", "partial"):
-                        job.completed_at = time.time()
-                elif resp.status == 404:
-                    job.status = "not_found"
-                    job.message = "任务未找到"
+                if job.status in ("completed", "failed", "partial"):
                     job.completed_at = time.time()
-                else:
-                    job.message = f"轮询 HTTP {resp.status}"
-        except TimeoutError:
+            elif resp.status_code == 404:
+                job.status = "not_found"
+                job.message = "任务未找到"
+                job.completed_at = time.time()
+            else:
+                job.message = f"轮询 HTTP {resp.status_code}"
+        except (httpx.TimeoutException, TimeoutError):
             job.message = "轮询超时"
         except Exception as e:
             job.message = f"轮询异常: {e}"
@@ -168,12 +173,10 @@ class DyvineBatchDownloader:
         print(f"{'='*60}\n")
 
         jobs: list[DownloadJob] = []
-        connector = aiohttp.TCPConnector(limit=self.max_concurrent * 2)
-        timeout = aiohttp.ClientTimeout(total=self.timeout)
+        limits = httpx.Limits(max_connections=self.max_concurrent * 2)
+        timeout = httpx.Timeout(self.timeout)
 
-        async with aiohttp.ClientSession(
-            connector=connector, timeout=timeout
-        ) as session:
+        async with httpx.AsyncClient(limits=limits, timeout=timeout) as session:
             print("[阶段 1/2] 提交下载任务...")
             semaphore = asyncio.Semaphore(self.max_concurrent)
 
@@ -387,7 +390,7 @@ def main() -> None:
     user_ids = read_user_ids(args.input_file)
 
     downloader = DyvineBatchDownloader(
-        api_url=args.api_url,
+        api_url=api_url,
         api_key=api_key,
         include_likes=args.include_likes,
         max_concurrent=args.max_concurrent,

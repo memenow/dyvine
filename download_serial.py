@@ -6,16 +6,28 @@ import sys
 import time
 from pathlib import Path
 
-import requests
+import httpx
 
-API_URL = os.environ.get("DYVINE_API_URL", "http://localhost:8000")
 
-dotenv = {}
-for line in Path(".env").read_text().splitlines():
-    line = line.strip()
-    if line and not line.startswith("#") and "=" in line:
-        k, v = line.split("=", 1)
-        dotenv[k.strip()] = v.strip().strip("\"'")
+def _load_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip("\"'")
+    return env
+
+
+dotenv = _load_env_file(Path(".env"))
+
+API_URL = os.environ.get("DYVINE_API_URL") or "http://localhost:8000"
+if API_URL == "http://localhost:8000" and dotenv.get("API_HOST"):
+    host = dotenv.get("API_HOST", "0.0.0.0")
+    port = dotenv.get("API_PORT", "8000")
+    API_URL = f"http://{host}:{port}"
 
 API_KEY = os.environ.get("DYVINE_API_KEY") or dotenv.get("SECURITY_API_KEY", "")
 HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
@@ -23,13 +35,13 @@ HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
 
 def submit(user_id: str) -> dict:
     url = f"{API_URL}/api/v1/posts/users/{user_id}/posts:download"
-    r = requests.post(url, headers=HEADERS, timeout=30)
+    r = httpx.post(url, headers=HEADERS, timeout=30)
     return r.json()
 
 
 def poll(operation_id: str) -> dict:
     url = f"{API_URL}/api/v1/posts/operations/{operation_id}"
-    r = requests.get(url, headers=HEADERS, timeout=30)
+    r = httpx.get(url, headers=HEADERS, timeout=30)
     return r.json()
 
 

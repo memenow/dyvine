@@ -374,3 +374,81 @@ async def test_delete_subscription_serialises_under_create_lock(
 
     await asyncio.wait_for(delete_task, timeout=1.0)
     assert await service.watch_store.get_subscription_by_user("user01") is None
+
+
+async def test_do_post_check_holds_checkpoint_on_truncation(
+    tmp_path: Path,
+) -> None:
+    """A truncated run (page cap hit) must NOT advance the checkpoint.
+
+    Advancing would make the next newest-first scan stop at this run's newest
+    post and skip every post past the cap permanently.
+    """
+    service, _, post = _make_service(tmp_path)
+    post.download_new_posts.return_value = IncrementalDownloadResult(
+        operation_id="op",
+        new_count=2,
+        newest_aweme_id="200",
+        seen_aweme_ids=["200", "199"],
+        failed_count=0,
+        truncated=True,
+    )
+    record = await service.watch_store.create_subscription(
+        user_id="user01",
+        live_poll_seconds=300,
+        post_poll_seconds=600,
+        checkpoint={
+            "newest_aweme_id": "100",
+            "recent_aweme_ids": ["100"],
+            "first_run_complete": True,
+        },
+    )
+
+    await service._do_post_check(record)
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.checkpoint["newest_aweme_id"] == "100"
+    assert updated.checkpoint["recent_aweme_ids"] == ["100"]
+    assert updated.last_post_check is not None
+
+
+async def test_create_subscription_existing_skips_baseline_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A repeat non-backfill create returns the existing row without snapshotting.
+
+    The pre-lock existence check means a transient profile/upstream failure
+    during the baseline snapshot cannot turn an idempotent retry into an error.
+    """
+    service, _, post = _make_service(tmp_path)
+    service._start_loop = MagicMock()  # type: ignore[method-assign]
+    post.get_user_posts.return_value = UserPostsPage(
+        posts=[
+            PostDetail(
+                aweme_id="9",
+                desc="",
+                create_time=0,
+                post_type=PostType.VIDEO,
+                video_info=None,
+                images=None,
+                statistics={},
+            )
+        ],
+        next_cursor=None,
+        has_more=False,
+    )
+
+    rec1, created1 = await service.create_subscription(
+        user_id="user01", backfill_on_create=False
+    )
+    assert created1 is True
+    assert post.get_user_posts.await_count == 1  # baseline snapshot for the new row
+
+    # A second non-backfill create must short-circuit BEFORE snapshotting again.
+    post.get_user_posts.side_effect = AssertionError("must not snapshot again")
+    rec2, created2 = await service.create_subscription(
+        user_id="user01", backfill_on_create=False
+    )
+    assert created2 is False
+    assert rec2.subscription_id == rec1.subscription_id
+    assert post.get_user_posts.await_count == 1  # unchanged: no second snapshot

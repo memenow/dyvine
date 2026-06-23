@@ -102,6 +102,10 @@ class IncrementalDownloadResult:
     newest_aweme_id: str | None
     seen_aweme_ids: list[str]
     failed_count: int
+    # True when pagination stopped at the MAX_PAGES_FALLBACK cap with more
+    # pages still available. The caller must NOT advance its checkpoint on a
+    # truncated run or it would skip every post past the cap permanently.
+    truncated: bool = False
 
 
 class PostService:
@@ -717,18 +721,23 @@ class PostService:
         )
 
     async def get_bulk_download_status(self, operation_id: str) -> BulkDownloadResponse:
-        """Get the current status of a bulk download operation.
+        """Get the current status of a bulk or incremental download operation.
+
+        Both the user-triggered bulk loop and the watch-mode incremental loop
+        persist their progress as operation rows, so this endpoint serves
+        either type and watch-created downloads remain observable through the
+        existing polling route.
 
         Args:
-            operation_id: The unique identifier of the bulk download operation.
+            operation_id: The unique identifier of the download operation.
 
         Returns:
             BulkDownloadResponse: Snapshot of the operation including the
                 per-PostType counts persisted in the operation metadata.
 
         Raises:
-            OperationNotFoundError: If no bulk download operation matches the
-                provided identifier.
+            OperationNotFoundError: If no bulk or incremental download
+                operation matches the provided identifier.
         """
         # ``OperationStore.get_operation`` already raises
         # ``OperationNotFoundError`` with a descriptive message when the
@@ -736,8 +745,11 @@ class PostService:
         # original ``error_code`` and ``details``.
         op = await self.operation_store.get_operation(operation_id)
 
-        if op.operation_type != "user_posts_bulk_download":
-            raise OperationNotFoundError(f"Bulk download task {operation_id} not found")
+        if op.operation_type not in (
+            "user_posts_bulk_download",
+            "user_posts_incremental_download",
+        ):
+            raise OperationNotFoundError(f"Download task {operation_id} not found")
 
         download_stats = _deserialize_download_stats(op.metadata)
         total_posts = int(op.total_items or op.metadata.get("total_posts") or 0)
@@ -837,7 +849,7 @@ class PostService:
                 )
             download_path = relative_to_download_root(user_path)
 
-            new_aweme_ids, failed_count = await self._collect_new_posts(
+            new_aweme_ids, failed_count, truncated = await self._collect_new_posts(
                 sec_user_id,
                 user_path,
                 known=known,
@@ -879,10 +891,14 @@ class PostService:
 
         new_count = len(new_aweme_ids)
         newest_aweme_id = new_aweme_ids[0] if new_aweme_ids else None
-        final_status = "partial" if failed_count else "completed"
+        # A truncated run is incomplete, so report it as "partial" rather than a
+        # clean, exhaustive pass.
+        final_status = "partial" if (failed_count or truncated) else "completed"
         message = (
             f"Downloaded {new_count} new post(s)" if new_count else "No new posts found"
         )
+        if truncated:
+            message += " (page cap reached; older posts not fetched this run)"
         await self.operation_store.update_operation(
             operation_id,
             status=final_status,
@@ -895,6 +911,7 @@ class PostService:
                 "subscription_id": subscription_id,
                 "new_count": new_count,
                 "failed_count": failed_count,
+                "truncated": truncated,
                 "newest_aweme_id": newest_aweme_id,
                 "download_path": download_path,
             },
@@ -906,6 +923,7 @@ class PostService:
             newest_aweme_id=newest_aweme_id,
             seen_aweme_ids=new_aweme_ids,
             failed_count=failed_count,
+            truncated=truncated,
         )
 
     async def _collect_new_posts(
@@ -915,11 +933,13 @@ class PostService:
         *,
         known: set[str],
         since_aweme_id: str | None,
-    ) -> tuple[list[str], int]:
+    ) -> tuple[list[str], int, bool]:
         """Paginate newest-first and download posts until a known id appears.
 
-        Returns the newly downloaded aweme_ids (newest first) and the count
-        of posts that failed to download. Stops at the first post whose
+        Returns the newly downloaded aweme_ids (newest first), the count of
+        posts that failed to download, and a truncation flag that is True when
+        pagination hit ``MAX_PAGES_FALLBACK`` with more pages still available.
+        Stops at the first post whose
         ``aweme_id`` is in ``known`` or equals ``since_aweme_id``; the
         upstream feed is newest-first, so that boundary marks
         previously-seen territory. ``MAX_PAGES_FALLBACK`` bounds a first run
@@ -929,6 +949,7 @@ class PostService:
         failed_count = 0
         current_cursor = 0
         page_count = 0
+        truncated = False
 
         while page_count < MAX_PAGES_FALLBACK:
             page_count += 1
@@ -970,8 +991,10 @@ class PostService:
         else:
             # Loop exhausted MAX_PAGES_FALLBACK without breaking, so the feed
             # still advertised more pages: posts beyond the cap were not
-            # fetched this run. Surface it like the bulk loop instead of
-            # truncating silently (the checkpoint will only cover what we saw).
+            # fetched this run. Signal truncation so the caller holds its
+            # checkpoint -- advancing it would stop the next newest-first scan
+            # at this run's newest post and skip every post past the cap.
+            truncated = True
             logger.warning(
                 "Incremental download hit max page fallback; posts beyond the "
                 "cap were not fetched this run",
@@ -982,7 +1005,7 @@ class PostService:
                 },
             )
 
-        return new_aweme_ids, failed_count
+        return new_aweme_ids, failed_count, truncated
 
     async def _fetch_posts_batch(
         self,
