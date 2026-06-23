@@ -191,11 +191,14 @@ class WatchService:
         Raises:
             WatchSubscriptionNotFoundError: If no subscription matches.
         """
-        # Validate existence first so an unknown id surfaces as 404 before we
-        # touch the loop registry.
-        await self.watch_store.get_subscription(subscription_id)
-        await self._cancel_loop(subscription_id)
-        await self.watch_store.delete_subscription(subscription_id)
+        # Serialise with create_subscription under the same lock so a
+        # concurrent POST for this user cannot observe (and re-arm) a row that
+        # this delete is removing. Validate existence first so an unknown id
+        # surfaces as 404 before we touch the loop registry.
+        async with self._get_lock():
+            await self.watch_store.get_subscription(subscription_id)
+            await self._cancel_loop(subscription_id)
+            await self.watch_store.delete_subscription(subscription_id)
         logger.info(
             "watch subscription deleted", extra={"subscription_id": subscription_id}
         )
@@ -402,6 +405,24 @@ class WatchService:
                 "watch post check failed",
                 extra={"subscription_id": record.subscription_id},
                 exc_info=True,
+            )
+            return
+
+        if result.failed_count:
+            # Hold the checkpoint whenever any post in the freshly-fetched
+            # window failed to download. The newest-first early-stop would
+            # otherwise advance the boundary past a never-stored post and skip
+            # it forever; instead the next cycle re-scans this window (f2
+            # overwrites already-fetched posts idempotently) and retries the
+            # failures. This is the "advanced only after a successful run"
+            # contract this method's docstring promises.
+            logger.warning(
+                "watch: holding checkpoint after partial post download",
+                extra={
+                    "subscription_id": record.subscription_id,
+                    "new_count": result.new_count,
+                    "failed_count": result.failed_count,
+                },
             )
             return
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException
 
@@ -195,3 +197,59 @@ async def test_service_container_exposes_post_service(
     fetched = await container.operation_store.get_operation(operation.operation_id)
     assert fetched.operation_id == operation.operation_id
     assert dependencies.get_post_service.__name__ == "get_post_service"
+
+
+@pytest.mark.asyncio
+async def test_service_container_survives_watch_resume_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A watch resume failure must not abort startup (watch is non-critical)."""
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
+    monkeypatch.setattr(
+        dependencies.settings.api,
+        "operation_db_path",
+        str(tmp_path / "operations.db"),
+    )
+    monkeypatch.setattr(
+        dependencies.WatchService,
+        "resume_persisted",
+        AsyncMock(side_effect=RuntimeError("resume boom")),
+    )
+
+    container = dependencies.ServiceContainer()
+    await container.initialize()  # must not raise despite the resume failure
+
+    # The container still came up; non-watch services remain usable.
+    assert container._initialized is True
+    assert isinstance(container.post_service, dependencies.PostService)
+    await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_survives_watch_store_init_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A watch-store construction failure leaves the rest of startup intact."""
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
+    monkeypatch.setattr(
+        dependencies.settings.api,
+        "operation_db_path",
+        str(tmp_path / "operations.db"),
+    )
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("watch store boom")
+
+    monkeypatch.setattr(dependencies, "WatchSubscriptionStore", _boom)
+
+    container = dependencies.ServiceContainer()
+    await container.initialize()  # must not raise or leak the executors above
+
+    assert container._initialized is True
+    assert isinstance(container.post_service, dependencies.PostService)
+    assert container._watch_store is None
+    await container.shutdown()  # clean teardown even without a watch store

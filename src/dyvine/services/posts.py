@@ -28,6 +28,8 @@ when downloads already succeeded) rather than silently passing as
 ``completed``.
 """
 
+import asyncio
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -841,6 +843,19 @@ class PostService:
                 known=known,
                 since_aweme_id=since_aweme_id,
             )
+        except asyncio.CancelledError:
+            # The watch loop was cancelled (DELETE or shutdown) mid-download.
+            # Mark the row terminal so it does not linger as "running" until
+            # the next boot sweep, then propagate the cancellation. The write
+            # is best-effort: a second cancellation must not mask the re-raise.
+            with contextlib.suppress(Exception):
+                await self.operation_store.update_operation(
+                    operation_id,
+                    status="failed",
+                    message="Incremental download cancelled",
+                    error="cancelled",
+                )
+            raise
         except UserNotFoundError as e:
             await self.operation_store.update_operation(
                 operation_id,
@@ -952,6 +967,20 @@ class PostService:
             if not has_more or not next_cursor or next_cursor == current_cursor:
                 break
             current_cursor = next_cursor
+        else:
+            # Loop exhausted MAX_PAGES_FALLBACK without breaking, so the feed
+            # still advertised more pages: posts beyond the cap were not
+            # fetched this run. Surface it like the bulk loop instead of
+            # truncating silently (the checkpoint will only cover what we saw).
+            logger.warning(
+                "Incremental download hit max page fallback; posts beyond the "
+                "cap were not fetched this run",
+                extra={
+                    "sec_user_id": sec_user_id,
+                    "max_pages": MAX_PAGES_FALLBACK,
+                    "downloaded": len(new_aweme_ids),
+                },
+            )
 
         return new_aweme_ids, failed_count
 

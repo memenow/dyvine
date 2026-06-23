@@ -308,3 +308,69 @@ async def test_do_post_check_keeps_checkpoint_on_service_error(
 
     updated = await service.watch_store.get_subscription(record.subscription_id)
     assert updated.checkpoint["newest_aweme_id"] == "100"
+
+
+async def test_do_post_check_holds_checkpoint_on_partial_failure(
+    tmp_path: Path,
+) -> None:
+    """Any failed download in the window must NOT advance the checkpoint.
+
+    Advancing past a post that was downloaded while an older sibling failed
+    would make the newest-first early-stop skip the failure forever; holding
+    the boundary lets the next cycle re-scan and retry it.
+    """
+    service, _, post = _make_service(tmp_path)
+    post.download_new_posts.return_value = IncrementalDownloadResult(
+        operation_id="op",
+        new_count=1,
+        newest_aweme_id="200",
+        seen_aweme_ids=["200"],
+        failed_count=1,
+    )
+    record = await service.watch_store.create_subscription(
+        user_id="user01",
+        live_poll_seconds=300,
+        post_poll_seconds=600,
+        checkpoint={
+            "newest_aweme_id": "100",
+            "recent_aweme_ids": ["100"],
+            "first_run_complete": True,
+        },
+    )
+
+    await service._do_post_check(record)
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    # Boundary held at the prior value despite a "new" post being reported.
+    assert updated.checkpoint["newest_aweme_id"] == "100"
+    assert updated.checkpoint["recent_aweme_ids"] == ["100"]
+    # The check itself still happened, only the checkpoint advance is withheld.
+    assert updated.last_post_check is not None
+
+
+async def test_delete_subscription_serialises_under_create_lock(
+    tmp_path: Path,
+) -> None:
+    """Delete takes the same lock as create, so the two cannot interleave."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+    )
+
+    lock = service._get_lock()
+    await lock.acquire()
+    try:
+        delete_task = asyncio.create_task(
+            service.delete_subscription(record.subscription_id)
+        )
+        await asyncio.sleep(0.02)
+        # While we hold the lock, delete must be parked rather than finished.
+        assert not delete_task.done()
+        assert await service.watch_store.get_subscription_by_user("user01") is not None
+    finally:
+        lock.release()
+
+    await asyncio.wait_for(delete_task, timeout=1.0)
+    assert await service.watch_store.get_subscription_by_user("user01") is None
