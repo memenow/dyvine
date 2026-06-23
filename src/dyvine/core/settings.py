@@ -306,6 +306,76 @@ class DouyinSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="DOUYIN_")
 
 
+class WatchSettings(BaseSettings):
+    """Watch-mode scheduler configuration settings.
+
+    Controls the in-process watcher that polls subscribed Douyin users
+    and auto-downloads new posts and livestreams. Every interval is a
+    configurable default; per-subscription overrides supplied through the
+    ``/watch`` API are validated against the same bounds.
+
+    Attributes:
+        live_poll_seconds: Default cadence for live-status checks. The
+            60-second floor keeps aggressive polling from tripping
+            Douyin's rate limiting / cookie risk controls.
+        post_poll_seconds: Default cadence for new-post checks, kept much
+            longer than the live cadence because posts are durable.
+        recent_id_cap: Upper bound on the per-subscription ``aweme_id``
+            dedupe set persisted in the checkpoint so the JSON blob stays
+            small.
+        max_subscriptions: Guardrail on the number of concurrent watch
+            subscriptions; ``POST /watch`` is rejected past this count.
+        backfill_on_create: Whether a brand-new subscription downloads
+            the user's existing posts once before switching to
+            incremental-only mode.
+
+    Environment Variables:
+        DOUYIN_WATCH_LIVE_POLL_SECONDS, DOUYIN_WATCH_POST_POLL_SECONDS,
+        DOUYIN_WATCH_RECENT_ID_CAP, DOUYIN_WATCH_MAX_SUBSCRIPTIONS,
+        DOUYIN_WATCH_BACKFILL_ON_CREATE.
+
+    Note:
+        ``DOUYIN_WATCH_`` is a distinct prefix from ``DouyinSettings``'
+        ``DOUYIN_`` prefix. Pydantic resolves each settings class against
+        its own declared field names, so the two never collide as long as
+        ``DouyinSettings`` declares no ``watch_*`` field.
+    """
+
+    live_poll_seconds: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description="Default seconds between live-status checks (60s floor).",
+    )
+    post_poll_seconds: int = Field(
+        default=2700,
+        ge=300,
+        le=86400,
+        description="Default seconds between new-post checks.",
+    )
+    recent_id_cap: int = Field(
+        default=200,
+        ge=20,
+        le=2000,
+        description="Max aweme_id values kept in the per-subscription dedupe set.",
+    )
+    max_subscriptions: int = Field(
+        default=50,
+        ge=1,
+        le=10000,
+        description="Maximum number of concurrent watch subscriptions.",
+    )
+    backfill_on_create: bool = Field(
+        default=False,
+        description=(
+            "Download a user's existing posts once when a subscription is "
+            "created, instead of only fetching posts published afterwards."
+        ),
+    )
+
+    model_config = SettingsConfigDict(env_prefix="DOUYIN_WATCH_")
+
+
 class Settings(BaseSettings):
     """Composite settings container with nested configuration groups.
 
@@ -348,6 +418,7 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     r2: R2Settings = Field(default_factory=R2Settings)
     douyin: DouyinSettings = Field(default_factory=DouyinSettings)
+    watch: WatchSettings = Field(default_factory=WatchSettings)
 
     @model_validator(mode="after")
     def _validate_security_in_production(self) -> Self:

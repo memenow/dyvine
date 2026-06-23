@@ -46,9 +46,11 @@ from fastapi import Header, HTTPException, status
 from ..services.livestreams import LivestreamService
 from ..services.posts import PostService
 from ..services.users import UserService
+from ..services.watch import WatchService
 from .background import BackgroundTaskRegistry
 from .operations import OperationStore
 from .settings import settings
+from .watch_store import WatchSubscriptionStore
 
 # Dedicated thread pool sizes per IO domain. The defaults are tuned for the
 # single-worker uvicorn deployment: R2 uploads are the dominant long-running
@@ -111,6 +113,10 @@ class ServiceContainer:
         # of bare ``asyncio.create_task`` so the lifespan can drain them
         # before the executor pools are reaped.
         self._background_tasks = BackgroundTaskRegistry()
+        # Watch subscriptions persist in their own SQLite table (sharing the
+        # operation database and sqlite executor) so the operation store's
+        # restart sweep never fails a long-lived subscription row.
+        self._watch_store: WatchSubscriptionStore | None = None
 
     async def initialize(self) -> None:
         """Initialize all registered services with their configurations.
@@ -208,7 +214,24 @@ class ServiceContainer:
             task_registry=self._background_tasks,
         )
 
+        # Initialize the watch scheduler. It shares the sqlite executor and
+        # the background-task registry so its watcher loops drain on
+        # shutdown like every other long-lived download task.
+        watch_store = WatchSubscriptionStore(executor=self._sqlite_executor)
+        self._watch_store = watch_store
+        self._services["watch_service"] = WatchService(
+            watch_store=watch_store,
+            livestream_service=self._services["livestream_service"],
+            post_service=self._services["post_service"],
+            task_registry=self._background_tasks,
+        )
+
         self._initialized = True
+
+        # Re-arm watcher loops for persisted subscriptions only after the
+        # container is marked ready, since resume schedules tasks that may
+        # resolve services back through the container.
+        await self._services["watch_service"].resume_persisted()
 
     async def shutdown(self) -> None:
         """Release services and tear down the dedicated executor pools.
@@ -226,6 +249,12 @@ class ServiceContainer:
         if not self._initialized:
             return
 
+        # Stop watcher loops first so they cannot schedule new downloads
+        # while the background-task registry is being drained.
+        watch_service = self._services.get("watch_service")
+        if isinstance(watch_service, WatchService):
+            await watch_service.stop_all()
+
         # Drain fire-and-forget downloads before tearing down the executor
         # pools they dispatch onto. Any task still running after the
         # registry's drain timeout is cancelled so the shutdown cannot hang
@@ -237,6 +266,12 @@ class ServiceContainer:
         operation_store = self._services.get("operation_store")
         if isinstance(operation_store, OperationStore):
             operation_store.shutdown()
+
+        # Close the watch store's connections before the sqlite executor that
+        # owns its worker threads is reaped below.
+        if self._watch_store is not None:
+            self._watch_store.shutdown()
+            self._watch_store = None
 
         # Reverse of init order. The R2 head pool is drained first so any
         # ``list_objects`` follow-up still has a working main pool to
@@ -362,6 +397,14 @@ class ServiceContainer:
             raise TypeError("post_service is not a PostService instance")
         return service
 
+    @property
+    def watch_service(self) -> WatchService:
+        """Get the watch scheduler service."""
+        service = self.get_service("watch_service")
+        if not isinstance(service, WatchService):
+            raise TypeError("watch_service is not a WatchService instance")
+        return service
+
 
 @lru_cache
 def get_service_container() -> ServiceContainer:
@@ -442,6 +485,11 @@ def get_post_service() -> PostService:
     ``Annotated[PostService, Depends(get_post_service)]``.
     """
     return get_service_container().post_service
+
+
+def get_watch_service() -> WatchService:
+    """FastAPI dependency provider for the watch scheduler service."""
+    return get_service_container().watch_service
 
 
 def require_api_key(

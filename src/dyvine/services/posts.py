@@ -85,6 +85,23 @@ class UserPostsPage:
     has_more: bool
 
 
+@dataclass(slots=True)
+class IncrementalDownloadResult:
+    """Outcome of an incremental new-post download for a watch cycle.
+
+    ``seen_aweme_ids`` lists the posts downloaded this run, newest first,
+    so a watch loop can fold them into its dedupe checkpoint.
+    ``newest_aweme_id`` is the first of that list (or ``None`` when nothing
+    new was found, in which case the caller keeps its existing sentinel).
+    """
+
+    operation_id: str
+    new_count: int
+    newest_aweme_id: str | None
+    seen_aweme_ids: list[str]
+    failed_count: int
+
+
 class PostService:
     """Domain logic for individual posts and bulk-download operations.
 
@@ -746,6 +763,197 @@ class PostService:
             message=message,
             error_details=op.error,
         )
+
+    async def download_new_posts(
+        self,
+        sec_user_id: str,
+        *,
+        since_aweme_id: str | None = None,
+        known_aweme_ids: set[str] | None = None,
+        subscription_id: str | None = None,
+    ) -> IncrementalDownloadResult:
+        """Download only the posts newer than the caller's checkpoint.
+
+        Unlike :meth:`start_bulk_download` (fire-and-forget), this coroutine
+        runs the incremental pagination + download inline and returns once
+        finished, so a watch loop can persist an updated checkpoint from the
+        result. Pagination walks newest-first and stops at the first post
+        whose ``aweme_id`` is already known, so a steady-state run exits
+        after one or two pages.
+
+        An operation row of type ``user_posts_incremental_download`` is
+        created and advanced to a terminal state so the work is auditable
+        through the operation store. On failure the operation is marked
+        ``failed`` and the error is re-raised, so the caller does not
+        advance its checkpoint past posts that were never fetched.
+
+        Args:
+            sec_user_id: Unique identifier of the user.
+            since_aweme_id: Newest aweme_id downloaded on a previous run;
+                pagination stops when it reappears upstream.
+            known_aweme_ids: Recently-downloaded aweme_ids used as the
+                authoritative dedupe set (membership, not ordering).
+            subscription_id: Optional watch subscription id stamped into the
+                operation metadata for correlation.
+
+        Returns:
+            IncrementalDownloadResult: counts plus the newly downloaded
+                aweme_ids (newest first) for checkpoint maintenance.
+
+        Raises:
+            UserNotFoundError: If the user cannot be found.
+            PostServiceError: If the profile lookup or download loop fails.
+        """
+        known = set(known_aweme_ids or set())
+
+        try:
+            profile = await self.handler.fetch_user_profile(sec_user_id)
+        except UserNotFoundError:
+            raise
+        except Exception as e:
+            raise PostServiceError(f"Failed to validate user profile: {str(e)}") from e
+        if not profile or not getattr(profile, "nickname", None):
+            raise UserNotFoundError(f"User not found: {sec_user_id}")
+
+        operation = await self.operation_store.create_operation(
+            operation_type="user_posts_incremental_download",
+            subject_id=sec_user_id,
+            status="running",
+            message="Incremental download in progress",
+            progress=0.0,
+            metadata={"subscription_id": subscription_id} if subscription_id else {},
+        )
+        operation_id = operation.operation_id
+
+        try:
+            # Resolve (and create) the per-user download directory the same
+            # way the bulk loop does so incremental files land alongside any
+            # prior backfill instead of in a second location.
+            async with AsyncUserDB("douyin_users.db") as db:
+                user_path = await self.handler.get_or_add_user_data(
+                    self.handler.kwargs, sec_user_id, db
+                )
+            download_path = relative_to_download_root(user_path)
+
+            new_aweme_ids, failed_count = await self._collect_new_posts(
+                sec_user_id,
+                user_path,
+                known=known,
+                since_aweme_id=since_aweme_id,
+            )
+        except UserNotFoundError as e:
+            await self.operation_store.update_operation(
+                operation_id,
+                status="failed",
+                message="Incremental download failed",
+                error=str(e),
+            )
+            raise
+        except Exception as e:
+            logger.exception(
+                "Incremental download failed",
+                extra={"sec_user_id": sec_user_id, "operation_id": operation_id},
+            )
+            await self.operation_store.update_operation(
+                operation_id,
+                status="failed",
+                message="Incremental download failed",
+                error=str(e),
+            )
+            raise PostServiceError(f"Incremental download failed: {str(e)}") from e
+
+        new_count = len(new_aweme_ids)
+        newest_aweme_id = new_aweme_ids[0] if new_aweme_ids else None
+        final_status = "partial" if failed_count else "completed"
+        message = (
+            f"Downloaded {new_count} new post(s)" if new_count else "No new posts found"
+        )
+        await self.operation_store.update_operation(
+            operation_id,
+            status=final_status,
+            message=message,
+            progress=100.0,
+            total_items=new_count,
+            completed_items=new_count,
+            download_path=download_path,
+            metadata={
+                "subscription_id": subscription_id,
+                "new_count": new_count,
+                "failed_count": failed_count,
+                "newest_aweme_id": newest_aweme_id,
+                "download_path": download_path,
+            },
+        )
+
+        return IncrementalDownloadResult(
+            operation_id=operation_id,
+            new_count=new_count,
+            newest_aweme_id=newest_aweme_id,
+            seen_aweme_ids=new_aweme_ids,
+            failed_count=failed_count,
+        )
+
+    async def _collect_new_posts(
+        self,
+        sec_user_id: str,
+        user_path: Path,
+        *,
+        known: set[str],
+        since_aweme_id: str | None,
+    ) -> tuple[list[str], int]:
+        """Paginate newest-first and download posts until a known id appears.
+
+        Returns the newly downloaded aweme_ids (newest first) and the count
+        of posts that failed to download. Stops at the first post whose
+        ``aweme_id`` is in ``known`` or equals ``since_aweme_id``; the
+        upstream feed is newest-first, so that boundary marks
+        previously-seen territory. ``MAX_PAGES_FALLBACK`` bounds a first run
+        with an empty checkpoint so a misbehaving cursor cannot pin the loop.
+        """
+        new_aweme_ids: list[str] = []
+        failed_count = 0
+        current_cursor = 0
+        page_count = 0
+
+        while page_count < MAX_PAGES_FALLBACK:
+            page_count += 1
+            batch = await self._fetch_posts_batch(sec_user_id, current_cursor)
+            if not batch:
+                break
+            aweme_list = batch.get("aweme_list") or []
+            if not aweme_list:
+                break
+
+            reached_known = False
+            for post in aweme_list:
+                aweme_id = str(post.get("aweme_id") or "")
+                if aweme_id and (aweme_id in known or aweme_id == since_aweme_id):
+                    # Newest-first feed: the first already-known post marks
+                    # the start of previously-downloaded territory.
+                    reached_known = True
+                    break
+                try:
+                    post_type = self._determine_post_type(post)
+                    await self._download_post_content(post, post_type, user_path)
+                    if aweme_id:
+                        new_aweme_ids.append(aweme_id)
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(
+                        "Error downloading incremental post",
+                        extra={"aweme_id": post.get("aweme_id"), "error": str(e)},
+                    )
+
+            if reached_known:
+                break
+
+            has_more = batch.get("has_more", False)
+            next_cursor = batch.get("max_cursor", 0)
+            if not has_more or not next_cursor or next_cursor == current_cursor:
+                break
+            current_cursor = next_cursor
+
+        return new_aweme_ids, failed_count
 
     async def _fetch_posts_batch(
         self,
