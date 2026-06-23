@@ -21,6 +21,8 @@ Architecture diagrams are available in
   traversal and symlink-segment checks.
 - Optional Cloudflare R2 archival supports uploads, metadata lookup, listing,
   and deletes.
+- Watch Mode automatically monitors subscribed Douyin users and downloads their
+  new posts and livestreams on configurable polling cadences.
 - Operational surfaces include `/livez`, `/readyz`, `/startupz`, `/health`, and
   `/metrics`.
 
@@ -72,6 +74,7 @@ Configuration is environment-driven through `dyvine.core.settings`:
 | `API_` | Server bind settings, CORS, API prefix, operation DB path |
 | `SECURITY_` | Secret key, API key, and router auth gate |
 | `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode |
+| `DOUYIN_WATCH_` | Watch Mode polling cadences, subscription cap, dedupe window, backfill flag |
 | `R2_` | Cloudflare R2 account, key, bucket, and endpoint |
 
 `API_DEBUG=false` rejects placeholder production secrets. R2 is optional: by
@@ -122,14 +125,34 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
   "http://localhost:8000/api/v1/posts/operations/OPERATION_ID"
 ```
 
+Create a Watch Mode subscription to auto-download a user's new posts and
+livestreams:
+
+```bash
+# Create a subscription (201 for new, 200 when one already exists for that user)
+curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id": "SEC_USER_ID"}' \
+  "http://localhost:8000/api/v1/watch"
+
+# List all subscriptions
+curl -H "X-API-Key: $SECURITY_API_KEY" \
+  "http://localhost:8000/api/v1/watch"
+
+# Delete a subscription (stop future checks; any recording already in progress
+# runs to completion in its own background task)
+curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
+  "http://localhost:8000/api/v1/watch/SUBSCRIPTION_ID"
+```
+
 ## Project Structure
 
 | Path | Purpose |
 | --- | --- |
 | `src/dyvine/main.py` | FastAPI app, middleware, routers, probes, metrics |
 | `src/dyvine/core/` | Settings, logging, dependency container, operation store, path safety |
-| `src/dyvine/routers/` | User, post, and livestream HTTP endpoints |
-| `src/dyvine/services/` | Douyin SDK orchestration, background work, R2 storage |
+| `src/dyvine/routers/` | User, post, livestream, and watch HTTP endpoints |
+| `src/dyvine/services/` | Douyin SDK orchestration, background work, R2 storage, watch scheduling |
 | `src/dyvine/schemas/` | Pydantic request and response models |
 | `tests/` | Pytest suite mirroring the source tree |
 | `docs/` | Static HTML project documentation and Mermaid architecture diagrams |

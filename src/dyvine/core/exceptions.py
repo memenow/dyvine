@@ -5,7 +5,8 @@ Every service-layer failure raises a subclass of `DyvineError`. The
 each subclass to an HTTP status code:
 
 - `NotFoundError` (and friends: `UserNotFoundError`, `PostNotFoundError`,
-  `LivestreamNotFoundError`, `OperationNotFoundError`) -> `404`.
+  `LivestreamNotFoundError`, `OperationNotFoundError`,
+  `WatchSubscriptionNotFoundError`) -> `404`.
 - `AuthenticationError` -> `401`.
 - `RateLimitError` -> `429`.
 - `ValidationError` -> `422`.
@@ -68,6 +69,12 @@ class LivestreamNotFoundError(NotFoundError):
 
 class OperationNotFoundError(NotFoundError):
     """Operation record not found in the persistent store."""
+
+    pass
+
+
+class WatchSubscriptionNotFoundError(NotFoundError):
+    """Watch subscription not found in the persistent store."""
 
     pass
 

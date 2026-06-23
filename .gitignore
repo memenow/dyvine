@@ -132,6 +132,10 @@ temp_downloads/
 *.tmp
 *.temp
 
+# Local batch-download input list (real IDs) and outputs; commit users.txt.example only
+users.txt
+saved_downloads/
+
 # Test data
 test/data/
 tests/fixtures/data/

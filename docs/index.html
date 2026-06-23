@@ -107,6 +107,7 @@
         <li><a href="#quick-start">Quick Start</a></li>
         <li><a href="#configuration">Configuration</a></li>
         <li><a href="#api-reference">API Reference</a></li>
+        <li><a href="#watch-mode">Watch Mode</a></li>
         <li><a href="#operations">Operations</a></li>
         <li><a href="#deployment">Deployment</a></li>
         <li><a href="#development">Development</a></li>
@@ -138,6 +139,7 @@
           <tr><td>Users</td><td>Profile lookup and bulk download of a user's posts or likes to R2.</td></tr>
           <tr><td>Posts</td><td>Per-post detail, paginated post listing, and bulk download of a user's posts.</td></tr>
           <tr><td>Livestreams</td><td>Active-room download by user ID or direct URL with deduplication.</td></tr>
+          <tr><td>Watch</td><td>Long-lived subscriptions that auto-download a user's new posts and record their livestreams on configurable polling cadences.</td></tr>
           <tr><td>System</td><td>Liveness, readiness, startup, health, and Prometheus metrics endpoints.</td></tr>
         </tbody>
       </table>
@@ -204,6 +206,24 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
         finished download is never discarded. Bound the retained workspace with
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
       </p>
+      <h3>Watch Mode configuration (<code>DOUYIN_WATCH_</code> prefix)</h3>
+      <p>
+        Watch Mode subscriptions are created through the <code>/api/v1/watch</code> API. The following
+        environment variables set the service-wide defaults; each variable can be overridden
+        per subscription when calling <code>POST /watch</code>.
+      </p>
+      <table>
+        <thead>
+          <tr><th>Variable</th><th>Default</th><th>Bounds</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>DOUYIN_WATCH_LIVE_POLL_SECONDS</code></td><td><code>300</code></td><td>60–3600</td><td>Seconds between live-status checks per subscription.</td></tr>
+          <tr><td><code>DOUYIN_WATCH_POST_POLL_SECONDS</code></td><td><code>2700</code></td><td>300–86400</td><td>Seconds between new-post checks per subscription.</td></tr>
+          <tr><td><code>DOUYIN_WATCH_RECENT_ID_CAP</code></td><td><code>200</code></td><td>20–2000</td><td>Maximum aweme_ids kept in each subscription's dedupe checkpoint.</td></tr>
+          <tr><td><code>DOUYIN_WATCH_MAX_SUBSCRIPTIONS</code></td><td><code>50</code></td><td>1–10000</td><td>Maximum number of concurrent watch subscriptions; <code>POST /watch</code> returns 429 when this cap is reached.</td></tr>
+          <tr><td><code>DOUYIN_WATCH_BACKFILL_ON_CREATE</code></td><td><code>false</code></td><td>—</td><td>When <code>true</code>, a new subscription downloads the user's existing posts once before switching to incremental-only mode.</td></tr>
+        </tbody>
+      </table>
     </section>
 
     <section id="api-reference">
@@ -246,6 +266,13 @@ POST /api/v1/livestreams/stream:download
 GET  /api/v1/livestreams/operations/{operation_id}</code></pre>
       <p>The URL endpoint validates the host against an allowlist of <code>*.douyin.com</code> domains to prevent SSRF.</p>
 
+      <h3>Watch</h3>
+      <pre><code>POST   /api/v1/watch
+GET    /api/v1/watch
+GET    /api/v1/watch/{subscription_id}
+DELETE /api/v1/watch/{subscription_id}</code></pre>
+      <p>See the <a href="#watch-mode">Watch Mode</a> section for full endpoint details.</p>
+
       <h3>Examples</h3>
       <pre><code>curl -H "X-API-Key: $SECURITY_API_KEY" \
      "http://localhost:8000/api/v1/users/USER_ID"
@@ -283,6 +310,121 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
         <code>completed</code>, <code>partial</code>, and <code>failed</code>. Bulk-download responses extend this
         shape with per-<code>PostType</code> counters and <code>failed_count</code>.
       </p>
+    </section>
+
+    <section id="watch-mode">
+      <h2>Watch Mode</h2>
+      <p>
+        Watch Mode turns Dyvine from a request-driven downloader into a monitor. Each
+        <em>subscription</em> targets one Douyin user and runs a long-lived
+        <code>asyncio</code> loop with two independent polling cadences: a
+        <em>live-status check</em> and a <em>new-post check</em>. When a live check
+        finds the user streaming, it delegates to <code>LivestreamService.download_stream</code>
+        (deduped by <code>room_id</code>). When a post check finds new content, it delegates
+        to <code>PostService.download_new_posts</code>. Both paths create normal operation
+        rows observable through the existing operation-polling endpoints.
+      </p>
+
+      <h3>Endpoints</h3>
+      <table>
+        <thead>
+          <tr><th>Method</th><th>Path</th><th>Status</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>POST</code></td>
+            <td><code>/api/v1/watch</code></td>
+            <td>201 / 200 / 429</td>
+            <td>
+              Create a subscription. Idempotent on <code>user_id</code>: returns 201 for
+              a new subscription and 200 when one already exists for that user. Returns 429
+              when the <code>DOUYIN_WATCH_MAX_SUBSCRIPTIONS</code> cap is reached.
+            </td>
+          </tr>
+          <tr>
+            <td><code>GET</code></td>
+            <td><code>/api/v1/watch</code></td>
+            <td>200</td>
+            <td>List all subscriptions. Response shape: <code>{"subscriptions": [...], "total": N}</code>.</td>
+          </tr>
+          <tr>
+            <td><code>GET</code></td>
+            <td><code>/api/v1/watch/{subscription_id}</code></td>
+            <td>200 / 404</td>
+            <td>Fetch one subscription by ID; 404 when unknown.</td>
+          </tr>
+          <tr>
+            <td><code>DELETE</code></td>
+            <td><code>/api/v1/watch/{subscription_id}</code></td>
+            <td>204 / 404</td>
+            <td>
+              Cancel the subscription's watcher loop and delete its record. A livestream
+              recording already in progress runs to completion in its own background
+              task; DELETE only stops <em>future</em> checks.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Request body (<code>POST /watch</code>)</h3>
+      <table>
+        <thead>
+          <tr><th>Field</th><th>Required</th><th>Bounds</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>user_id</code></td><td>Yes</td><td>6–128 alphanumeric/<code>_</code>/<code>-</code> chars</td><td>Douyin <code>sec_user_id</code> of the user to watch.</td></tr>
+          <tr><td><code>live_poll_seconds</code></td><td>No</td><td>60–3600</td><td>Seconds between live-status checks. Omit to use <code>DOUYIN_WATCH_LIVE_POLL_SECONDS</code>.</td></tr>
+          <tr><td><code>post_poll_seconds</code></td><td>No</td><td>300–86400</td><td>Seconds between new-post checks. Omit to use <code>DOUYIN_WATCH_POST_POLL_SECONDS</code>.</td></tr>
+          <tr><td><code>backfill_on_create</code></td><td>No</td><td>bool</td><td>Download the user's existing posts once on creation. Omit to use <code>DOUYIN_WATCH_BACKFILL_ON_CREATE</code> (default <code>false</code>).</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Subscription response fields</h3>
+      <table>
+        <thead>
+          <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>subscription_id</code></td><td>string</td><td>Unique subscription identifier.</td></tr>
+          <tr><td><code>user_id</code></td><td>string</td><td>Watched Douyin user identifier.</td></tr>
+          <tr><td><code>enabled</code></td><td>bool</td><td>Whether the watcher loop is active.</td></tr>
+          <tr><td><code>live_poll_seconds</code></td><td>int</td><td>Effective seconds between live-status checks.</td></tr>
+          <tr><td><code>post_poll_seconds</code></td><td>int</td><td>Effective seconds between new-post checks.</td></tr>
+          <tr><td><code>last_live_check</code></td><td>string | null</td><td>ISO 8601 timestamp of the last live-status check.</td></tr>
+          <tr><td><code>last_post_check</code></td><td>string | null</td><td>ISO 8601 timestamp of the last new-post check.</td></tr>
+          <tr><td><code>newest_aweme_id</code></td><td>string | null</td><td>Most recent downloaded aweme_id, surfaced from the checkpoint.</td></tr>
+          <tr><td><code>created_at</code></td><td>string</td><td>ISO 8601 creation timestamp.</td></tr>
+          <tr><td><code>updated_at</code></td><td>string</td><td>ISO 8601 last-update timestamp.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Behavior and invariants</h3>
+      <ul>
+        <li>Each cadence uses monotonic due-times with +/&#x2212;10% jitter so multiple subscriptions never hammer the upstream API in lockstep.</li>
+        <li>With <code>backfill_on_create=false</code> (the default), the service snapshots the user's current first page of posts at creation time. The first post check then stops pagination at that boundary and downloads only posts published afterward.</li>
+        <li>New-post deduplication is membership-based using a bounded recent-aweme_id set (capped by <code>DOUYIN_WATCH_RECENT_ID_CAP</code>). The checkpoint is only advanced after a successful run so an interrupted cycle re-downloads at most the most-recent window, which the f2 downloader overwrites idempotently.</li>
+        <li>A live check delegates to the existing livestream downloader; a live-status miss or an already-in-progress recording is silently skipped.</li>
+        <li>Each triggered download creates a regular operation row (<code>livestream_download</code> or <code>user_posts_incremental_download</code>) that can be polled through the existing operation endpoints.</li>
+        <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> SQLite table (sharing the operation database file) and all enabled subscriptions are re-armed automatically on startup.</li>
+        <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop is logged and resumed on next restart without pulling the pod out of rotation.</li>
+        <li><code>/health</code> reports an informational <code>watch_subscriptions</code> field showing the count of currently active watcher loops.</li>
+        <li>Watch Mode shares the single-replica constraint of the rest of the service: subscriptions are stored in pod-local SQLite.</li>
+      </ul>
+
+      <h3>Example</h3>
+      <pre><code># Create a subscription (new-posts-only mode)
+curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"user_id": "SEC_USER_ID", "live_poll_seconds": 300, "post_poll_seconds": 2700}' \
+     "http://localhost:8000/api/v1/watch"
+
+# List all subscriptions
+curl -H "X-API-Key: $SECURITY_API_KEY" \
+     "http://localhost:8000/api/v1/watch"
+
+# Delete a subscription
+curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
+     "http://localhost:8000/api/v1/watch/SUBSCRIPTION_ID"</code></pre>
     </section>
 
     <section id="operations">

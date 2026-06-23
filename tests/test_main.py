@@ -73,7 +73,7 @@ def test_read_main():
         assert data["redoc"] == "/redoc"
         assert data["status"] == "operational"
         assert data["api_prefix"] == settings.prefix
-        assert data["features"] == ["users", "posts", "livestreams"]
+        assert data["features"] == ["users", "posts", "livestreams", "watch"]
 
 
 def test_readiness_probe_returns_ready_when_all_dependencies_ok(

@@ -1,8 +1,8 @@
 """FastAPI entry point for Dyvine.
 
 Wires the Dyvine service: lifespan-driven `ServiceContainer` initialisation,
-the CORS + correlation-ID HTTP middleware, three feature routers
-(`users`, `posts`, `livestreams`), and the operational endpoints
+the CORS + correlation-ID HTTP middleware, four feature routers
+(`users`, `posts`, `livestreams`, `watch`), and the operational endpoints
 (`/livez`, `/readyz`, `/startupz`, `/health`, plus the Prometheus
 metrics ASGI app at `/metrics`).
 
@@ -68,7 +68,7 @@ from .core.error_handlers import register_error_handlers
 from .core.logging import ContextLogger, setup_logging
 from .core.path_safety import ensure_within_root, get_task_workspace_root
 from .core.settings import settings
-from .routers import livestreams, posts, users
+from .routers import livestreams, posts, users, watch
 
 http_requests_total = Counter(
     "dyvine_http_requests_total",
@@ -416,6 +416,8 @@ app.include_router(users.router, prefix=settings.prefix)
 
 app.include_router(livestreams.router, prefix=settings.prefix)
 
+app.include_router(watch.router, prefix=settings.prefix)
+
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
@@ -474,7 +476,7 @@ async def root() -> dict[str, Any]:
         "redoc": "/redoc",
         "status": "operational",
         "api_prefix": settings.prefix,
-        "features": ["users", "posts", "livestreams"],
+        "features": ["users", "posts", "livestreams", "watch"],
     }
 
 
@@ -710,10 +712,20 @@ async def health_check(request: Request) -> JSONResponse:
         r2_status = "disabled"
     else:
         r2_status = "missing_credentials"
+    # Watch scheduler is informational here; it never gates readiness, so a
+    # crashed watcher loop does not pull the Pod out of rotation.
+    watch_status = "disabled"
+    container = getattr(app.state, "container", None)
+    if container is not None:
+        try:
+            watch_status = f"{container.watch_service.active_count} active"
+        except Exception:
+            watch_status = "unavailable"
     dependencies = {
         "douyin_api": douyin_status,
         "r2_storage": r2_status,
         "logging_system": "operational",
+        "watch_subscriptions": watch_status,
     }
 
     rss_bytes = process.memory_info().rss
