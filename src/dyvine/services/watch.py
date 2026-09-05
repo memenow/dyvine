@@ -43,6 +43,7 @@ from ..core.exceptions import (
     RateLimitError,
     ServiceError,
     UserNotFoundError,
+    WatchDuplicateError,
     WatchSubscriptionNotFoundError,
 )
 from ..core.logging import ContextLogger
@@ -166,12 +167,24 @@ class WatchService:
                 "recent_aweme_ids": baseline,
                 "first_run_complete": not backfill,
             }
-            record = await self.watch_store.create_subscription(
-                user_id=user_id,
-                live_poll_seconds=live,
-                post_poll_seconds=post,
-                checkpoint=checkpoint,
-            )
+            try:
+                record = await self.watch_store.create_subscription(
+                    user_id=user_id,
+                    live_poll_seconds=live,
+                    post_poll_seconds=post,
+                    checkpoint=checkpoint,
+                )
+            except WatchDuplicateError:
+                # Cross-process race: a sibling replica won the
+                # ``UNIQUE(user_id)`` insert between our re-check and
+                # our write (the lock above is per-process). Converge
+                # to the documented idempotent return instead of
+                # letting a 409/500 escape for a retryable create.
+                winner = await self.watch_store.get_subscription_by_user(user_id)
+                if winner is None:  # deleted between our write and re-read
+                    raise
+                self._start_loop(winner)
+                return winner, False
 
         self._start_loop(record)
         logger.info(

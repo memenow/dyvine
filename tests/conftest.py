@@ -98,3 +98,57 @@ def storage_service_no_init():
     service = object.__new__(R2StorageService)
     service._executor = None  # type: ignore[attr-defined]
     return service
+
+
+def _upgrade_to_head(config) -> None:
+    """Run ``alembic upgrade head`` on a thread without a loop.
+
+    This fixture is pulled from async test context, so the calling
+    thread already runs an event loop -- and ``env.py`` drives its
+    own ``asyncio.run``. A worker thread gives it a clean loop.
+    """
+    import threading
+
+    from alembic import command
+
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            command.upgrade(config, "head")
+        except BaseException as exc:  # propagate to the caller
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
+
+
+@pytest.fixture(scope="session")
+def postgres_url():
+    """Start a containerised Postgres and migrate it to ``head``.
+
+    Shared by ``tests/db`` and ``tests/scripts``. The Alembic
+    environment reads its URL from the already-imported
+    ``dyvine.core.settings.settings`` singleton (``cache_clear`` alone
+    cannot rebuild it), so the singleton's URL is patched narrowly
+    around the upgrade and restored before any test runs.
+    """
+    from alembic.config import Config
+    from testcontainers.community.postgres import PostgresContainer
+
+    import dyvine.core.settings as settings_module
+
+    root_dir = Path(__file__).resolve().parents[1]
+    with PostgresContainer("postgres:16") as container:
+        raw_url = container.get_connection_url()
+        url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+        previous = settings_module.settings.database.url
+        settings_module.settings.database.url = url
+        try:
+            _upgrade_to_head(Config(str(root_dir / "alembic.ini")))
+        finally:
+            settings_module.settings.database.url = previous
+        yield url

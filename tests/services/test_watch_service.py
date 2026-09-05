@@ -60,6 +60,55 @@ async def test_create_subscription_is_idempotent(tmp_path: Path) -> None:
     assert len(await service.list_subscriptions()) == 1
 
 
+async def test_create_subscription_converges_cross_process_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A UNIQUE loss against a sibling replica returns the winner (F8).
+
+    The create lock is per-process, so two replicas can both pass the
+    re-check and race the INSERT. The loser must converge to the
+    documented idempotent return instead of surfacing a duplicate
+    error for a retryable create.
+    """
+    from typing import Any
+
+    from dyvine.core.exceptions import WatchDuplicateError
+
+    service, _, _ = _make_service(tmp_path)
+    service._start_loop = MagicMock()  # type: ignore[method-assign]
+    store = service.watch_store
+
+    winner = await store.create_subscription(
+        user_id="user-race", live_poll_seconds=60, post_poll_seconds=300
+    )
+    # Hide the winner from the fast-path and locked re-checks so the
+    # service proceeds to INSERT as if no row existed yet.
+    reads = 0
+    real_get = store.get_subscription_by_user
+
+    async def _flaky_get(user_id: str) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads <= 2:
+            return None
+        return await real_get(user_id)
+
+    async def _always_duplicate(**kwargs: Any) -> Any:
+        raise WatchDuplicateError(
+            "Watch subscription for user user-race already exists",
+            details={"user_id": "user-race"},
+        )
+
+    monkeypatch.setattr(store, "get_subscription_by_user", _flaky_get)
+    monkeypatch.setattr(store, "create_subscription", _always_duplicate)
+
+    record, created = await service.create_subscription(
+        user_id="user-race", backfill_on_create=True
+    )
+    assert created is False
+    assert record.subscription_id == winner.subscription_id
+
+
 async def test_create_subscription_enforces_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

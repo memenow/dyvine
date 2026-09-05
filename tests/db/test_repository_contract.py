@@ -10,6 +10,7 @@ test fails on exactly one leg.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -588,3 +589,23 @@ async def test_delete_subscription_reports_existence(
     # The UNIQUE(user_id) slot is released by the delete.
     recreated = await repo.create_subscription(**_subscription_kwargs("user-9"))
     assert recreated.subscription_id != created.subscription_id
+
+
+async def test_concurrent_create_same_user_yields_single_row(
+    backend: BackendContext,
+) -> None:
+    """Concurrent creates race the UNIQUE bound: one row, rest duplicate."""
+    repo = backend.make_watch()
+    results = await asyncio.gather(
+        *(
+            repo.create_subscription(**_subscription_kwargs("user-race"))
+            for _ in range(5)
+        ),
+        return_exceptions=True,
+    )
+    winners = [item for item in results if not isinstance(item, BaseException)]
+    losers = [item for item in results if isinstance(item, BaseException)]
+    assert len(winners) == 1
+    assert len(losers) == 4
+    assert all(isinstance(item, WatchDuplicateError) for item in losers)
+    assert await repo.count_subscriptions() == 1
