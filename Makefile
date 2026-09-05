@@ -36,4 +36,4 @@ clean:
 	rm -rf .ruff_cache
 
 run:
-	uv run uvicorn src.dyvine.main:app --reload
+	PYTHONPATH=src uv run uvicorn dyvine.main:app --reload

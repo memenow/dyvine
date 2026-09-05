@@ -111,7 +111,7 @@ flowchart TD
     P --> PD{Bulk download?}
     U --> UD{Bulk download?}
 
-    LD -->|Yes| OP[(OperationStore SQLite)]
+    LD -->|Yes| OP[(OperationRepository Postgres)]
     PD -->|Yes| OP
     UD -->|Yes| OP
 

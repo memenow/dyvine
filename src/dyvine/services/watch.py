@@ -11,8 +11,8 @@ Design:
   exactly that task; an exception in one user's loop cannot stall another.
   Tasks are scheduled through the shared ``BackgroundTaskRegistry`` so the
   FastAPI lifespan drains them on shutdown.
-- **Persistence + resume.** Subscriptions live in ``WatchSubscriptionStore``
-  (a dedicated SQLite table), so ``resume_persisted`` can re-arm every
+- **Persistence + resume.** Subscriptions live in ``WatchRepository``
+  (a dedicated Postgres table), so ``resume_persisted`` can re-arm every
   enabled subscription after a restart -- something the operation store
   cannot do because it has no enumeration query and its boot sweep would
   fail any long-lived row.
@@ -47,7 +47,7 @@ from ..core.exceptions import (
 )
 from ..core.logging import ContextLogger
 from ..core.settings import settings
-from ..core.watch_store import WatchSubscriptionRecord, WatchSubscriptionStore
+from ..db import WatchRepository, WatchSubscriptionRecord
 from ..schemas.watch import WatchSubscriptionResponse
 from .livestreams import LivestreamService
 from .posts import PostService
@@ -72,7 +72,7 @@ class WatchService:
     def __init__(
         self,
         *,
-        watch_store: WatchSubscriptionStore,
+        watch_store: WatchRepository,
         livestream_service: LivestreamService,
         post_service: PostService,
         task_registry: BackgroundTaskRegistry | None = None,

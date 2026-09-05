@@ -1,6 +1,8 @@
-# HPA intentionally pinned to a single replica because the operation store
-# uses a RWO PVC with a pod-local SQLite writer. Restore dynamic scaling
-# after migrating to a shared operation backend.
+# HPA intentionally pinned to a single replica because per-task
+# download workspaces live on the ReadWriteOnce ``runtime-data`` PVC.
+# (Operation/watch state is multi-replica safe in Postgres; only the
+# file workspaces pin the Deployment.) Restore dynamic scaling after
+# the workspaces move to shared storage.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:

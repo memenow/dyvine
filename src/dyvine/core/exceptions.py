@@ -103,6 +103,12 @@ class StorageError(ServiceError):
     pass
 
 
+class WatchDuplicateError(ServiceError):
+    """A watch subscription for the subject already exists."""
+
+    pass
+
+
 class ValidationError(DyvineError):
     """Request validation failed."""
 

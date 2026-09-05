@@ -48,7 +48,6 @@ from ..core.exceptions import (
     UserNotFoundError,
 )
 from ..core.logging import ContextLogger
-from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..core.path_safety import (
     ensure_within_root,
@@ -56,6 +55,7 @@ from ..core.path_safety import (
     relative_to_download_root,
 )
 from ..core.settings import settings
+from ..db import OperationRepository
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
 
@@ -239,22 +239,22 @@ class UserService:
 
     def __init__(
         self,
-        operation_store: OperationStore | None = None,
+        operation_store: OperationRepository,
         *,
         task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         """Initialize the user service.
 
         Args:
-            operation_store: Persistent operation record store. A private
-                ``OperationStore`` is created when not provided, which is the
-                path unit tests take.
+            operation_store: Persistent operation record repository.
+                Required; the container injects the Postgres-backed
+                implementation and unit tests inject a fake.
             task_registry: Optional registry that owns long-lived
                 background downloads. When omitted (e.g. in tests) the
                 service falls back to ``asyncio.create_task`` so the public
                 API remains testable without a full service container.
         """
-        self.operation_store = operation_store or OperationStore()
+        self.operation_store = operation_store
         self.storage = R2StorageService()
         self._task_registry = task_registry
 

@@ -11,9 +11,10 @@ Architecture:
       `require_api_key` dependency mounted at the router level).
     - Service: `UserService`, `PostService`, `LivestreamService`,
       `R2StorageService` constructed by `ServiceContainer`.
-    - Persistence: `OperationStore` (SQLite + WAL) accessed through a
-      dedicated `sqlite_executor`; long-running tasks are tracked by a
-      shared `BackgroundTaskRegistry`.
+    - Persistence: Postgres-backed `OperationRepository` /
+      `WatchRepository` behind `DatabaseSessionFactory`, with a
+      `RepositoryJanitor` liveness loop; long-running tasks are tracked
+      by a shared `BackgroundTaskRegistry`.
     - Observability: structured JSON logging with contextvars-based
       correlation IDs, Prometheus counters/histograms.
 
@@ -37,18 +38,17 @@ Environment configuration:
 Examples:
     Local development::
 
-        uv run uvicorn src.dyvine.main:app --reload
+        PYTHONPATH=src uv run uvicorn dyvine.main:app --reload
 
     Production-style::
 
-        uv run uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000 \\
+        PYTHONPATH=src uv run uvicorn dyvine.main:app --host 0.0.0.0 --port 8000 \\
             --timeout-graceful-shutdown 25
 
-    Multi-worker deployments are unsafe today: the default
-    `OperationStore` writes to a pod-local SQLite file, so scaling
-    requires either replacing that backend with a shared store or
-    pinning the deployment to a single replica (see the Kustomize
-    base, which uses `Recreate` + `replicas: 1`).
+    Multi-replica deployments share one Postgres database: operation
+    rows carry an `owner_id` + heartbeat, the janitor fails only
+    genuinely orphaned rows, and Alembic migrations (`alembic upgrade
+    head`) must run before the new revision serves traffic.
 """
 
 import time
@@ -547,8 +547,9 @@ async def readiness_probe(request: Request) -> JSONResponse:
     container_ok = container is not None
     container_status = "initialized" if container_ok else "missing"
 
-    # Operation store backs asynchronous workflows; a broken SQLite path
-    # makes content downloads fail at the first write.
+    # The operation repository backs asynchronous workflows; an
+    # unreachable database makes content downloads fail at the first
+    # write.
     operation_store_ok = False
     operation_store_status = "missing"
     if container is not None:

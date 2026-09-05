@@ -31,27 +31,36 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+# ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
+# pytest only puts each test file's own directory on ``sys.path``, so
+# without this a test under ``tests/db/`` could not ``import
+# fake_repos`` from its sibling directory.
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 
 @pytest.fixture(autouse=True)
-def reset_singletons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Reset cached state and isolate operation storage between tests.
+def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset cached singletons between tests.
 
-    The autouse fixture also strips ``SECURITY_API_KEY`` from the
-    process environment before each test runs.
+    The autouse fixture also strips ``SECURITY_API_KEY`` and
+    ``DATABASE_URL`` from the process environment before each test runs.
     ``get_settings`` calls ``load_dotenv`` on import, which leaks any real
     credentials from the developer's ``.env`` into ``os.environ`` and would
-    otherwise make ``SecuritySettings`` tests assert against a live secret
-    instead of the documented ``change-me-in-production`` sentinel.
+    otherwise make settings tests assert against live secrets instead of
+    the documented defaults.
+
+    Persistence isolation needs no work here: services take their
+    repositories by injection, so unit tests use the in-memory fakes
+    from ``tests.fake_repos`` while only ``tests/db/`` touches
+    a real database.
     """
     from dyvine.core.dependencies import get_service_container
-    from dyvine.core.settings import get_settings, settings
+    from dyvine.core.settings import get_settings
 
     monkeypatch.delenv("SECURITY_API_KEY", raising=False)
-    monkeypatch.setattr(
-        settings.api,
-        "operation_db_path",
-        str(tmp_path / "operations.db"),
-    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     # ``get_settings`` is ``lru_cache``d on the module so a settings test
     # that monkeypatches an env var would otherwise see a stale Settings
     # instance leaked from a previous test. Clearing both cached

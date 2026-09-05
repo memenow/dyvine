@@ -35,11 +35,16 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Production stage
 FROM python:3.12-slim-bookworm AS production
 
-# Set environment variables
+# Set environment variables. ``PYTHONPATH=/app/src`` keeps the single
+# canonical ``dyvine.*`` import spelling (see
+# tests/test_import_path_contract.py): the legacy ``src.dyvine.*``
+# namespace spelling would double-register Prometheus metrics if both
+# ever loaded in one process.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
-    VIRTUAL_ENV="/app/.venv"
+    VIRTUAL_ENV="/app/.venv" \
+    PYTHONPATH="/app/src"
 
 # Apply pending security patches in the runtime stage too. ``curl`` is
 # intentionally NOT installed: Kubernetes deployments use the
@@ -73,7 +78,7 @@ EXPOSE 8000
 # operation status endpoints do not see truncated responses on a
 # rolling restart.
 CMD ["/app/.venv/bin/python", "-m", "uvicorn", \
-     "src.dyvine.main:app", \
+     "dyvine.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--timeout-graceful-shutdown", "25"]

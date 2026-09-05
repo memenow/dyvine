@@ -73,11 +73,12 @@ spec:
 #     accidentally granting in-cluster east-west access beyond the DNS
 #     exception above.
 #
-# The service does not currently connect to a PostgreSQL (or other
-# database) server: runtime state is persisted in a SQLite file stored
-# on the ``dyvine-operation-state`` PVC (see
-# ``API_OPERATION_DB_PATH=/app/data/douyin/state/operations.db`` in the
-# Deployment), so no database egress rule is required.
+# Operation and watch state live in the shared Postgres database
+# (``DATABASE_URL`` from ``dyvine-secrets``), so the Pods need TCP 5432
+# egress. The base rule below covers managed databases on the public
+# internet with the same RFC1918/CG-NAT exclusions as the HTTPS rule;
+# operators running Postgres in-cluster (or with a known CIDR) should
+# narrow this via an overlay patch to the database's exact endpoints.
 #
 # All other egress traffic is implicitly denied because declaring an
 # egress rule on a NetworkPolicy switches the pod into allowlist mode
@@ -124,3 +125,17 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Outbound Postgres for the shared operation/watch database. Same
+    # private-range exclusions as above; narrow to the database CIDR
+    # via an overlay when the endpoint is known.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 5432

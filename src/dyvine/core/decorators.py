@@ -19,6 +19,7 @@ from .exceptions import (
     RateLimitError,
     ServiceError,
     ValidationError,
+    WatchDuplicateError,
 )
 from .logging import ContextLogger
 from .settings import settings
@@ -67,6 +68,7 @@ def handle_errors(
         ValidationError: 422,
         AuthenticationError: 401,
         RateLimitError: 429,
+        WatchDuplicateError: 409,
         ServiceError: 500,
     }
     user_overrides: dict[type[Exception], int] = dict(error_mapping or {})

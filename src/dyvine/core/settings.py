@@ -82,12 +82,50 @@ class APISettings(BaseSettings):
             "``main.py`` middleware)."
         ),
     )
-    operation_db_path: str = Field(
-        default="data/douyin/state/operations.db",
-        description="Path to the SQLite database used for operation state",
+    model_config = SettingsConfigDict(env_prefix="API_")
+
+
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine"
+
+
+class DatabaseSettings(BaseSettings):
+    """Postgres connection settings for operation and watch state.
+
+    Postgres is the only production backend. The default URL targets a
+    local development database (``docker run -e POSTGRES_USER=dyvine -e
+    POSTGRES_PASSWORD=dyvine -e POSTGRES_DB=dyvine -p 5432:5432
+    postgres:16``); non-debug builds must override it, enforced by the
+    composite validator below.
+
+    Attributes:
+        url: SQLAlchemy database URL (``postgresql+asyncpg://...``).
+        pool_size: Steady-state pooled connections per process.
+        pool_timeout: Seconds to wait for a pooled connection.
+        operation_retention_days: Terminal operation rows older than
+            this are purged at boot and daily; ``0`` disables purging.
+
+    Environment Variables:
+        DATABASE_URL, DATABASE_POOL_SIZE, DATABASE_POOL_TIMEOUT,
+        DATABASE_OPERATION_RETENTION_DAYS.
+    """
+
+    url: str = Field(
+        default=_DEFAULT_DATABASE_URL,
+        description="SQLAlchemy database URL for operation/watch state",
+    )
+    pool_size: int = Field(
+        default=5, ge=1, description="Steady-state pooled DB connections"
+    )
+    pool_timeout: float = Field(
+        default=30.0, ge=1.0, description="Seconds to wait for a DB connection"
+    )
+    operation_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description="Purge terminal operations older than this (0 disables)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="API_")
+    model_config = SettingsConfigDict(env_prefix="DATABASE_")
 
 
 class SecuritySettings(BaseSettings):
@@ -393,7 +431,7 @@ class Settings(BaseSettings):
 
         Override for tests by mutating the parsed instance::
 
-            settings.api.operation_db_path = str(tmp_path / "operations.db")
+            settings.api.port = 8080
 
         Or via env vars in `.env` / the process environment::
 
@@ -409,14 +447,15 @@ class Settings(BaseSettings):
     r2: R2Settings = Field(default_factory=R2Settings)
     douyin: DouyinSettings = Field(default_factory=DouyinSettings)
     watch: WatchSettings = Field(default_factory=WatchSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
     @model_validator(mode="after")
     def _validate_security_in_production(self) -> Self:
-        """Reject placeholder secret values when ``api.debug`` is False.
+        """Reject placeholder production values when ``api.debug`` is False.
 
         The cross-field check lives on the composite container so the
         validator sees ``api.debug`` from the same parsed payload that
-        populated ``security``. Reading ``API_DEBUG`` straight off
+        populated the nested models. Reading ``API_DEBUG`` straight off
         ``os.environ`` (the previous approach) silently disagreed with
         ``api.debug`` whenever the value lived in a ``.env`` file rather
         than a real environment variable.
@@ -425,19 +464,26 @@ class Settings(BaseSettings):
         deployments that delegate authentication to mTLS or a service
         mesh (and therefore set ``SECURITY_REQUIRE_API_KEY=false``) do
         not need to mint a never-used key just to satisfy a startup
-        check.
+        check. ``database.url`` is always validated: the localhost
+        default is a development convenience, never a production target.
 
         """
         if self.api.debug:
             return self
 
-        if not self.security.require_api_key:
-            return self
-
-        if self.security.api_key in {"", _DEFAULT_SECRET_SENTINEL}:
+        offenders: list[str] = []
+        if self.security.require_api_key and self.security.api_key in {
+            "",
+            _DEFAULT_SECRET_SENTINEL,
+        }:
+            offenders.append("security.api_key")
+        if self.database.url in {"", _DEFAULT_DATABASE_URL}:
+            offenders.append("database.url")
+        if offenders:
+            joined = ", ".join(offenders)
             raise ValueError(
-                "security.api_key must be set to a non-default value when "
-                "API_DEBUG is false; rotate the placeholder before deploying."
+                f"{joined} must be set to non-default values when API_DEBUG "
+                "is false; rotate the placeholders before deploying."
             )
         return self
 
@@ -466,11 +512,6 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         """Get CORS allowed origins from API settings."""
         return self.api.cors_origins
-
-    @property
-    def operation_db_path(self) -> str:
-        """Get the operation state database path from API settings."""
-        return self.api.operation_db_path
 
     # Backward compatibility properties for legacy code
     @property

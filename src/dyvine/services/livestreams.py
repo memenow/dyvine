@@ -33,13 +33,13 @@ from ..core.exceptions import (
     OperationNotFoundError,
 )
 from ..core.logging import ContextLogger
-from ..core.operations import OperationStore
 from ..core.path_safety import (
     ensure_within_root,
     relative_to_download_root,
     resolve_within_root,
 )
 from ..core.settings import settings
+from ..db import OperationRepository
 from ..schemas.livestreams import LiveStreamDownloadResponse
 from .users import UserService
 
@@ -111,7 +111,7 @@ class LivestreamService:
         *,
         douyin_handler: DouyinHandler,
         user_service: UserService,
-        operation_store: OperationStore,
+        operation_store: OperationRepository,
         task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         """Initialize the livestream service using injected dependencies.

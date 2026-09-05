@@ -26,6 +26,7 @@ from .exceptions import (
     RateLimitError,
     ServiceError,
     ValidationError,
+    WatchDuplicateError,
 )
 from .logging import ContextLogger
 from .settings import settings
@@ -40,6 +41,7 @@ _DYVINE_STATUS_MAPPING: tuple[tuple[type[DyvineError], int], ...] = (
     (AuthenticationError, status.HTTP_401_UNAUTHORIZED),
     (RateLimitError, status.HTTP_429_TOO_MANY_REQUESTS),
     (ValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (WatchDuplicateError, status.HTTP_409_CONFLICT),
     (ServiceError, status.HTTP_500_INTERNAL_SERVER_ERROR),
 )
 

@@ -3,10 +3,12 @@
 `ServiceContainer` owns the long-lived runtime state of the application:
 
 - A `DouyinHandler` configured from the composite `Settings`.
-- An `OperationStore` (SQLite + WAL) wired to a dedicated 4-worker
-  `sqlite_executor` so reads and writes never block the event loop.
+- A Postgres-backed `OperationRepository` / `WatchRepository` pair
+  sharing one `DatabaseSessionFactory` (asyncpg pool), plus a
+  `RepositoryJanitor` task that heartbeats owned rows, sweeps
+  orphans, and purges terminal rows.
 - A `UserService`, `PostService`, and `LivestreamService` that all
-  share the same `OperationStore` and `BackgroundTaskRegistry`.
+  share the same operation repository and `BackgroundTaskRegistry`.
 - An `R2StorageService` (under `UserService`) attached to two
   separate executors: a 16-worker `r2_executor` for upload / head /
   delete / list operations, and a 16-worker `r2_head_executor` for
@@ -16,9 +18,10 @@
   wired into the runtime container).
 
 `initialize` is awaited from the FastAPI lifespan; `shutdown` drains
-the `BackgroundTaskRegistry` and reaps every executor in reverse
-initialisation order so a graceful shutdown never tears the
-executor pools down before in-flight uploads / SQLite commits finish.
+the `BackgroundTaskRegistry`, stops the janitor, disposes the
+database pool, and reaps every executor in reverse initialisation
+order so a graceful shutdown never tears shared state down before
+in-flight work finishes.
 
 `require_api_key` (also exported here) is the FastAPI dependency
 mounted at every router; it uses `hmac.compare_digest` and short-
@@ -37,22 +40,30 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Header, HTTPException, status
 
+from ..db.janitor import ORPHAN_STALE_AFTER_SECONDS, RepositoryJanitor
+from ..db.postgres import (
+    PostgresOperationRepository,
+    PostgresWatchRepository,
+)
+from ..db.protocols import OperationRepository, WatchRepository
+from ..db.session import DatabaseSessionFactory
 from ..services.livestreams import LivestreamService
 from ..services.posts import PostService
 from ..services.users import UserService
 from ..services.watch import WatchService
 from .background import BackgroundTaskRegistry
 from .logging import ContextLogger
-from .operations import OperationStore
 from .settings import settings
-from .watch_store import WatchSubscriptionStore
 
 if TYPE_CHECKING:
     from f2.apps.douyin.handler import DouyinHandler  # type: ignore
@@ -65,12 +76,12 @@ else:
 
 logger = ContextLogger(__name__)
 
-# Dedicated thread pool sizes per IO domain. The defaults are tuned for the
-# single-worker uvicorn deployment: R2 uploads are the dominant long-running
-# call, sqlite writes are short but frequent, and audit log writes are rare
-# but must never starve the other two pools. Keeping each domain in its own
-# bounded pool prevents a burst in one from exhausting the default asyncio
-# executor (``min(32, cpu+4)``) that every ``asyncio.to_thread`` call would
+# Dedicated thread pool sizes per blocking-IO domain. R2 uploads are the
+# dominant long-running call and audit log writes are rare but must never
+# starve the upload pool. (Database IO is fully async via asyncpg and
+# needs no executor.) Keeping each domain in its own bounded pool
+# prevents a burst in one from exhausting the default asyncio executor
+# (``min(32, cpu+4)``) that every ``asyncio.to_thread`` call would
 # otherwise share.
 R2_EXECUTOR_MAX_WORKERS = 16
 # ``head_object`` fan-out runs inside ``R2StorageService._list_objects_sync``
@@ -79,7 +90,6 @@ R2_EXECUTOR_MAX_WORKERS = 16
 # ``head_object`` requests across every in-flight listing instead of letting
 # each listing spawn its own short-lived ``ThreadPoolExecutor``.
 R2_HEAD_EXECUTOR_MAX_WORKERS = 16
-SQLITE_EXECUTOR_MAX_WORKERS = 4
 AUDIT_EXECUTOR_MAX_WORKERS = 2
 
 
@@ -119,37 +129,51 @@ class ServiceContainer:
         self._initialized = False
         self._r2_executor: ThreadPoolExecutor | None = None
         self._r2_head_executor: ThreadPoolExecutor | None = None
-        self._sqlite_executor: ThreadPoolExecutor | None = None
         self._audit_executor: ThreadPoolExecutor | None = None
         # Shared registry for long-lived background downloads. Services
         # retrieve this via dependency injection and call ``spawn`` instead
         # of bare ``asyncio.create_task`` so the lifespan can drain them
-        # before the executor pools are reaped.
+        # before shared state is torn down.
         self._background_tasks = BackgroundTaskRegistry()
-        # Watch subscriptions persist in their own SQLite table (sharing the
-        # operation database and sqlite executor) so the operation store's
-        # restart sweep never fails a long-lived subscription row.
-        self._watch_store: WatchSubscriptionStore | None = None
+        # Database state. The session factory owns the asyncpg pool; the
+        # janitor task heartbeats owned rows and sweeps orphans until
+        # shutdown stops it after the background registry drains.
+        self._db: DatabaseSessionFactory | None = None
+        self._janitor_task: asyncio.Task[None] | None = None
 
-    async def initialize(self) -> None:
+    async def initialize(
+        self,
+        *,
+        operation_store: OperationRepository | None = None,
+        watch_store: WatchRepository | None = None,
+    ) -> None:
         """Initialize all registered services with their configurations.
 
-        Coroutine because ``OperationStore`` recovery uses async SQLite IO
-        (``mark_incomplete_operations_failed`` dispatches to a worker
-        thread). Safe to ``await`` multiple times; subsequent calls are
-        no-ops.
+        Coroutine because boot recovery (orphan sweep, retention purge)
+        awaits database IO. Safe to ``await`` multiple times; subsequent
+        calls are no-ops.
+
+        Args:
+            operation_store: Repository override for tests. When omitted
+                (production path) a Postgres-backed repository is built
+                from settings.
+            watch_store: Same override for watch subscriptions. Pass both
+                or neither; mixing a real backend with a fake is rejected.
 
         Services initialized:
             - DouyinHandler: Configured with headers, proxies, and download settings
-            - OperationStore: Persistent state for asynchronous work
+            - OperationRepository: Postgres-backed operation state
+            - WatchRepository: Postgres-backed watch subscriptions
             - UserService: Basic user management service
             - LivestreamService: Livestream download orchestration
+            - PostService: Bulk post download orchestration
+            - WatchService: Subscription-driven auto-download scheduler
+            - RepositoryJanitor: Liveness loop (heartbeat/sweep/purge)
 
         Executors created:
             - ``r2_executor`` (16 workers): R2 upload/head/delete/list
             - ``r2_head_executor`` (16 workers): per-key ``head_object``
               fan-out triggered inside ``R2StorageService._list_objects_sync``
-            - ``sqlite_executor`` (4 workers): OperationStore writes/reads
             - ``audit_executor`` (2 workers): reserved for ``LifecycleManager``
               audit writes; the manager is exercised in tests but not yet
               wired into the runtime container, so the pool is currently
@@ -163,10 +187,16 @@ class ServiceContainer:
         """
         if self._initialized:
             return
+        if (operation_store is None) != (watch_store is None):
+            raise ValueError(
+                "Pass both operation_store and watch_store overrides, or "
+                "neither; mixing a real backend with a fake is not supported."
+            )
 
-        # Create dedicated thread pool executors for each IO domain before
-        # instantiating any service that might need one. The thread-name
-        # prefix shows up in logs/traces so hot threads are easy to spot.
+        # Create dedicated thread pool executors for each blocking-IO
+        # domain before instantiating any service that might need one.
+        # The thread-name prefix shows up in logs/traces so hot threads
+        # are easy to spot.
         self._r2_executor = ThreadPoolExecutor(
             max_workers=R2_EXECUTOR_MAX_WORKERS,
             thread_name_prefix="dyvine-r2",
@@ -175,27 +205,74 @@ class ServiceContainer:
             max_workers=R2_HEAD_EXECUTOR_MAX_WORKERS,
             thread_name_prefix="dyvine-r2-head",
         )
-        self._sqlite_executor = ThreadPoolExecutor(
-            max_workers=SQLITE_EXECUTOR_MAX_WORKERS,
-            thread_name_prefix="dyvine-sqlite",
-        )
         self._audit_executor = ThreadPoolExecutor(
             max_workers=AUDIT_EXECUTOR_MAX_WORKERS,
             thread_name_prefix="dyvine-audit",
         )
 
+        # Everything below can fail (unreachable database, bad
+        # credentials). Unwind what we built so a boot failure neither
+        # leaks worker threads nor leaves a half-wired container behind;
+        # the caller sees the original error.
+        try:
+            await self._initialize_services(
+                operation_store=operation_store, watch_store=watch_store
+            )
+        except Exception:
+            await self._abort_startup()
+            raise
+
+    async def _initialize_services(
+        self,
+        *,
+        operation_store: OperationRepository | None,
+        watch_store: WatchRepository | None,
+    ) -> None:
+        """Build repositories, services, and the janitor (may raise)."""
         # Initialize Douyin handler with configuration
         douyin_config = self._create_douyin_config()
         self._services["douyin_handler"] = DouyinHandler(douyin_config)
 
-        # Initialize operation store (sqlite bootstrap happens synchronously
-        # inside the constructor, which is cheap and keeps the OperationStore
-        # usable from both async and sync contexts). The dedicated sqlite
-        # executor is attached immediately so the recovery sweep below
-        # already runs on the bounded pool.
-        operation_store = OperationStore(executor=self._sqlite_executor)
+        # Initialize repositories. Production builds a Postgres pair over
+        # one shared pool; tests inject fakes. The owner identity is fresh
+        # per boot so a restarted replica never inherits the previous
+        # process's liveness.
+        if operation_store is None or watch_store is None:
+            self._db = DatabaseSessionFactory(
+                settings.database.url,
+                pool_size=settings.database.pool_size,
+                pool_timeout=settings.database.pool_timeout,
+            )
+            owner_id = uuid.uuid4().hex
+            operation_store = PostgresOperationRepository(self._db, owner_id=owner_id)
+            watch_store = PostgresWatchRepository(self._db)
+            logger.info(
+                "database backend ready",
+                extra={"owner_id": owner_id},
+            )
         self._services["operation_store"] = operation_store
-        await operation_store.mark_incomplete_operations_failed()
+        self._services["watch_store"] = watch_store
+
+        # Boot recovery: fail rows orphaned by dead replicas, then enforce
+        # retention so a fresh deploy does not wait a day for the first
+        # janitor purge.
+        swept = await operation_store.sweep_orphans(
+            stale_after_seconds=ORPHAN_STALE_AFTER_SECONDS
+        )
+        if swept:
+            logger.warning(
+                "swept orphaned operations at boot",
+                extra={"count": swept},
+            )
+        retention_days = settings.database.operation_retention_days
+        if retention_days > 0:
+            cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
+            purged = await operation_store.purge_terminal_before(cutoff)
+            if purged:
+                logger.info(
+                    "purged terminal operations at boot",
+                    extra={"count": purged, "retention_days": retention_days},
+                )
 
         # Initialize user service and wire its R2 client to the R2 executor.
         # The dedicated head fan-out pool is attached separately so a burst
@@ -227,15 +304,21 @@ class ServiceContainer:
             task_registry=self._background_tasks,
         )
 
-        # Initialize the watch scheduler. It shares the sqlite executor and
-        # the background-task registry so its watcher loops drain on
-        # shutdown like every other long-lived download task. Watch mode is
-        # non-critical -- it never gates readiness -- so a failure to build it
-        # must not abort startup or leak the executors created above; log and
+        # Start the liveness loop before any service schedules work so
+        # rows created during startup are heartbeat-covered from birth.
+        janitor = RepositoryJanitor(
+            operation_store,
+            retention_days=settings.database.operation_retention_days,
+        )
+        self._janitor_task = asyncio.create_task(janitor.run_forever())
+
+        # Initialize the watch scheduler. It shares the background-task
+        # registry so its watcher loops drain on shutdown like every
+        # other long-lived download task. Watch mode is non-critical --
+        # it never gates readiness -- so a failure to build it must not
+        # abort startup or leak the executors created above; log and
         # continue without watch instead.
         try:
-            watch_store = WatchSubscriptionStore(executor=self._sqlite_executor)
-            self._watch_store = watch_store
             self._services["watch_service"] = WatchService(
                 watch_store=watch_store,
                 livestream_service=self._services["livestream_service"],
@@ -246,7 +329,7 @@ class ServiceContainer:
             logger.exception(
                 "watch scheduler initialization failed; continuing without watch"
             )
-            self._watch_store = None
+            self._services.pop("watch_service", None)
 
         self._initialized = True
 
@@ -261,18 +344,54 @@ class ServiceContainer:
             except Exception:
                 logger.exception("watch subscription resume failed; continuing startup")
 
+    async def _abort_startup(self) -> None:
+        """Unwind a failed ``initialize`` without marking ready.
+
+        Mirrors :meth:`shutdown` but tolerates partially built state:
+        the janitor may never have started, the pool may never have
+        opened, and executors may be the only thing alive. Every branch
+        is best-effort so the original boot error (not a cleanup error)
+        is what the caller sees.
+        """
+        if self._janitor_task is not None:
+            task, self._janitor_task = self._janitor_task, None
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._db is not None:
+            try:
+                await self._db.aclose()
+            except Exception:
+                logger.exception("startup abort: pool dispose failed")
+            finally:
+                self._db = None
+        for attr in ("_r2_head_executor", "_r2_executor", "_audit_executor"):
+            executor = getattr(self, attr)
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=True)
+                except Exception:
+                    logger.exception(
+                        "startup abort: executor shutdown failed",
+                        extra={"executor": attr},
+                    )
+                finally:
+                    setattr(self, attr, None)
+        self._services.clear()
+
     async def shutdown(self) -> None:
-        """Release services and tear down the dedicated executor pools.
+        """Release services, stop the janitor, and reap executors and pool.
 
-        Called from the FastAPI lifespan's shutdown branch so that the
-        worker threads held by each ``ThreadPoolExecutor`` do not outlive
-        the application. Safe to call multiple times; subsequent calls are
-        no-ops.
+        Called from the FastAPI lifespan's shutdown branch. Safe to call
+        multiple times; subsequent calls are no-ops.
 
-        Each executor is shut down with ``wait=True`` so pending work (e.g.
-        a final audit-log write) drains before the process exits. Executors
-        are shut down in reverse initialization order so downstream
-        dependencies finish before their producers go away.
+        Order matters: watcher loops stop first (no new work), the
+        background registry drains while the janitor still heartbeats
+        (so siblings never sweep rows mid-drain), then the janitor
+        stops, the database pool disposes, and the executors reap in
+        reverse initialisation order.
         """
         if not self._initialized:
             return
@@ -283,36 +402,37 @@ class ServiceContainer:
         if isinstance(watch_service, WatchService):
             await watch_service.stop_all()
 
-        # Drain fire-and-forget downloads before tearing down the executor
-        # pools they dispatch onto. Any task still running after the
-        # registry's drain timeout is cancelled so the shutdown cannot hang
-        # on a stuck upstream request.
+        # Drain fire-and-forget downloads before tearing down shared
+        # state. Any task still running after the registry's drain
+        # timeout is cancelled so the shutdown cannot hang on a stuck
+        # upstream request. The janitor keeps heartbeating throughout so
+        # a sibling replica's sweep cannot mistake draining rows for
+        # orphans (drain <= 20s, staleness threshold 120s).
         await self._background_tasks.drain()
 
-        # Let the operation store close its per-thread reader connections
-        # before we reap the sqlite executor that owns those worker threads.
-        operation_store = self._services.get("operation_store")
-        if isinstance(operation_store, OperationStore):
-            operation_store.shutdown()
+        # Stop the liveness loop. Rows left behind (cancelled tasks that
+        # never wrote a terminal state) go stale and are swept by the
+        # remaining replicas or the next boot.
+        if self._janitor_task is not None:
+            task, self._janitor_task = self._janitor_task, None
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("janitor shutdown failed")
 
-        # Close the watch store's connections before the sqlite executor that
-        # owns its worker threads is reaped below.
-        if self._watch_store is not None:
-            self._watch_store.shutdown()
-            self._watch_store = None
+        # Dispose the database pool (no-op when tests injected fakes).
+        if self._db is not None:
+            await self._db.aclose()
+            self._db = None
 
         # Reverse of init order. The R2 head pool is drained first so any
         # ``list_objects`` follow-up still has a working main pool to
-        # report back through; the head pool then drains its own
-        # short-lived ``head_object`` work, R2 uploads finish next, and
-        # SQLite + audit pools drain last so any final write triggered by
-        # an earlier shutdown step still has a target to land on.
-        for attr in (
-            "_r2_head_executor",
-            "_r2_executor",
-            "_sqlite_executor",
-            "_audit_executor",
-        ):
+        # report back through; the audit pool drains last so any final
+        # write triggered by an earlier shutdown step still lands.
+        for attr in ("_r2_head_executor", "_r2_executor", "_audit_executor"):
             executor = getattr(self, attr)
             if executor is not None:
                 executor.shutdown(wait=True)
@@ -357,9 +477,10 @@ class ServiceContainer:
         """Get a service instance by name.
 
         The container must have been initialized before any service is
-        requested. ``initialize`` is a coroutine (it awaits SQLite recovery
-        in the operation store), so synchronous access has no safe way to
-        self-heal. The FastAPI lifespan awaits ``initialize`` before any
+        requested. ``initialize`` is a coroutine (it awaits the orphan
+        sweep and retention purge against the database), so synchronous
+        access has no safe way to self-heal. The FastAPI lifespan awaits
+        ``initialize`` before any
         request can reach a dependency, so this only fires when tests or
         ad-hoc scripts forget to bootstrap.
 
@@ -402,11 +523,11 @@ class ServiceContainer:
         return service
 
     @property
-    def operation_store(self) -> OperationStore:
-        """Get the persistent operation store."""
+    def operation_store(self) -> OperationRepository:
+        """Get the persistent operation repository."""
         service = self.get_service("operation_store")
-        if not isinstance(service, OperationStore):
-            raise TypeError("operation_store is not an OperationStore instance")
+        if not isinstance(service, OperationRepository):
+            raise TypeError("operation_store is not an OperationRepository instance")
         return service
 
     @property
@@ -508,7 +629,7 @@ def get_post_service() -> PostService:
     """FastAPI dependency provider for post service.
 
     Returns the container-managed ``PostService`` so bulk downloads share
-    the same ``OperationStore`` and ``BackgroundTaskRegistry`` as the rest
+    the same ``OperationRepository`` and ``BackgroundTaskRegistry`` as the rest
     of the application. Routers can depend on this provider directly via
     ``Annotated[PostService, Depends(get_post_service)]``.
     """

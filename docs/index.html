@@ -94,7 +94,7 @@
       <div class="pillrow">
         <span class="pill">Python 3.12+</span>
         <span class="pill">FastAPI</span>
-        <span class="pill">SQLite operation store</span>
+        <span class="pill">Postgres operation store</span>
         <span class="pill">Cloudflare R2 optional</span>
         <span class="pill">Last reviewed: 2026-05-31</span>
       </div>
@@ -125,10 +125,10 @@
       </p>
       <ul>
         <li>Async, fire-and-forget downloads return an <code>operation_id</code> immediately and continue on tracked background tasks.</li>
-        <li>Persistent operation state is stored in a WAL-mode SQLite database.</li>
+        <li>Persistent operation state is stored in a shared Postgres database (schema versioned by Alembic).</li>
         <li>Router endpoints are protected by <code>X-API-Key</code> authentication by default.</li>
         <li>User-supplied output paths are resolved inside <code>DOUYIN_DOWNLOAD_ROOT</code> and rejected when they escape the configured root.</li>
-        <li>Dedicated thread pools isolate R2 calls, R2 metadata fan-out, SQLite work, and audit-log writes.</li>
+        <li>Dedicated thread pools isolate R2 calls, R2 metadata fan-out, and audit-log writes; database IO is natively async over asyncpg.</li>
         <li>Operational endpoints include <code>/livez</code>, <code>/readyz</code>, <code>/startupz</code>, <code>/health</code>, and <code>/metrics</code>.</li>
       </ul>
       <table>
@@ -204,6 +204,14 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
         can be created and written. Retention also applies implicitly whenever R2 is unset, so a
         finished download is never discarded. Bound the retained workspace with
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
+      </p>
+      <p>
+        Persistence targets Postgres: set <code>DATABASE_URL</code> to a
+        <code>postgresql+asyncpg://</code> connection string and tune the pool with
+        <code>DATABASE_POOL_SIZE</code> / <code>DATABASE_POOL_TIMEOUT</code>.
+        <code>DATABASE_OPERATION_RETENTION_DAYS</code> bounds how long terminal
+        operation rows are kept (<code>0</code> disables purging). Apply schema
+        changes with <code>alembic upgrade head</code>.
       </p>
       <h3>Watch Mode configuration (<code>DOUYIN_WATCH_</code> prefix)</h3>
       <p>
@@ -404,10 +412,10 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
         <li>New-post deduplication is membership-based using a bounded recent-aweme_id set (capped by <code>DOUYIN_WATCH_RECENT_ID_CAP</code>). The checkpoint is only advanced after a successful run so an interrupted cycle re-downloads at most the most-recent window, which the f2 downloader overwrites idempotently.</li>
         <li>A live check delegates to the existing livestream downloader; a live-status miss or an already-in-progress recording is silently skipped.</li>
         <li>Each triggered download creates a regular operation row (<code>livestream_download</code> or <code>user_posts_incremental_download</code>) that can be polled through the existing operation endpoints.</li>
-        <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> SQLite table (sharing the operation database file) and all enabled subscriptions are re-armed automatically on startup.</li>
+        <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> Postgres table (same database as the operations table) and all enabled subscriptions are re-armed automatically on startup.</li>
         <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop is logged and resumed on next restart without pulling the pod out of rotation.</li>
         <li><code>/health</code> reports an informational <code>watch_subscriptions</code> field showing the count of currently active watcher loops.</li>
-        <li>Watch Mode shares the single-replica constraint of the rest of the service: subscriptions are stored in pod-local SQLite.</li>
+        <li>Watch Mode shares the single-replica constraint of the rest of the service: per-task download workspaces live on a ReadWriteOnce volume, so the Deployment cannot scale beyond one Pod.</li>
       </ul>
 
       <h3>Example</h3>
@@ -430,16 +438,17 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
       <h2>Operations</h2>
       <h3>Persistent Operation Store</h3>
       <p>
-        <code>src/dyvine/core/operations.py</code> owns a SQLite database at
-        <code>data/douyin/state/operations.db</code> by default. Override it with
-        <code>API_OPERATION_DB_PATH</code>.
+        <code>src/dyvine/db/postgres.py</code> persists operations and watch
+        subscriptions in Postgres (SQLAlchemy 2.0 async over asyncpg),
+        connecting to <code>DATABASE_URL</code>. The schema is versioned
+        by Alembic: run <code>alembic upgrade head</code> before the new
+        revision serves traffic.
       </p>
       <ul>
-        <li>WAL journaling allows concurrent readers and a single writer.</li>
-        <li>Per-thread reader connections allow parallel operation polling.</li>
-        <li>A shared writer connection is guarded by a lock.</li>
-        <li>Startup sweeps <code>pending</code> and <code>running</code> rows to <code>failed</code>.</li>
-        <li>SQLite calls run on a dedicated <code>dyvine-sqlite</code> executor.</li>
+        <li>Every operation row carries an <code>owner_id</code> and a heartbeat timestamp.</li>
+        <li>A per-replica janitor heartbeats owned rows and fails rows whose owner went quiet; only genuinely orphaned rows are touched.</li>
+        <li>Terminal rows older than <code>DATABASE_OPERATION_RETENTION_DAYS</code> are purged at boot and daily.</li>
+        <li>Unit tests inject in-memory fakes; the contract suite in <code>tests/db/</code> runs identical assertions against both backends.</li>
       </ul>
       <h3>Background Task Lifecycle</h3>
       <p>
@@ -467,7 +476,7 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
         <tbody>
           <tr><td><code>dyvine-r2</code></td><td>16</td><td>R2 PUT, HEAD, DELETE, and list operations.</td></tr>
           <tr><td><code>dyvine-r2-head</code></td><td>16</td><td>Per-key <code>head_object</code> fan-out during listing hydration.</td></tr>
-          <tr><td><code>dyvine-sqlite</code></td><td>4</td><td>OperationStore reads and writes.</td></tr>
+          <tr><td><code>asyncpg pool</code></td><td>5</td><td>Operation/watch reads and writes (<code>DATABASE_POOL_SIZE</code>).</td></tr>
           <tr><td><code>dyvine-audit</code></td><td>2</td><td>Lifecycle audit-log writes.</td></tr>
         </tbody>
       </table>
@@ -496,9 +505,9 @@ docker run -d \
       <pre><code>kubectl apply -k k8s/base
 kubectl apply -k k8s/overlays/production</code></pre>
       <div class="note">
-        <strong>Scaling note:</strong> The default operation store is pod-local SQLite backed by a
-        <code>ReadWriteOnce</code> PVC and a single writer. Replace it with a shared backend before
-        scaling beyond one replica.
+        <strong>Scaling note:</strong> Operation/watch state is multi-replica safe in Postgres, but
+        per-task download workspaces live on a <code>ReadWriteOnce</code> PVC. Move the workspaces
+        to shared storage before scaling beyond one replica.
       </div>
     </section>
 
@@ -556,7 +565,7 @@ make test          # pytest</code></pre>
         <li><code>README.md</code> is the concise maintainer entry point; keep it in sync with this page.</li>
         <li><code>AGENTS.md</code> and <code>CLAUDE.md</code> contain repository-local agent guidance and GitNexus workflow reminders.</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
-        <li>Runtime downloads, operation-store SQLite files, WAL/SHM files, logs, and generated caches are local artifacts and should not be committed.</li>
+        <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
         <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
       </ul>
     </section>

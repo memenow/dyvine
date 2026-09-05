@@ -7,10 +7,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fake_repos import FakeWatchRepository
 
 from dyvine.core.exceptions import LivestreamError, WatchSubscriptionNotFoundError
 from dyvine.core.settings import settings
-from dyvine.core.watch_store import WatchSubscriptionRecord, WatchSubscriptionStore
+from dyvine.db import WatchSubscriptionRecord
 from dyvine.schemas.posts import PostDetail, PostType
 from dyvine.services.posts import IncrementalDownloadResult, UserPostsPage
 from dyvine.services.watch import WatchService
@@ -18,7 +19,7 @@ from dyvine.services.watch import WatchService
 
 def _make_service(tmp_path: Path) -> tuple[WatchService, MagicMock, MagicMock]:
     """Build a WatchService over a real store with mocked sub-services."""
-    store = WatchSubscriptionStore(db_path=str(tmp_path / "watch.db"))
+    store = FakeWatchRepository()
     livestream = MagicMock()
     livestream.download_stream = AsyncMock()
     post = MagicMock()

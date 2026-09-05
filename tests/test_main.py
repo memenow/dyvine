@@ -1,10 +1,11 @@
 """Tests for the FastAPI application entry point and health probes."""
 
-import sqlite3
 import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
+from fake_repos import FakeOperationRepository, FakeWatchRepository
 from fastapi.testclient import TestClient
 
 from dyvine.core import dependencies
@@ -32,8 +33,28 @@ def _stub_douyin_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dependencies, "DouyinHandler", _DummyDouyinHandler)
 
 
+@pytest.fixture(autouse=True)
+def _inject_fake_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boot the lifespan's container against in-memory repositories.
+
+    Probe/router tests exercise HTTP behavior, not persistence, so the
+    container gets fresh fakes instead of a Postgres pool. Tests that
+    break the store patch ``healthcheck`` on the injected fake.
+    """
+    original = dependencies.ServiceContainer.initialize
+
+    async def _initialize_with_fakes(self: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("operation_store", FakeOperationRepository())
+        kwargs.setdefault("watch_store", FakeWatchRepository())
+        await original(self, **kwargs)
+
+    monkeypatch.setattr(
+        dependencies.ServiceContainer, "initialize", _initialize_with_fakes
+    )
+
+
 async def _async_noop() -> None:
-    """Stand-in for ``OperationStore.healthcheck`` in readiness tests.
+    """Stand-in for ``OperationRepository.healthcheck`` in readiness tests.
 
     ``/readyz`` now awaits the healthcheck, so the stub must also be a
     coroutine function; a plain ``lambda: None`` would raise ``TypeError:
@@ -156,7 +177,7 @@ def test_readiness_probe_returns_not_ready_when_operation_store_broken(
         """Test helper for
         test_readiness_probe_returns_not_ready_when_operation_store_broken.
         """
-        raise sqlite3.OperationalError("disk I/O error")
+        raise ConnectionError("database unreachable")
 
     with TestClient(app) as client:
         container = app.state.container

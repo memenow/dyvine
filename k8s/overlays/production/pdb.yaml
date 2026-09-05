@@ -16,10 +16,12 @@
 # node and a runbook for manual cluster maintenance (drain the PDB
 # selector, reschedule, restore the budget).
 #
-# Once the SQLite operation store is migrated to a shared backend (see
-# ``k8s/overlays/production/hpa.yaml`` for the multi-replica plan)
-# replace this with ``minAvailable: 1`` so rolling updates are
-# permitted without operator intervention.
+# Operation state already lives in the shared Postgres backend, but the
+# Deployment stays single-replica because per-task download workspaces
+# sit on the ReadWriteOnce ``runtime-data`` PVC (see the Deployment
+# strategy comment). Keep ``maxUnavailable: 0`` until the workspaces
+# move to shared storage; only then can this become ``minAvailable:
+# 1`` with a RollingUpdate strategy.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

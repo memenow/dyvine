@@ -13,8 +13,8 @@ Architecture diagrams are available in
 
 - Async download endpoints return an operation record immediately and continue
   work on tracked background tasks.
-- SQLite operation state uses WAL mode, per-thread reader connections, and a
-  single guarded writer.
+- Postgres operation state uses an asyncpg pool, per-replica heartbeats, and an
+  orphan sweep, with the schema versioned by Alembic.
 - API-key authentication is enabled by default on feature routers through the
   `X-API-Key` header.
 - User-supplied output paths are jailed inside `DOUYIN_DOWNLOAD_ROOT`, including
@@ -52,7 +52,7 @@ DOUYIN_COOKIE=<browser session cookie>
 Run the API locally:
 
 ```bash
-uv run uvicorn src.dyvine.main:app --reload
+PYTHONPATH=src uv run uvicorn dyvine.main:app --reload
 ```
 
 Useful local URLs:
@@ -165,10 +165,10 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
 - Keep `README.md`, `AGENTS.md`, `CLAUDE.md`, `.env.example`, and
   `docs/index.html` synchronized when configuration, commands, probes, or
   deployment behavior changes.
-- Runtime downloads, logs, SQLite files, WAL/SHM files, and local credentials
-  are intentionally ignored.
-- The default SQLite operation store is pod-local. Do not scale beyond one
-  replica without replacing it with a shared backend.
+- Runtime downloads, logs, and local credentials are intentionally ignored.
+- Operation/watch state is multi-replica safe in Postgres, but per-task
+  download workspaces live on a ReadWriteOnce volume. Do not scale beyond
+  one replica until the workspaces move to shared storage.
 
 ## Contributing
 

@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from dyvine.core.settings import (
     APISettings,
+    DatabaseSettings,
     DouyinSettings,
     R2Settings,
     SecuritySettings,
@@ -31,7 +32,6 @@ def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.debug is False
     assert s.host == "0.0.0.0"
     assert s.port == 8000
-    assert s.operation_db_path == "data/douyin/state/operations.db"
 
 
 def test_api_settings_port_too_low() -> None:
@@ -190,6 +190,42 @@ def test_douyin_settings_proxies_none_by_default() -> None:
     assert s.proxies["https://"] is None
 
 
+# ── DatabaseSettings ─────────────────────────────────────────────────────
+
+
+def test_database_settings_defaults() -> None:
+    """Localhost Postgres default for development."""
+    s = DatabaseSettings()
+    assert s.url == "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine"
+    assert s.pool_size == 5
+    assert s.pool_timeout == 30.0
+    assert s.operation_retention_days == 30
+
+
+def test_settings_rejects_default_database_url_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-debug builds must override the localhost database default."""
+    monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
+    monkeypatch.setenv("SECURITY_API_KEY", "real-key-value")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_accepts_explicit_database_url_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit URL + key boot a non-debug build."""
+    monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
+    monkeypatch.setenv("SECURITY_API_KEY", "real-key-value")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://db.internal:5432/dyvine")
+    s = Settings()
+    assert s.database.url == "postgresql+asyncpg://db.internal:5432/dyvine"
+
+
 # ── Settings (composite) ────────────────────────────────────────────────
 
 
@@ -200,7 +236,6 @@ def test_settings_convenience_properties() -> None:
     assert s.version == s.api.version
     assert s.prefix == s.api.prefix
     assert s.project_name == s.api.project_name
-    assert s.operation_db_path == s.api.operation_db_path
 
 
 def test_settings_backward_compat_properties() -> None:

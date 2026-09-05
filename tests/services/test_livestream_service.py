@@ -11,10 +11,10 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fake_repos import FakeOperationRepository
 
 import dyvine.services.livestreams as livestreams_mod
 from dyvine.core.exceptions import LivestreamError
-from dyvine.core.operations import OperationStore
 from dyvine.services.livestreams import LivestreamService
 
 # ---------------------------------------------------------------------------
@@ -436,7 +436,7 @@ class TestResolveStreams:
 @pytest.mark.asyncio
 async def test_run_stream_download_fails_without_artifact(tmp_path) -> None:
     """Verify run stream download fails without artifact."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-1",
@@ -501,7 +501,7 @@ async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
     as cleared. The test injects an in-progress task to simulate the
     racing case the lock guards against.
     """
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     service = object.__new__(LivestreamService)
     service.settings = SimpleNamespace(douyin_cookie="cookie")
     service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
@@ -547,7 +547,7 @@ async def test_download_stream_deduplicates_by_room_id(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
     """Verify get download status falls back to room ID."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-99",
@@ -568,7 +568,7 @@ async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_get_download_status_rejects_non_livestream_operation(tmp_path) -> None:
     """Verify get download status rejects non livestream operation."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_content_download",
         subject_id="user-1",
@@ -603,7 +603,7 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
     monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
     monkeypatch.setattr(path_safety.settings.douyin, "download_root", str(tmp_path))
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     service = object.__new__(LivestreamService)
     service.settings = SimpleNamespace(douyin_cookie="cookie")
     service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
@@ -700,13 +700,9 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
     )
     assert latest is not None
     assert latest.subject_id == "room-77"
-    connection = store._connect()  # type: ignore[attr-defined]
-    try:
-        count = connection.execute(
-            "SELECT COUNT(*) FROM operations WHERE subject_id = ? "
-            "AND operation_type = ?",
-            ("room-77", "livestream_download"),
-        ).fetchone()[0]
-    finally:
-        connection.close()
-    assert count == 1
+    matching = [
+        row
+        for row in store._rows.values()
+        if row.subject_id == "room-77" and row.operation_type == "livestream_download"
+    ]
+    assert len(matching) == 1
