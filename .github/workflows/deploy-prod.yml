@@ -112,6 +112,7 @@ jobs:
           --from-literal=R2_ACCESS_KEY_ID="${{ secrets.R2_ACCESS_KEY_ID }}" \
           --from-literal=R2_SECRET_ACCESS_KEY="${{ secrets.R2_SECRET_ACCESS_KEY }}" \
           --from-literal=DOUYIN_COOKIE="${{ secrets.DOUYIN_COOKIE }}" \
+          --from-literal=DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
           --namespace=dyvine \
           --dry-run=client -o yaml \
           | kubectl label --local=true -f - --overwrite -o yaml --dry-run=client \
@@ -135,6 +136,21 @@ jobs:
         # the public Actions log.
         echo "::add-mask::${INGRESS_HOST}"
         sed -i "s|INGRESS_HOST|${INGRESS_HOST}|g" k8s/overlays/production/ingress.yaml
+
+    - name: Run database migrations
+      run: |
+        # The schema migration must complete BEFORE the new Deployment
+        # revision rolls out, or new code boots against an old schema.
+        # Job specs are largely immutable, so any previous run is
+        # deleted first; the image tag follows the same placeholder
+        # convention as the environment overlays.
+        TAG="${{ needs.pre-deployment-checks.outputs.image-tag }}"
+        sed -i "s/newTag: main-latest/newTag: ${TAG}/" \
+          k8s/jobs/migrate/kustomization.yaml
+        kubectl delete job dyvine-migrate -n dyvine --ignore-not-found=true
+        kubectl apply -k k8s/jobs/migrate
+        kubectl wait --for=condition=complete job/dyvine-migrate \
+          -n dyvine --timeout=300s
 
     - name: Deploy to Production
       run: |
@@ -174,6 +190,7 @@ jobs:
 
         configMapGenerator:
           - name: dyvine-config
+            namespace: dyvine
             behavior: merge
             literals:
               - API_DEBUG=false

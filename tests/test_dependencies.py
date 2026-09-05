@@ -182,6 +182,99 @@ async def test_service_container_rejects_mixed_overrides(
 
 
 @pytest.mark.asyncio
+async def test_service_container_multi_replica_requires_shared_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-replica boot fails without R2 or a shared volume."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.api, "shared_file_storage", False)
+    for field in (
+        "account_id",
+        "access_key_id",
+        "secret_access_key",
+        "bucket_name",
+        "endpoint",
+    ):
+        monkeypatch.setattr(dependencies.settings.r2, field, "")
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    with pytest.raises(RuntimeError, match="API_MULTI_REPLICA=true requires"):
+        await container.initialize(
+            operation_store=operation_store, watch_store=watch_store
+        )
+    # Failed before any thread or pool existed: nothing to unwind.
+    assert container._initialized is False
+    assert container._r2_executor is None
+
+
+@pytest.mark.asyncio
+async def test_service_container_multi_replica_passes_with_r2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2 archival satisfies the multi-replica download constraint."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.r2, "account_id", "acc")
+    monkeypatch.setattr(dependencies.settings.r2, "access_key_id", "key")
+    monkeypatch.setattr(dependencies.settings.r2, "secret_access_key", "secret")
+    monkeypatch.setattr(dependencies.settings.r2, "bucket_name", "bucket")
+    monkeypatch.setattr(dependencies.settings.r2, "endpoint", "https://example.test")
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert container._initialized is True
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_multi_replica_passes_with_shared_fs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared volume exempts multi-replica boot from the R2 rule."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.api, "shared_file_storage", True)
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert container._initialized is True
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_watch_disabled_is_crud_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WATCH_ENABLED=false`` builds CRUD without loops or reconcile."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings, "watch_enabled", False)
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        service = container.watch_service
+        record, created = await service.create_subscription(
+            user_id="user-crud", backfill_on_create=True
+        )
+        assert created is True
+        assert service.active_count == 0
+        assert container._watch_reconcile_task is None
+        fetched = await service.get_subscription(record.subscription_id)
+        assert fetched.user_id == "user-crud"
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_service_container_boot_failure_unwinds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

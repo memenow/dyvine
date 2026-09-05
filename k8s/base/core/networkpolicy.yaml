@@ -24,10 +24,12 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
+  # ``part-of`` covers the API pods, the singleton watcher pod, and the
+  # short-lived migration Job: all three need the same egress
+  # allowlist, and only the API pods sit behind the Service.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: dyvine
-      app.kubernetes.io/component: api
+      app.kubernetes.io/part-of: dyvine
   policyTypes:
     - Ingress
   ingress:
@@ -93,10 +95,12 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
+  # ``part-of`` covers the API pods, the singleton watcher pod, and the
+  # short-lived migration Job: all three need the same egress
+  # allowlist, and only the API pods sit behind the Service.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: dyvine
-      app.kubernetes.io/component: api
+      app.kubernetes.io/part-of: dyvine
   policyTypes:
     - Egress
   egress:

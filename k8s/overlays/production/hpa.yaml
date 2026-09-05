@@ -1,8 +1,7 @@
-# HPA intentionally pinned to a single replica because per-task
-# download workspaces live on the ReadWriteOnce ``runtime-data`` PVC.
-# (Operation/watch state is multi-replica safe in Postgres; only the
-# file workspaces pin the Deployment.) Restore dynamic scaling after
-# the workspaces move to shared storage.
+# Production scales the API horizontally: workspaces are pod-local
+# scratch (R2 archival enforced by the multi-replica boot guard) and
+# operation/watch state is multi-replica safe in Postgres. First phase
+# caps at 3 replicas; raise after observing a scaling cycle.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -18,7 +17,7 @@ spec:
     kind: Deployment
     name: dyvine-api
   minReplicas: 1
-  maxReplicas: 1
+  maxReplicas: 3
   metrics:
   - type: Resource
     resource:

@@ -26,6 +26,10 @@ Design:
   with the app's uptime accounting) so NTP steps cannot cause negative
   sleeps or catch-up storms. Each due-time carries +/-10% jitter so several
   subscriptions never hammer upstream in lockstep.
+- **Split-brain-free scaling.** API replicas run with ``run_loops=False``
+  (``WATCH_ENABLED=false``): CRUD still works against shared Postgres,
+  but loops run on exactly one watcher replica, which adopts new rows
+  and drops deleted ones through periodic ``reconcile_loops`` passes.
 """
 
 from __future__ import annotations
@@ -77,13 +81,23 @@ class WatchService:
         livestream_service: LivestreamService,
         post_service: PostService,
         task_registry: BackgroundTaskRegistry | None = None,
+        run_loops: bool = True,
     ) -> None:
-        """Initialize the watch service from injected dependencies."""
+        """Initialize the watch service from injected dependencies.
+
+        Args:
+            run_loops: When ``False`` (``WATCH_ENABLED=false`` on API
+                replicas) the CRUD surface keeps working against shared
+                Postgres but no watcher loop is ever started locally;
+                the dedicated watcher replica adopts new rows through
+                :meth:`reconcile_loops`.
+        """
         self.settings = settings
         self.watch_store = watch_store
         self.livestream_service = livestream_service
         self.post_service = post_service
         self._task_registry = task_registry
+        self._run_loops = run_loops
         self._loops: dict[str, asyncio.Task[Any]] = {}
         self._lock: asyncio.Lock | None = None
 
@@ -236,13 +250,67 @@ class WatchService:
 
         Returns the number of loops started. Called from
         ``ServiceContainer.initialize`` after the container is marked ready.
+        A no-op returning ``0`` when this replica does not run loops.
         """
+        if not self._run_loops:
+            return 0
         records = await self.watch_store.list_subscriptions(enabled_only=True)
         for record in records:
             self._start_loop(record)
         if records:
             logger.info("resumed watch subscriptions", extra={"count": len(records)})
         return len(records)
+
+    async def reconcile_loops(self) -> tuple[int, int]:
+        """Adopt new rows and drop dead ones; return ``(started, stopped)``.
+
+        The watcher replica runs this periodically so subscriptions
+        created through a (CRUD-only) API replica start looping without
+        a watcher restart, and rows deleted or disabled elsewhere stop
+        promptly. Crashed loops (done tasks) are restarted here as well;
+        phase 6 adds bounded backoff around that restart.
+        """
+        if not self._run_loops:
+            return (0, 0)
+        records = {
+            record.subscription_id: record
+            for record in await self.watch_store.list_subscriptions()
+        }
+        stopped = 0
+        for subscription_id in list(self._loops):
+            record = records.get(subscription_id)
+            task = self._loops.get(subscription_id)
+            if record is None or not record.enabled:
+                await self._cancel_loop(subscription_id)
+                stopped += 1
+            elif task is not None and task.done():
+                # Crashed or exited loop: drop the stale handle so the
+                # adopt pass below restarts it.
+                self._loops.pop(subscription_id, None)
+        started = 0
+        for subscription_id, record in records.items():
+            if not record.enabled:
+                continue
+            task = self._loops.get(subscription_id)
+            if task is None or task.done():
+                self._start_loop(record)
+                started += 1
+        if started or stopped:
+            logger.info(
+                "reconciled watch loops",
+                extra={"started": started, "stopped": stopped},
+            )
+        return (started, stopped)
+
+    async def run_reconcile_forever(self, *, interval_seconds: float = 30.0) -> None:
+        """Loop :meth:`reconcile_loops` until cancelled.
+
+        Cancellation propagates to the caller, so the container stops
+        the loop with a plain ``task.cancel()`` during shutdown.
+        """
+        while True:
+            await self.reconcile_loops()
+            await asyncio.sleep(interval_seconds)
 
     async def stop_all(self) -> None:
         """Cancel every watcher loop.
@@ -294,7 +362,13 @@ class WatchService:
         return lock
 
     def _start_loop(self, record: WatchSubscriptionRecord) -> None:
-        """Spawn the watcher loop for a subscription if not already running."""
+        """Spawn the watcher loop for a subscription if not already running.
+
+        A no-op on CRUD-only replicas (``run_loops=False``): the row
+        persists, and the watcher replica adopts it on reconcile.
+        """
+        if not self._run_loops:
+            return
         existing = self._loops.get(record.subscription_id)
         if existing is not None and not existing.done():
             return

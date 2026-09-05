@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dyvine
+
+resources:
+  - migrate-job.yaml
+
+# Pinned by the deploy workflows with the release tag before apply
+# (see the ``sed`` step that mirrors the INGRESS_HOST precedent), so
+# the migration always runs from the image being deployed.
+images:
+  - name: ghcr.io/memenow/dyvine
+    newTag: main-latest
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/version: latest

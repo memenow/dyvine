@@ -8,6 +8,7 @@ resources:
   - ingress.yaml
   - hpa.yaml
   - pdb.yaml
+  - watcher-deployment.yaml
 
 patchesJson6902:
   - target:
@@ -30,8 +31,13 @@ images:
   - name: ghcr.io/memenow/dyvine
     newTag: main-latest
 
+# ``namespace`` is load-bearing: the base already stamps
+# ``namespace: dyvine`` on its resources, and without it the merge
+# lookup misses (``Name: dyvine-config, Namespace: "" does not
+# exist``) on current kustomize.
 configMapGenerator:
   - name: dyvine-config
+    namespace: dyvine
     behavior: merge
     literals:
       - API_DEBUG=false

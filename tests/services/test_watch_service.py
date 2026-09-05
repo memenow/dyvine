@@ -248,6 +248,119 @@ async def test_resume_persisted_starts_loops_and_stop_all_cancels(
     assert service.active_count == 0
 
 
+async def test_reconcile_adopts_and_drops_loops(tmp_path: Path) -> None:
+    """Reconcile starts loops for new rows, stops them for gone rows."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    try:
+        await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        started, stopped = await service.reconcile_loops()
+        assert (started, stopped) == (1, 0)
+        assert service.active_count == 1
+
+        # Steady state: nothing to do.
+        assert await service.reconcile_loops() == (0, 0)
+
+        # A row deleted out-of-band (e.g. via an API replica) stops here.
+        doomed = await service.watch_store.get_subscription_by_user("user01")
+        assert doomed is not None
+        await service.watch_store.delete_subscription(doomed.subscription_id)
+        started, stopped = await service.reconcile_loops()
+        assert (started, stopped) == (0, 1)
+        assert service.active_count == 0
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_restarts_crashed_loops(tmp_path: Path) -> None:
+    """A done loop handle is restarted on the next reconcile pass."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        assert service.active_count == 1
+
+        # Retire the live loop, then plant a done handle in its place.
+        original = service._loops.pop(record.subscription_id)
+        original.cancel()
+        try:
+            await original
+        except asyncio.CancelledError:
+            pass
+
+        async def _noop() -> None:
+            return None
+
+        crashed = asyncio.create_task(_noop())
+        await crashed
+        service._loops[record.subscription_id] = crashed
+        started, _ = await service.reconcile_loops()
+        assert started == 1
+        assert service.active_count == 1
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_skips_disabled_rows(tmp_path: Path) -> None:
+    """Disabled subscriptions neither start nor keep loops."""
+    service, _, _ = _make_service(tmp_path)
+    record = await service.watch_store.create_subscription(
+        user_id="user01",
+        live_poll_seconds=3600,
+        post_poll_seconds=3600,
+        enabled=False,
+    )
+    try:
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+        assert record.subscription_id not in service._loops
+    finally:
+        await service.stop_all()
+
+
+async def test_run_loops_false_is_crud_only(tmp_path: Path) -> None:
+    """CRUD-only replicas persist rows but never start loops."""
+    from fake_repos import FakeWatchRepository
+
+    store = FakeWatchRepository()
+    service = WatchService(
+        watch_store=store,
+        livestream_service=MagicMock(),
+        post_service=MagicMock(),
+        run_loops=False,
+    )
+    record, created = await service.create_subscription(
+        user_id="user01", backfill_on_create=True
+    )
+    assert created is True
+    assert service.active_count == 0
+    assert await service.resume_persisted() == 0
+    assert await service.reconcile_loops() == (0, 0)
+    fetched = await service.get_subscription(record.subscription_id)
+    assert fetched.user_id == "user01"
+    await service.delete_subscription(record.subscription_id)
+    assert await service.list_subscriptions() == []
+
+
+async def test_run_reconcile_forever_loops_until_cancelled(
+    tmp_path: Path,
+) -> None:
+    """The reconcile loop repeats passes and propagates cancellation."""
+    service, _, _ = _make_service(tmp_path)
+    task = asyncio.create_task(service.run_reconcile_forever(interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def test_watch_loop_runs_first_cycle_then_cancellable(
     tmp_path: Path,
 ) -> None:

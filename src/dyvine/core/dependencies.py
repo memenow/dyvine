@@ -140,6 +140,10 @@ class ServiceContainer:
         # shutdown stops it after the background registry drains.
         self._db: DatabaseSessionFactory | None = None
         self._janitor_task: asyncio.Task[None] | None = None
+        # Watch reconcile loop (watcher replicas only). Cancelled before
+        # the watcher loops themselves so it cannot restart a loop
+        # mid-shutdown.
+        self._watch_reconcile_task: asyncio.Task[Any] | None = None
 
     async def initialize(
         self,
@@ -191,6 +195,20 @@ class ServiceContainer:
             raise ValueError(
                 "Pass both operation_store and watch_store overrides, or "
                 "neither; mixing a real backend with a fake is not supported."
+            )
+        # Multi-replica guard (fail fast, before any thread or pool exists).
+        # Downloads stage through pod-local workspaces, so a second replica
+        # can only work when finished files land somewhere shared.
+        if (
+            settings.api.multi_replica
+            and not settings.r2.is_configured
+            and not settings.api.shared_file_storage
+        ):
+            raise RuntimeError(
+                "API_MULTI_REPLICA=true requires downloads to survive pod "
+                "boundaries: configure R2 archival (R2_*) or mount a shared "
+                "ReadWriteMany volume at DOUYIN_DOWNLOAD_ROOT and set "
+                "API_SHARED_FILE_STORAGE=true."
             )
 
         # Create dedicated thread pool executors for each blocking-IO
@@ -317,13 +335,17 @@ class ServiceContainer:
         # other long-lived download task. Watch mode is non-critical --
         # it never gates readiness -- so a failure to build it must not
         # abort startup or leak the executors created above; log and
-        # continue without watch instead.
+        # continue without watch instead. ``WATCH_ENABLED=false`` (API
+        # replicas) still builds the service so subscription CRUD keeps
+        # working against shared Postgres, but no loop ever starts
+        # locally; the watcher replica adopts new rows on reconcile.
         try:
             self._services["watch_service"] = WatchService(
                 watch_store=watch_store,
                 livestream_service=self._services["livestream_service"],
                 post_service=self._services["post_service"],
                 task_registry=self._background_tasks,
+                run_loops=settings.watch_enabled,
             )
         except Exception:
             logger.exception(
@@ -337,12 +359,20 @@ class ServiceContainer:
         # container is marked ready, since resume schedules tasks that may
         # resolve services back through the container. A resume failure is
         # non-fatal for the same reason: log it and leave the container up.
+        # The reconcile loop then keeps adoptions prompt on replicas that
+        # run loops; it is tracked separately so shutdown can stop it
+        # before the loops it supervises.
         watch_service = self._services.get("watch_service")
         if isinstance(watch_service, WatchService):
             try:
                 await watch_service.resume_persisted()
             except Exception:
                 logger.exception("watch subscription resume failed; continuing startup")
+            if settings.watch_enabled:
+                self._watch_reconcile_task = self._background_tasks.spawn(
+                    watch_service.run_reconcile_forever(),
+                    name="watch-reconcile",
+                )
 
     async def _abort_startup(self) -> None:
         """Unwind a failed ``initialize`` without marking ready.
@@ -355,6 +385,13 @@ class ServiceContainer:
         """
         if self._janitor_task is not None:
             task, self._janitor_task = self._janitor_task, None
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._watch_reconcile_task is not None:
+            task, self._watch_reconcile_task = self._watch_reconcile_task, None
             task.cancel()
             try:
                 await task
@@ -395,6 +432,16 @@ class ServiceContainer:
         """
         if not self._initialized:
             return
+
+        # Stop the reconcile loop before the loops it supervises so it
+        # cannot restart a watcher mid-shutdown.
+        if self._watch_reconcile_task is not None:
+            task, self._watch_reconcile_task = self._watch_reconcile_task, None
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         # Stop watcher loops first so they cannot schedule new downloads
         # while the background-task registry is being drained.

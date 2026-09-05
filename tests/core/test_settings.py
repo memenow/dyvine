@@ -202,6 +202,26 @@ def test_database_settings_defaults() -> None:
     assert s.operation_retention_days == 30
 
 
+def test_multi_replica_settings_defaults() -> None:
+    """Single-replica local development needs no shared storage."""
+    s = APISettings()
+    assert s.multi_replica is False
+    assert s.shared_file_storage is False
+
+
+def test_watch_enabled_defaults_true() -> None:
+    """One process runs watch loops unless explicitly split."""
+    assert Settings().watch_enabled is True
+
+
+def test_watch_enabled_reads_unprefixed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WATCH_ENABLED`` (not ``DOUYIN_WATCH_*``) flips the split."""
+    monkeypatch.setenv("WATCH_ENABLED", "false")
+    assert Settings().watch_enabled is False
+
+
 def test_settings_rejects_default_database_url_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

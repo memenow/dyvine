@@ -16,12 +16,10 @@
 # node and a runbook for manual cluster maintenance (drain the PDB
 # selector, reschedule, restore the budget).
 #
-# Operation state already lives in the shared Postgres backend, but the
-# Deployment stays single-replica because per-task download workspaces
-# sit on the ReadWriteOnce ``runtime-data`` PVC (see the Deployment
-# strategy comment). Keep ``maxUnavailable: 0`` until the workspaces
-# move to shared storage; only then can this become ``minAvailable:
-# 1`` with a RollingUpdate strategy.
+# The API Deployment rolls (RollingUpdate + HPA), so voluntary
+# disruptions are safe as long as one replica stays up. The singleton
+# watcher intentionally has no PDB: it takes no traffic, and a
+# disruption just delays polling until Kubernetes restarts it.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -32,7 +30,7 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
-  maxUnavailable: 0
+  minAvailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dyvine

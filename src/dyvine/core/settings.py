@@ -72,6 +72,23 @@ class APISettings(BaseSettings):
     rate_limit_per_second: int = Field(
         default=10, ge=1, description="API rate limiting threshold per second"
     )
+    multi_replica: bool = Field(
+        default=False,
+        description=(
+            "More than one API replica serves traffic behind a shared "
+            "Postgres database. Boot refuses to complete unless downloads "
+            "can survive pod boundaries: either R2 archival is configured "
+            "or ``shared_file_storage`` confirms a shared volume."
+        ),
+    )
+    shared_file_storage: bool = Field(
+        default=False,
+        description=(
+            "``DOUYIN_DOWNLOAD_ROOT`` is backed by storage every replica "
+            "can see (e.g. a ReadWriteMany volume). Only consulted when "
+            "``multi_replica`` is true and R2 is unconfigured."
+        ),
+    )
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
         description=(
@@ -449,6 +466,18 @@ class Settings(BaseSettings):
     watch: WatchSettings = Field(default_factory=WatchSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
+    # Root-level (unprefixed) flags. ``WATCH_ENABLED`` lives here rather
+    # than under ``DOUYIN_WATCH_`` so the API/watcher split reads as a
+    # deployment concern, not a polling knob.
+    watch_enabled: bool = Field(
+        default=True,
+        description=(
+            "Run watch-subscription loops in this process. API replicas "
+            "set ``WATCH_ENABLED=false`` (CRUD-only against shared "
+            "Postgres) while a single watcher replica runs the loops."
+        ),
+    )
+
     @model_validator(mode="after")
     def _validate_security_in_production(self) -> Self:
         """Reject placeholder production values when ``api.debug`` is False.
@@ -589,9 +618,12 @@ class Settings(BaseSettings):
         """Get HTTPS proxy from Douyin settings."""
         return self.douyin.proxy_https
 
-    model_config = SettingsConfigDict(
-        env_file=".env", case_sensitive=True, extra="ignore"
-    )
+    # No ``case_sensitive`` here: pydantic-settings matches env names
+    # against field names exactly when it is set, which would require a
+    # lowercase ``watch_enabled`` variable for the root flag below. Each
+    # nested group carries its own prefixed config, so root-level
+    # case-insensitivity cannot collide with them.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache

@@ -58,9 +58,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Copy virtual environment and application code
+# Copy virtual environment, application code, and the Alembic migration
+# tree. The ``dyvine-migrate`` Job runs ``alembic upgrade head`` from
+# this image, so the ini file and versions directory must ship with it.
 COPY --from=builder /app/.venv /app/.venv
 COPY src/ ./src/
+COPY alembic.ini ./alembic.ini
+COPY alembic/ ./alembic/
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
