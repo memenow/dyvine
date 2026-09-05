@@ -49,16 +49,17 @@ if str(SRC_DIR) not in sys.path:
 # CI legs at teardown with PytestUnraisableExceptionWarning after all tests
 # pass. Records per-loop creation/run/ping stacks in memory and prints only
 # loops still alive and unclosed at session finish. Prints nothing locally.
-_probe_loops: dict[int, dict] = {}
+_probe_loops: list[dict] = []
 
 
 def _probe_record(loop, kind: str) -> None:  # type: ignore[no-untyped-def]
-    entry = _probe_loops.get(id(loop))
-    if entry is None or entry["ref"]() is not loop:
-        return
-    slot = entry[kind]
-    if len(slot) < 2:
-        slot.append("".join(_traceback.format_stack()))
+    thread = _threading.current_thread().name
+    for entry in _probe_loops:
+        if entry["ref"]() is loop:
+            slot = entry[kind]
+            if len(slot) < 2:
+                slot.append((thread, "".join(_traceback.format_stack())))
+            return
 
 
 def _probe_wrap(loop, name: str) -> None:  # type: ignore[no-untyped-def]
@@ -83,13 +84,15 @@ with _warnings.catch_warnings():
 class _ProbePolicy(_real_policy.__class__):  # type: ignore[misc]
     def new_event_loop(self):  # type: ignore[no-untyped-def]
         loop = super().new_event_loop()
-        _probe_loops[id(loop)] = {
-            "thread": _threading.current_thread().name,
-            "created": "".join(_traceback.format_stack()),
-            "ref": _weakref.ref(loop),
-            "runs": [],
-            "pings": [],
-        }
+        _probe_loops.append(
+            {
+                "thread": _threading.current_thread().name,
+                "created": "".join(_traceback.format_stack()),
+                "ref": _weakref.ref(loop),
+                "runs": [],
+                "pings": [],
+            }
+        )
         for name in (
             "run_forever",
             "run_until_complete",
@@ -128,19 +131,18 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
             f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
         )
         print(f"PROBE-READY={ready}")
-        match = next(
-            (e for e in _probe_loops.values() if e["ref"]() is loop),
-            None,
-        )
-        if match is None:
-            print("PROBE-ORIGIN=unknown (created before conftest import?)")
+        matches = [e for e in _probe_loops if e["ref"]() is loop]
+        print(f"PROBE-MATCHES={len(matches)}")
+        if not matches:
+            print("PROBE-ORIGIN=unknown (bypassed the event-loop policy?)")
             continue
-        print(f"PROBE-CREATED-THREAD={match['thread']}")
-        print("PROBE-CREATED:" + match["created"][:6500])
-        for i, stack in enumerate(match["runs"]):
-            print(f"PROBE-RUN-{i}:" + stack[-2500:])
-        for i, stack in enumerate(match["pings"]):
-            print(f"PROBE-PING-{i}:" + stack[-2500:])
+        for m, match in enumerate(matches):
+            print(f"PROBE-CREATED-{m}-THREAD={match['thread']}")
+            print(f"PROBE-CREATED-{m}:" + match["created"][:6500])
+            for i, (thread, stack) in enumerate(match["runs"]):
+                print(f"PROBE-RUN-{m}-{i}-THREAD={thread}:" + stack[-2500:])
+            for i, (thread, stack) in enumerate(match["pings"]):
+                print(f"PROBE-PING-{m}-{i}-THREAD={thread}:" + stack[-2500:])
 
 
 # ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
