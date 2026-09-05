@@ -603,7 +603,15 @@ class WatchService:
         except LivestreamError:
             return  # offline, no stream, or already recording -> skip
         except RuntimeError:
-            return  # background registry closed during shutdown
+            # Usually the background registry closing during shutdown,
+            # but a persistent non-shutdown RuntimeError would otherwise
+            # loop forever with zero observability, so always log it.
+            logger.warning(
+                "watch live check failed",
+                extra={"subscription_id": record.subscription_id},
+                exc_info=True,
+            )
+            return
         except Exception:
             logger.warning(
                 "watch live check failed",
@@ -637,6 +645,13 @@ class WatchService:
         except (UserNotFoundError, ServiceError):
             return  # upstream/profile failure -> keep checkpoint, retry later
         except RuntimeError:
+            # Same observability rule as the live check: never swallow
+            # silently, even though shutdown is the usual cause.
+            logger.warning(
+                "watch post check failed",
+                extra={"subscription_id": record.subscription_id},
+                exc_info=True,
+            )
             return
         except Exception:
             logger.warning(

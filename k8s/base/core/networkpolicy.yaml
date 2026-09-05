@@ -4,6 +4,12 @@
 # Allows traffic on the container's HTTP port (8000) from:
 #   * Pods in the ``envoy-gateway-system`` namespace so the Envoy
 #     data-plane proxies can forward external requests to the API.
+#     In Envoy Gateway's default deployment mode the managed Envoy
+#     fleet runs in the controller namespace (``envoy-gateway-system``),
+#     NOT in the Gateway's own namespace — so this selector is where
+#     edge traffic legitimately comes from. If the cluster ever moves
+#     to Gateway Namespace Mode (data plane per Gateway namespace),
+#     add this namespace (``dyvine``) to the ``from`` list below.
 #     Selection is based on the ``kubernetes.io/metadata.name`` label
 #     that the kubelet sets automatically on every namespace from
 #     Kubernetes 1.22 onward.

@@ -17,6 +17,10 @@ patchesJson6902:
       name: dyvine-api
     path: patches.yaml
 
+patches:
+  # Drops the base PVC (see no-pvc.yaml): prod mounts emptyDir.
+  - path: no-pvc.yaml
+
 # ``newTag: main-latest`` is a placeholder kept only so ``kustomize
 # build`` succeeds in local dev and CI. There is no CD pipeline, so a
 # manual rollout renders the overlay, substitutes the image tag plus

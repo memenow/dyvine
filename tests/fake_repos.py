@@ -320,9 +320,14 @@ class FakeWatchRepository:
         """Check-then-insert; exact wherever one process writes.
 
         The in-memory fake has no cross-process lock to take, so this
-        mirrors the ordering (cap first, then duplicate) without the
+        mirrors the ordering (duplicate first, then cap) without the
         advisory lock the Postgres backend uses.
         """
+        if user_id in self._by_user:
+            raise WatchDuplicateError(
+                f"Watch subscription for user {user_id} already exists",
+                details={"user_id": user_id},
+            )
         if len(self._rows) >= max_subscriptions:
             raise RateLimitError(
                 "Watch subscription limit reached "

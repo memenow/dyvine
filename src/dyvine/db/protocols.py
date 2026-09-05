@@ -125,8 +125,10 @@ class WatchRepository(Protocol):
         The cap check and the insert are one atomic unit: concurrent
         creators on other replicas or processes cannot both slip under
         a stale count the way a separate ``count_subscriptions`` check
-        allows. Backends without cross-process locking (the in-memory
-        fake) implement the same check-then-insert ordering, which is
+        allows. The duplicate check comes first, so a duplicate at cap
+        raises ``WatchDuplicateError`` (idempotent convergence) rather
+        than ``RateLimitError``. Backends without cross-process locking
+        (the in-memory fake) implement the same ordering, which is
         exact wherever only one process writes.
 
         Raises:

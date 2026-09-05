@@ -690,6 +690,21 @@ async def test_capped_create_never_overshoots_cap(
     assert await repo.count_subscriptions() == 3
 
 
+async def test_capped_create_prefers_duplicate_over_cap(
+    backend: BackendContext,
+) -> None:
+    """A duplicate at cap converges idempotently, not 429."""
+    repo = backend.make_watch()
+    await repo.create_subscription_capped(
+        **_subscription_kwargs("dup-1"), max_subscriptions=1
+    )
+    with pytest.raises(WatchDuplicateError):
+        await repo.create_subscription_capped(
+            **_subscription_kwargs("dup-1"), max_subscriptions=1
+        )
+    assert await repo.count_subscriptions() == 1
+
+
 async def test_update_subscription_ignores_unknown_fields(
     backend: BackendContext,
 ) -> None:

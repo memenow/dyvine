@@ -1,0 +1,15 @@
+# Drop the base's ``dyvine-operation-state`` PVC from production.
+#
+# The base Deployment mounts it as ``runtime-data``, but ``patches.yaml``
+# swaps that volume to ``emptyDir`` here (prod runs the API stateless
+# with R2 archival, enforced by the ``API_MULTI_REPLICA`` boot guard),
+# so applying the claim would provision an unused 1Gi volume on every
+# rollout. Strategic-merge ``$patch: delete`` removes the whole
+# resource from the rendered overlay; the base keeps it for
+# single-replica local/dev use.
+$patch: delete
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dyvine-operation-state
+  namespace: dyvine

@@ -75,7 +75,8 @@ class APISettings(BaseSettings):
         description=(
             "Sustained request budget per caller per second, enforced "
             "per replica by the token-bucket middleware. Buckets key on "
-            "the X-API-Key header when present, else the client IP."
+            "the X-API-Key header only when it matches the configured "
+            "key; anything else shares the client-IP bucket."
         ),
     )
     rate_limit_burst: int = Field(

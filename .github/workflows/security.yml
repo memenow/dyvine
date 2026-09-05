@@ -37,7 +37,13 @@ jobs:
       run: uv sync --frozen
 
     - name: Run dependency audit
-      run: uv run --with pip-audit pip-audit . --locked --strict --format=json --output pip-audit-report.json
+      # pip-audit cannot read uv.lock ("no lockfiles found"), and
+      # auditing an exported requirements file re-resolves through pip,
+      # whose resolver disagrees with uv's on some pins. Instead audit
+      # the synced environment in place: ``uv sync --frozen`` installs
+      # exactly the locked versions, so ``--local`` audits the lock set
+      # with no reinstall involved.
+      run: uv run --with pip-audit pip-audit --local --strict --format=json --output pip-audit-report.json
 
     - name: Upload safety results
       uses: actions/upload-artifact@v4

@@ -290,7 +290,7 @@ GET  /api/v1/posts/operations/{operation_id}</code></pre>
       <pre><code>POST /api/v1/livestreams/users/{user_id}/stream:download
 POST /api/v1/livestreams/stream:download
 GET  /api/v1/livestreams/operations/{operation_id}</code></pre>
-      <p>The URL endpoint validates the host against an allowlist of <code>*.douyin.com</code> domains to prevent SSRF.</p>
+      <p>The URL endpoint validates the host against an exact allowlist (<code>douyin.com</code>, <code>www.douyin.com</code>, <code>live.douyin.com</code>, <code>v.douyin.com</code>) to prevent SSRF — other subdomains get 422.</p>
 
       <h3>Watch</h3>
       <pre><code>POST   /api/v1/watch
@@ -600,7 +600,7 @@ make test          # pytest</code></pre>
         </thead>
         <tbody>
           <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, lint/type gates, migration drift check, manifest render check, container scan. No image push, no releases: this project ships by manual <code>kubectl</code> rollout.</td></tr>
-          <tr><td><code>security.yml</code></td><td>Weekly schedule and manual</td><td>Dependency and container security audit.</td></tr>
+          <tr><td><code>security.yml</code></td><td>Pull request and push to <code>main</code>, weekly schedule, manual</td><td>Dependency and container security audit.</td></tr>
         </tbody>
       </table>
     </section>

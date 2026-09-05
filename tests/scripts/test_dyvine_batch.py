@@ -333,6 +333,26 @@ async def test_run_concurrent_times_out_unfinished_jobs(
     assert "TIMEOUT" in out
 
 
+def test_resolve_settings_trailing_slash_prefix() -> None:
+    """A trailing-slash prefix is normalised before URL joining."""
+    kwargs: dict[str, Any] = {
+        "api_url": "http://x:8000",
+        "api_key": "k",
+        "api_prefix": "/api/v1/",
+        "include_likes": False,
+        "max_concurrent": 3,
+        "poll_interval": 5.0,
+        "timeout": 30.0,
+        "environ": {},
+    }
+    resolved = config.resolve_settings(**kwargs)
+    assert resolved.api_prefix == "/api/v1"
+    assert (
+        client.DyvineClient(resolved).submit_url("u1")
+        == "http://x:8000/api/v1/posts/users/u1/posts:download"
+    )
+
+
 def test_resolve_settings_max_poll_rounds() -> None:
     """Flag beats env, env beats the 720 default; garbage fails fast."""
     kwargs: dict[str, Any] = {

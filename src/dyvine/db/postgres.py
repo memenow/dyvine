@@ -355,7 +355,10 @@ class PostgresWatchRepository:
         A transaction-scoped advisory lock serialises concurrent
         creators across replicas: without it, two processes could both
         count N < cap and both insert. The lock dies with the
-        transaction, so there is no cleanup path to forget.
+        transaction, so there is no cleanup path to forget. The
+        duplicate check comes first so a cross-replica duplicate race
+        at cap converges to the idempotent existing row
+        (``WatchDuplicateError``) instead of a spurious 429.
         """
         stamp = _now_iso()
         row = WatchSubscriptionRow(
@@ -380,6 +383,18 @@ class PostgresWatchRepository:
                             )
                         )
                     )
+                    duplicate = (
+                        await session.execute(
+                            select(WatchSubscriptionRow.subscription_id).where(
+                                WatchSubscriptionRow.user_id == user_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if duplicate is not None:
+                        raise WatchDuplicateError(
+                            f"Watch subscription for user {user_id} " "already exists",
+                            details={"user_id": user_id},
+                        )
                     total = (
                         await session.execute(
                             select(func.count()).select_from(WatchSubscriptionRow)
