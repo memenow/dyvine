@@ -91,6 +91,37 @@ def test_resolve_settings_empty_port_falls_back(tmp_path: Path) -> None:
     assert resolved.api_url == "http://example.com:8000"
 
 
+def test_resolve_settings_dotenv_dyvine_keys(tmp_path: Path) -> None:
+    """``DYVINE_*`` keys in ``.env`` sit between env and legacy keys."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "DYVINE_API_KEY=dotenv-key\n"
+        "DYVINE_API_URL=http://dotenv:9000\n"
+        "DYVINE_API_PREFIX=/dotenv\n"
+        "DYVINE_MAX_POLL_ROUNDS=7\n",
+        encoding="utf-8",
+    )
+    kwargs: dict[str, Any] = {
+        "api_url": None,
+        "api_key": None,
+        "api_prefix": None,
+        "include_likes": False,
+        "max_concurrent": 3,
+        "poll_interval": 5.0,
+        "timeout": 30.0,
+        "environ": {},
+        "dotenv_path": dotenv,
+    }
+    resolved = config.resolve_settings(**kwargs)
+    assert (resolved.api_key, resolved.api_url) == ("dotenv-key", "http://dotenv:9000")
+    assert (resolved.api_prefix, resolved.max_poll_rounds) == ("/dotenv", 7)
+    # Real env outranks ``.env`` ``DYVINE_*``.
+    over = config.resolve_settings(
+        **{**kwargs, "environ": {"DYVINE_API_KEY": "env-key"}}
+    )
+    assert over.api_key == "env-key"
+
+
 def test_resolve_settings_root_prefix_normalizes_to_empty(tmp_path: Path) -> None:
     """A bare ``/`` prefix means "no prefix", not a literal root segment."""
     resolved = config.resolve_settings(

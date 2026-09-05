@@ -86,14 +86,19 @@ def resolve_settings(
     env: Mapping[str, str] = os.environ if environ is None else environ
     dotenv = load_dotenv(dotenv_path)
 
-    key = api_key or env.get("DYVINE_API_KEY") or dotenv.get("SECURITY_API_KEY", "")
+    key = (
+        api_key
+        or env.get("DYVINE_API_KEY")
+        or dotenv.get("DYVINE_API_KEY")
+        or dotenv.get("SECURITY_API_KEY", "")
+    )
     if not key:
         raise SettingsError(
             "Missing API key: pass --api-key, set DYVINE_API_KEY, "
             "or set SECURITY_API_KEY in .env"
         )
 
-    url = api_url or env.get("DYVINE_API_URL") or ""
+    url = api_url or env.get("DYVINE_API_URL") or dotenv.get("DYVINE_API_URL") or ""
     if not url:
         host = (dotenv.get("API_HOST") or "").strip()
         # An empty ``API_PORT=`` must fall back like a missing one,
@@ -105,6 +110,7 @@ def resolve_settings(
     prefix = (
         api_prefix
         or env.get("DYVINE_API_PREFIX")
+        or dotenv.get("DYVINE_API_PREFIX")
         or dotenv.get("API_PREFIX")
         or DEFAULT_API_PREFIX
     )
@@ -128,7 +134,7 @@ def resolve_settings(
     raw_rounds = (
         max_poll_rounds
         if max_poll_rounds is not None
-        else env.get("DYVINE_MAX_POLL_ROUNDS")
+        else env.get("DYVINE_MAX_POLL_ROUNDS") or dotenv.get("DYVINE_MAX_POLL_ROUNDS")
     )
     try:
         rounds = DEFAULT_MAX_POLL_ROUNDS if raw_rounds is None else int(raw_rounds)
