@@ -10,6 +10,7 @@ modules with side effects at import time (e.g. Prometheus metrics in storage.py)
 from __future__ import annotations
 
 import asyncio as _asyncio
+import asyncio.selector_events as _selector_events
 import gc as _gc
 import os
 import sys
@@ -50,6 +51,22 @@ if str(SRC_DIR) not in sys.path:
 # pass. Records per-loop creation/run/ping stacks in memory and prints only
 # loops still alive and unclosed at session finish. Prints nothing locally.
 _probe_loops: list[dict] = []
+_probe_ctors: list[dict] = []
+_orig_selector_init = _selector_events.BaseSelectorEventLoop.__init__
+
+
+def _spy_selector_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+    _probe_ctors.append(
+        {
+            "ref": _weakref.ref(self),
+            "thread": _threading.current_thread().name,
+            "stack": "".join(_traceback.format_stack()),
+        }
+    )
+    return _orig_selector_init(self, *args, **kwargs)
+
+
+_selector_events.BaseSelectorEventLoop.__init__ = _spy_selector_init  # type: ignore[method-assign]
 
 
 def _probe_record(loop, kind: str) -> None:  # type: ignore[no-untyped-def]
@@ -155,6 +172,11 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
         print(f"PROBE-READY={ready}")
         matches = [e for e in _probe_loops if e["ref"]() is loop]
         print(f"PROBE-MATCHES={len(matches)}")
+        ctor_matches = [e for e in _probe_ctors if e["ref"]() is loop]
+        print(f"PROBE-CTOR-MATCHES={len(ctor_matches)}")
+        for m, cm in enumerate(ctor_matches):
+            print(f"PROBE-CTOR-{m}-THREAD={cm['thread']}")
+            print(f"PROBE-CTOR-{m}:" + cm["stack"][:6500])
         if not matches:
             print("PROBE-ORIGIN=unknown (bypassed the event-loop policy?)")
             continue
