@@ -267,14 +267,17 @@ def test_rate_limit_end_to_end_envelope() -> None:
     async def _items() -> dict[str, bool]:
         return {"ok": True}
 
-    client = TestClient(inner)
-    admitted = client.get("/items")
-    assert admitted.status_code == 200
-    assert admitted.headers["X-Correlation-ID"] == "corr-e2e"
-    denied = client.get("/items")
-    assert denied.status_code == 429
-    assert denied.headers["Retry-After"] == "1"
-    assert denied.headers["X-Correlation-ID"] == "corr-e2e"
-    payload = denied.json()
-    assert payload["error"] is True
-    assert payload["error_code"] == "RateLimitError"
+    # Closed via context manager: a bare ``TestClient`` leaves its portal
+    # event loop (plus socketpair) for the GC, whose unraisable warnings
+    # then fail an unrelated test under ``filterwarnings = error``.
+    with TestClient(inner) as client:
+        admitted = client.get("/items")
+        assert admitted.status_code == 200
+        assert admitted.headers["X-Correlation-ID"] == "corr-e2e"
+        denied = client.get("/items")
+        assert denied.status_code == 429
+        assert denied.headers["Retry-After"] == "1"
+        assert denied.headers["X-Correlation-ID"] == "corr-e2e"
+        payload = denied.json()
+        assert payload["error"] is True
+        assert payload["error_code"] == "RateLimitError"

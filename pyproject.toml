@@ -48,7 +48,7 @@ dependencies = [
     # Utilities
     "prometheus-client>=0.25.0,<1.0.0",
     "psutil>=7.2.2,<8.0.0",
-    "python-multipart>=0.0.27,<0.1.0",
+    "python-multipart>=0.0.30,<0.1.0",
 
     # Persistence. Async SQLAlchemy over asyncpg is the only production
     # backend; Alembic versions the schema (see ``alembic/``).
@@ -77,6 +77,10 @@ filterwarnings = [
     "ignore:websockets\\..*:DeprecationWarning",
     "ignore::DeprecationWarning:websockets.*",
     "ignore::DeprecationWarning:websockets_proxy.*",
+    # starlette >= 1.1 deprecates the httpx-backed TestClient in favour of
+    # a not-yet-available ``httpx2``; the suite stays on httpx until that
+    # migration path exists. Drop this once tests move off TestClient.
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
     # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
     # cleanup) to a warning. Older test environments did not surface
     # these; the underlying socket is closed by the OS regardless.
@@ -106,7 +110,7 @@ override-dependencies = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.1.0",
     "websockets>=16.0",
-    "cryptography>=47.0.0",
+    "cryptography>=50.0.0",
     "black>=26.3.1",
     "aiofiles>=24.1.0",
     "pyyaml>=6.0.2",
