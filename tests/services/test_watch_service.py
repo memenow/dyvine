@@ -275,8 +275,129 @@ async def test_reconcile_adopts_and_drops_loops(tmp_path: Path) -> None:
         await service.stop_all()
 
 
-async def test_reconcile_restarts_crashed_loops(tmp_path: Path) -> None:
-    """A done loop handle is restarted on the next reconcile pass."""
+async def _plant_crash(service: WatchService, subscription_id: str) -> None:
+    """Retire the live loop and plant a failed handle in its place."""
+    original = service._loops.pop(subscription_id)
+    original.cancel()
+    try:
+        await original
+    except asyncio.CancelledError:
+        pass
+
+    async def _boom() -> None:
+        raise RuntimeError("loop boom")
+
+    crashed = asyncio.create_task(_boom())
+    with pytest.raises(RuntimeError, match="loop boom"):
+        await crashed
+    service._loops[subscription_id] = crashed
+
+
+async def test_reconcile_restarts_crashed_loops_under_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crashed loop restarts once its backoff elapses, not before."""
+    import time
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        assert service.active_count == 1
+
+        await _plant_crash(service, record.subscription_id)
+        # Crash noted (count 1, 30s backoff) but not yet restarted.
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+        assert service._crash_counts[record.subscription_id] == 1
+
+        clock[0] += 31.0
+        started, _ = await service.reconcile_loops()
+        assert started == 1
+        assert service.active_count == 1
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_parks_flapping_loops_with_alert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past the crash cap the loop stays down and an alert is logged."""
+    import logging
+    import time
+
+    from dyvine.services import watch as watch_module
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cap = watch_module._MAX_CONSECUTIVE_CRASHES
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        for _ in range(cap):
+            await _plant_crash(service, record.subscription_id)
+            assert await service.reconcile_loops() == (0, 0)
+            clock[0] += 400.0  # past any backoff
+            started, _ = await service.reconcile_loops()
+            assert started == 1
+        # One crash too many: parked, never restarted again.
+        await _plant_crash(service, record.subscription_id)
+        with caplog.at_level(logging.ERROR, logger="dyvine.services.watch"):
+            started, stopped = await service.reconcile_loops()
+        assert (started, stopped) == (0, 1)
+        assert service.active_count == 0
+        assert any("parked" in r.getMessage() for r in caplog.records)
+        clock[0] += 3600.0
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_resets_budget_after_healthy_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restarted loop that survives a pass clears its crash count."""
+    import time
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        await _plant_crash(service, record.subscription_id)
+        await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] == 1
+        clock[0] += 31.0
+        await service.reconcile_loops()
+        # The restarted loop is alive on the next pass: budget reset.
+        clock[0] += 30.0
+        assert await service.reconcile_loops() == (0, 0)
+        assert record.subscription_id not in service._crash_counts
+    finally:
+        await service.stop_all()
+
+
+async def test_delete_clears_crash_budget(tmp_path: Path) -> None:
+    """Deleting a flapping subscription never restarts it afterwards."""
     service, _, _ = _make_service(tmp_path)
     service._do_live_check = AsyncMock()  # type: ignore[method-assign]
     service._do_post_check = AsyncMock()  # type: ignore[method-assign]
@@ -285,25 +406,39 @@ async def test_reconcile_restarts_crashed_loops(tmp_path: Path) -> None:
             user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
         )
         await service.reconcile_loops()
-        assert service.active_count == 1
+        await _plant_crash(service, record.subscription_id)
+        await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] == 1
+        await service.delete_subscription(record.subscription_id)
+        assert record.subscription_id not in service._crash_counts
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+    finally:
+        await service.stop_all()
 
-        # Retire the live loop, then plant a done handle in its place.
+
+async def test_reconcile_restarts_silently_cancelled_handles(
+    tmp_path: Path,
+) -> None:
+    """A cancelled-but-present handle restarts fresh, budget untouched."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
         original = service._loops.pop(record.subscription_id)
         original.cancel()
         try:
             await original
         except asyncio.CancelledError:
             pass
-
-        async def _noop() -> None:
-            return None
-
-        crashed = asyncio.create_task(_noop())
-        await crashed
-        service._loops[record.subscription_id] = crashed
+        service._loops[record.subscription_id] = original
         started, _ = await service.reconcile_loops()
         assert started == 1
-        assert service.active_count == 1
+        assert record.subscription_id not in service._crash_counts
     finally:
         await service.stop_all()
 

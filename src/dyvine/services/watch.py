@@ -59,6 +59,24 @@ from .posts import PostService
 
 logger = ContextLogger(__name__)
 
+#: Consecutive loop crashes tolerated before the supervisor parks the
+#: subscription (delete + recreate to resume polling).
+_MAX_CONSECUTIVE_CRASHES = 5
+
+#: Backoff ceiling between crash restarts (5 minutes).
+_MAX_CRASH_BACKOFF_SECONDS = 300.0
+
+
+def _crash_backoff_seconds(consecutive_crashes: int) -> float:
+    """Return the restart delay after ``consecutive_crashes`` crashes.
+
+    Exponential from a 30s base (one reconcile interval), capped so a
+    flapping loop never sleeps longer than five minutes between tries.
+    """
+    return min(
+        _MAX_CRASH_BACKOFF_SECONDS, 30.0 * 2.0 ** max(0, consecutive_crashes - 1)
+    )
+
 
 class WatchService:
     """Schedule and persist per-user watch subscriptions.
@@ -99,6 +117,14 @@ class WatchService:
         self._task_registry = task_registry
         self._run_loops = run_loops
         self._loops: dict[str, asyncio.Task[Any]] = {}
+        # Supervisor state: consecutive unexplained loop exits per
+        # subscription, and when the latest one happened. A loop that
+        # survives a full reconcile interval resets its count; one that
+        # keeps crashing backs off exponentially and is parked after
+        # ``_MAX_CONSECUTIVE_CRASHES`` until the subscription is
+        # deleted and recreated (delete clears the crash budget).
+        self._crash_counts: dict[str, int] = {}
+        self._last_crash_monotonic: dict[str, float] = {}
         self._lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
@@ -267,11 +293,14 @@ class WatchService:
         The watcher replica runs this periodically so subscriptions
         created through a (CRUD-only) API replica start looping without
         a watcher restart, and rows deleted or disabled elsewhere stop
-        promptly. Crashed loops (done tasks) are restarted here as well;
-        phase 6 adds bounded backoff around that restart.
+        promptly. Crashed loops (done tasks) restart here under the
+        supervisor policy: exponential backoff, a consecutive-crash
+        cap after which the loop is parked with an alert log, and a
+        reset once a restarted loop survives a full interval.
         """
         if not self._run_loops:
             return (0, 0)
+        now = time.monotonic()
         records = {
             record.subscription_id: record
             for record in await self.watch_store.list_subscriptions()
@@ -284,23 +313,79 @@ class WatchService:
                 await self._cancel_loop(subscription_id)
                 stopped += 1
             elif task is not None and task.done():
-                # Crashed or exited loop: drop the stale handle so the
-                # adopt pass below restarts it.
                 self._loops.pop(subscription_id, None)
+                if task.cancelled():
+                    # Deliberately stopped elsewhere; not a crash.
+                    continue
+                stopped += self._note_crash(subscription_id, task, now=now)
+            elif task is not None and subscription_id in self._crash_counts:
+                # Survived a full reconcile interval: healthy again.
+                self._crash_counts.pop(subscription_id, None)
+                self._last_crash_monotonic.pop(subscription_id, None)
         started = 0
         for subscription_id, record in records.items():
             if not record.enabled:
                 continue
             task = self._loops.get(subscription_id)
-            if task is None or task.done():
-                self._start_loop(record)
-                started += 1
+            if task is not None and not task.done():
+                continue
+            if not self._restart_allowed(subscription_id, now=now):
+                continue
+            self._start_loop(record)
+            started += 1
         if started or stopped:
             logger.info(
                 "reconciled watch loops",
                 extra={"started": started, "stopped": stopped},
             )
         return (started, stopped)
+
+    def _note_crash(
+        self, subscription_id: str, task: asyncio.Task[Any], *, now: float
+    ) -> int:
+        """Record a crashed loop; return 1 when it is parked for good.
+
+        Returns 0 when the loop stays eligible for restart (possibly
+        after a backoff delay enforced by :meth:`_restart_allowed`).
+        Only called for done, non-cancelled tasks, so ``exception()``
+        cannot raise here.
+        """
+        count = self._crash_counts.get(subscription_id, 0) + 1
+        self._crash_counts[subscription_id] = count
+        self._last_crash_monotonic[subscription_id] = now
+        failure = task.exception()
+        if count > _MAX_CONSECUTIVE_CRASHES:
+            logger.error(
+                "watch loop parked after repeated crashes; "
+                "delete and recreate the subscription once fixed",
+                extra={
+                    "subscription_id": subscription_id,
+                    "consecutive_crashes": count,
+                    "last_error": repr(failure),
+                },
+            )
+            return 1
+        logger.warning(
+            "watch loop crashed; restarting under backoff",
+            extra={
+                "subscription_id": subscription_id,
+                "attempt": count,
+                "max_attempts": _MAX_CONSECUTIVE_CRASHES,
+                "backoff_seconds": _crash_backoff_seconds(count),
+                "last_error": repr(failure),
+            },
+        )
+        return 0
+
+    def _restart_allowed(self, subscription_id: str, *, now: float) -> bool:
+        """Return whether a crashed loop may restart on this pass."""
+        count = self._crash_counts.get(subscription_id, 0)
+        if count == 0:
+            return True
+        if count > _MAX_CONSECUTIVE_CRASHES:
+            return False
+        last_crash = self._last_crash_monotonic.get(subscription_id, 0.0)
+        return now - last_crash >= _crash_backoff_seconds(count)
 
     async def run_reconcile_forever(self, *, interval_seconds: float = 30.0) -> None:
         """Loop :meth:`reconcile_loops` until cancelled.
@@ -380,8 +465,15 @@ class WatchService:
         self._loops[record.subscription_id] = task
 
     async def _cancel_loop(self, subscription_id: str) -> None:
-        """Cancel and await a subscription's watcher loop if present."""
+        """Cancel and await a subscription's watcher loop if present.
+
+        Also clears the supervisor's crash budget: a deliberate stop
+        (delete, disable, reconcile-drop) is not a crash, so a later
+        re-enable starts from a clean slate.
+        """
         task = self._loops.pop(subscription_id, None)
+        self._crash_counts.pop(subscription_id, None)
+        self._last_crash_monotonic.pop(subscription_id, None)
         if task is None or task.done():
             return
         task.cancel()
