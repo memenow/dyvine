@@ -1,0 +1,118 @@
+---
+# Edge gateway for the production overlay (Envoy Gateway).
+#
+# The cluster runs Envoy Gateway, not the retired nginx ingress, so
+# external traffic enters through this ``Gateway`` (backed by the
+# cluster-admin-owned ``envoy`` GatewayClass) instead of an
+# ``Ingress`` resource. ``INGRESS_HOST`` is a literal placeholder here
+# (HTTPRoute hostnames + Certificate dnsNames); substitute it when
+# rendering (see the pipeline in ``kustomization.yaml``) since no CD
+# pipeline does it for you.
+#
+# Edge rate limiting is intentionally NOT configured here: Envoy
+# Gateway only offers *global* rate limiting via ``BackendTrafficPolicy``
+# plus a dedicated ratelimit backend (Redis), which this cluster does
+# not run yet. Per-caller enforcement today is the in-app per-replica
+# token bucket (``API_RATE_LIMIT_*``); adding the ratelimit backend and
+# a ``BackendTrafficPolicy`` is the follow-up when a global edge cap is
+# needed.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: dyvine-gateway
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: dyvine
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        certificateRefs:
+          - kind: Secret
+            name: dyvine-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Public routes for the API behind the gateway above.
+#
+# ``dyvine-https`` forwards ``https://INGRESS_HOST/`` to the
+# ClusterIP Service; ``dyvine-http-redirect`` answers plain HTTP with
+# a 301 to HTTPS, replacing the old
+# ``nginx.ingress.kubernetes.io/force-ssl-redirect`` annotation.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: dyvine-https
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: dyvine
+spec:
+  parentRefs:
+    - name: dyvine-gateway
+      sectionName: https
+  hostnames:
+    - INGRESS_HOST
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: dyvine-api
+          port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: dyvine-http-redirect
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: dyvine
+spec:
+  parentRefs:
+    - name: dyvine-gateway
+      sectionName: http
+  hostnames:
+    - INGRESS_HOST
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+# TLS certificate for the gateway listener, minted by cert-manager
+# from the existing ``letsencrypt-prod`` ClusterIssuer (same issuer
+# the old Ingress annotation referenced).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dyvine-tls
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: dyvine
+spec:
+  secretName: dyvine-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  dnsNames:
+    - INGRESS_HOST

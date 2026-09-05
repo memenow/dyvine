@@ -122,9 +122,9 @@
     <h2>Layered architecture at a glance</h2>
     <ul>
       <li><strong>Presentation</strong> — FastAPI routers under <code>src/dyvine/routers</code>. All router endpoints sit behind an <code>X-API-Key</code> dependency and the <code>handle_errors</code> decorator.</li>
-      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>R2StorageService</code>, and <code>LifecycleManager</code> in <code>src/dyvine/services</code>.</li>
-      <li><strong>Persistence</strong> — <code>OperationStore</code> (SQLite + WAL) at <code>src/dyvine/core/operations.py</code>; per-thread reader connections, single writer guarded by a lock, dispatched onto a dedicated <code>sqlite_executor</code>.</li>
-      <li><strong>Infrastructure</strong> — <code>ServiceContainer</code> wires four named thread-pool executors (R2, R2-head, SQLite, audit), a <code>BackgroundTaskRegistry</code>, and the f2 <code>DouyinHandler</code>.</li>
+      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>R2StorageService</code>, and <code>WatchService</code> in <code>src/dyvine/services</code>.</li>
+      <li><strong>Persistence</strong> — <code>OperationRepository</code> / <code>WatchRepository</code> (Postgres + asyncpg, Alembic-versioned) at <code>src/dyvine/db/</code>; owner heartbeats and an orphan sweep keep multi-replica state crash-safe.</li>
+      <li><strong>Infrastructure</strong> — <code>ServiceContainer</code> wires two named thread-pool executors (R2, R2-head), a <code>BackgroundTaskRegistry</code>, the asyncpg pool, a <code>RepositoryJanitor</code> loop, and the f2 <code>DouyinHandler</code>.</li>
       <li><strong>Observability</strong> — Prometheus metrics (<code>/metrics</code>), structured JSON logging, request correlation IDs, split <code>/livez</code>/<code>/readyz</code>/<code>/startupz</code> probes.</li>
     </ul>
 
@@ -134,7 +134,7 @@
       <li>The lifespan drains the <code>BackgroundTaskRegistry</code> before reaping executor pools, so an active R2 upload always finishes (or is cancelled with structured logging) before the process exits.</li>
       <li>User-supplied filesystem paths are jailed inside <code>DOUYIN_DOWNLOAD_ROOT</code>; symlink redirection, traversal segments, and absolute prefixes are rejected pre- and post-mkdir.</li>
       <li>The composite <code>Settings</code> validator refuses to boot in non-debug mode when <code>SECURITY_SECRET_KEY</code> or <code>SECURITY_API_KEY</code> still match the placeholder sentinel.</li>
-      <li><code>OperationStore.mark_incomplete_operations_failed</code> sweeps stale <code>pending</code>/<code>running</code> rows to <code>failed</code> on startup so a crashed deployment never leaves orphaned in-progress rows behind.</li>
+      <li><code>OperationRepository.sweep_orphans</code> fails <code>pending</code>/<code>running</code> rows whose owner stopped heartbeating, so a crashed deployment never leaves orphaned in-progress rows behind.</li>
     </ul>
 
     <footer>

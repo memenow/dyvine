@@ -27,15 +27,17 @@ uses ``onexc`` to log per-entry failures without masking the
 original exception.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
 import shutil
+import unicodedata
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 from pydantic import AnyHttpUrl
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
@@ -46,7 +48,6 @@ from ..core.exceptions import (
     UserNotFoundError,
 )
 from ..core.logging import ContextLogger
-from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..core.path_safety import (
     ensure_within_root,
@@ -54,8 +55,18 @@ from ..core.path_safety import (
     relative_to_download_root,
 )
 from ..core.settings import settings
+from ..db import OperationRepository
 from ..schemas.users import DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
+
+if TYPE_CHECKING:
+    from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+else:
+    # Deferred: importing f2 performs real HTTPS requests (see
+    # ``core._lazy_f2``), so the SDK loads on first handler use only.
+    from ..core._lazy_f2 import LazyF2Symbol
+
+    DouyinHandler = LazyF2Symbol("f2.apps.douyin.handler", "DouyinHandler")
 
 # Page size requested from the f2 fetcher. The outer loop guard uses the
 # shared :mod:`dyvine.core.pagination` constants together with this value
@@ -79,16 +90,21 @@ def sanitize_filename(filename: str) -> str:
     """Sanitize filename for cross-platform filesystem compatibility.
 
     Cleans and normalizes filenames to ensure they work across different
-    operating systems and filesystems. Removes potentially problematic
-    characters including emojis, special symbols, and filesystem-reserved
-    characters.
+    operating systems and filesystems. Douyin titles are Chinese-first
+    and often contain emoji, all of which render fine on modern
+    filesystems, so Unicode letters are preserved and only genuinely
+    problematic characters are removed.
 
     Transformations Applied:
-        1. Remove non-ASCII characters (including emojis and Unicode symbols)
-        2. Replace filesystem-reserved characters with underscores
-        3. Collapse multiple consecutive underscores to single underscore
-        4. Trim leading/trailing spaces and underscores
-        5. Provide fallback name for empty results
+        1. Apply Unicode NFKC normalization (fullwidth forms, etc.)
+        2. Remove control characters (category Cc) and format characters
+           (category Cf) except the zero-width joiner, which emoji
+           sequences require
+        3. Replace filesystem-reserved characters with underscores
+        4. Collapse multiple consecutive underscores to single underscore
+        5. Trim leading/trailing whitespace, dots, and underscores
+           (Windows refuses trailing dots/spaces)
+        6. Provide fallback name for empty results
 
     Args:
         filename: Original filename string to sanitize.
@@ -99,34 +115,48 @@ def sanitize_filename(filename: str) -> str:
 
     Example:
         >>> sanitize_filename("My Video 📱 <2024>.mp4")
-        "My_Video_2024.mp4"
+        'My Video 📱 _2024_.mp4'
 
-        >>> sanitize_filename("Résumé/with\\special:chars")
-        "Rsum_with_special_chars"
+        >>> sanitize_filename("中文标题测试.mp4")
+        '中文标题测试.mp4'
 
-        >>> sanitize_filename("🎥📹🎬")
-        "untitled"
+        >>> sanitize_filename("a\\x00b/c:d")
+        'ab_c_d'
 
     Note:
         This function is designed for content downloaded from Douyin which
         often contains emojis, non-ASCII text, and special symbols in
         titles and descriptions.
     """
-    # Remove emoji and non-ASCII characters for compatibility
-    filename = re.sub(r"[^\x00-\x7F]+", "", filename)
+    # NFKC folds compatibility variants (fullwidth latin, circled digits)
+    # to their canonical forms while leaving CJK and emoji intact.
+    normalized = unicodedata.normalize("NFKC", filename)
+
+    # Strip control characters outright. Format characters (Cf: bidi
+    # overrides, zero-width spaces) are also dropped because they are
+    # invisible spoofing vectors in filenames -- except U+200D ZERO WIDTH
+    # JOINER, which multi-codepoint emoji sequences need to render.
+    cleaned = "".join(
+        char
+        for char in normalized
+        if not (
+            unicodedata.category(char) == "Cc"
+            or (unicodedata.category(char) == "Cf" and char != "\u200d")
+        )
+    )
 
     # Replace filesystem-reserved characters with underscores
     # Covers Windows, macOS, and Linux reserved characters
-    filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
+    cleaned = re.sub(r'[<>:"/\\|?*]', "_", cleaned)
 
     # Collapse multiple consecutive underscores to improve readability
-    filename = re.sub(r"_+", "_", filename)
+    cleaned = re.sub(r"_+", "_", cleaned)
 
-    # Remove leading/trailing whitespace and underscores
-    filename = filename.strip("_ ")
+    # Remove leading/trailing whitespace, dots, and underscores
+    cleaned = cleaned.strip().strip("_.").strip()
 
     # Provide fallback for empty filenames
-    return filename or "untitled"
+    return cleaned or "untitled"
 
 
 def _parse_room_data(raw: Any) -> dict[str, Any] | None:
@@ -209,22 +239,22 @@ class UserService:
 
     def __init__(
         self,
-        operation_store: OperationStore | None = None,
+        operation_store: OperationRepository,
         *,
         task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         """Initialize the user service.
 
         Args:
-            operation_store: Persistent operation record store. A private
-                ``OperationStore`` is created when not provided, which is the
-                path unit tests take.
+            operation_store: Persistent operation record repository.
+                Required; the container injects the Postgres-backed
+                implementation and unit tests inject a fake.
             task_registry: Optional registry that owns long-lived
                 background downloads. When omitted (e.g. in tests) the
                 service falls back to ``asyncio.create_task`` so the public
                 API remains testable without a full service container.
         """
-        self.operation_store = operation_store or OperationStore()
+        self.operation_store = operation_store
         self.storage = R2StorageService()
         self._task_registry = task_registry
 

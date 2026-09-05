@@ -117,7 +117,7 @@ graph LR
     Core --> Exceptions[core/exceptions]
     Core --> Logging[core/logging]
     Core --> Deps[core/dependencies]
-    Core --> Ops[core/operations]
+    Core --> Ops[db/postgres]
     Core --> Bg[core/background]
     Core --> Pag[core/pagination]
     Core --> Path[core/path_safety]
@@ -131,7 +131,7 @@ graph LR
     Deps --> Ops
     Deps --> Settings
     Settings --> PydanticSettings[pydantic-settings]
-    Ops --> SQLite[sqlite3]
+    Ops --> PG[(Postgres via asyncpg)]
     Bg --> Logging
 
     Dec --> Exceptions

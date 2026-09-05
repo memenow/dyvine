@@ -1,18 +1,60 @@
 """Tests for the FastAPI application entry point and health probes."""
 
-import sqlite3
 import uuid
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
+from fake_repos import FakeOperationRepository, FakeWatchRepository
 from fastapi.testclient import TestClient
 
+from dyvine.core import dependencies
 from dyvine.core.settings import settings
 from dyvine.main import app
 
 
+class _DummyDouyinHandler:
+    """Stand-in that lets the container boot without importing f2.
+
+    Importing the f2 SDK performs real HTTPS requests; TestClient tests
+    below only exercise probes and routing, so they build the container
+    against this double instead.
+    """
+
+    def __init__(self, kwargs: dict[str, object]) -> None:
+        """Test helper for _DummyDouyinHandler."""
+        self.kwargs = kwargs
+        self.enable_bark = False
+
+
+@pytest.fixture(autouse=True)
+def _stub_douyin_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build the service container without importing the f2 SDK."""
+    monkeypatch.setattr(dependencies, "DouyinHandler", _DummyDouyinHandler)
+
+
+@pytest.fixture(autouse=True)
+def _inject_fake_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boot the lifespan's container against in-memory repositories.
+
+    Probe/router tests exercise HTTP behavior, not persistence, so the
+    container gets fresh fakes instead of a Postgres pool. Tests that
+    break the store patch ``healthcheck`` on the injected fake.
+    """
+    original = dependencies.ServiceContainer.initialize
+
+    async def _initialize_with_fakes(self: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("operation_store", FakeOperationRepository())
+        kwargs.setdefault("watch_store", FakeWatchRepository())
+        await original(self, **kwargs)
+
+    monkeypatch.setattr(
+        dependencies.ServiceContainer, "initialize", _initialize_with_fakes
+    )
+
+
 async def _async_noop() -> None:
-    """Stand-in for ``OperationStore.healthcheck`` in readiness tests.
+    """Stand-in for ``OperationRepository.healthcheck`` in readiness tests.
 
     ``/readyz`` now awaits the healthcheck, so the stub must also be a
     coroutine function; a plain ``lambda: None`` would raise ``TypeError:
@@ -135,7 +177,7 @@ def test_readiness_probe_returns_not_ready_when_operation_store_broken(
         """Test helper for
         test_readiness_probe_returns_not_ready_when_operation_store_broken.
         """
-        raise sqlite3.OperationalError("disk I/O error")
+        raise ConnectionError("database unreachable")
 
     with TestClient(app) as client:
         container = app.state.container
@@ -370,3 +412,31 @@ def test_metrics_uses_bounded_label_for_unmatched_routes() -> None:
         assert response.status_code == 200
         assert 'route="unmatched"' in response.text
         assert "/definitely-not-a-real-route" not in response.text
+
+
+def test_health_check_reuses_process_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/health`` must sample a shared Process, not mint one per request.
+
+    A freshly constructed ``psutil.Process`` reports ``0.0`` from the
+    first ``cpu_percent()`` call, so per-request construction makes the
+    endpoint's CPU field permanently meaningless.
+    """
+    import psutil
+
+    created: list[int] = []
+    real_process = psutil.Process
+
+    def _counting(*args: object, **kwargs: object) -> object:
+        created.append(1)
+        return real_process(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(psutil, "Process", _counting)
+    # Reset the singleton so this test measures construction instead of
+    # inheriting a handle primed by an earlier test's lifespan.
+    monkeypatch.setattr("dyvine.main._process", None)
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/health").status_code == 200
+    assert len(created) == 1

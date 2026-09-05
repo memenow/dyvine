@@ -17,11 +17,9 @@ content into Cloudflare R2. The service:
   (``{images,videos}/{user_id}/...``) and livestream recordings
   (``livestreams/{user_id}/{stream_id}/recording_{ts}.mp4``).
 
-Storage-class transitions and retention rules live in
-``services/lifecycle.py`` (``LifecycleManager``); that helper is
-exercised by tests but is not currently wired into the runtime
-container. The dedicated ``audit_executor`` provisioned by
-``ServiceContainer`` is reserved for it.
+Storage-class transitions and retention rules are not implemented:
+finished files stay in standard storage until an operator archives
+them.
 """
 
 import asyncio
@@ -42,6 +40,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from prometheus_client import Counter, Histogram
 
+from ..core.exceptions import StorageError
 from ..core.logging import ContextLogger
 from ..core.settings import settings
 
@@ -62,7 +61,7 @@ r2_upload_bytes = Counter(
 r2_upload_duration = Histogram(
     "r2_upload_duration_seconds",
     "Upload duration in seconds",
-    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
+    buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0],
 )
 
 r2_upload_failures = Counter(
@@ -75,11 +74,10 @@ r2_upload_failures = Counter(
 # much; the pool is still resized on demand per request.
 LIST_OBJECTS_HEAD_MAX_WORKERS = 16
 
-
-class StorageError(Exception):
-    """Base exception for R2 storage operations."""
-
-    pass
+# Byte budget for generated object keys. S3-compatible stores cap keys at
+# 1024 bytes; generation stays 124 bytes shy so prefixes and future
+# fixed segments cannot tip a worst-case key over the limit.
+_MAX_KEY_BYTES = 900
 
 
 class ContentType(StrEnum):
@@ -154,8 +152,16 @@ class R2StorageService:
         # Configure retry settings
         config = Config(retries={"max_attempts": 3, "mode": "adaptive"})
 
-        # Format R2 endpoint URL
-        endpoint_url = settings.r2_endpoint.format(account_id=settings.r2_account_id)
+        # Resolve the R2 endpoint URL. Two forms are supported: a
+        # template holding an ``{account_id}`` placeholder (keeps the
+        # account id out of committed config) or a complete URL used
+        # verbatim. The branch is explicit so neither form depends on
+        # ``str.format`` silently no-opping.
+        endpoint_template = settings.r2_endpoint
+        if "{account_id}" in endpoint_template:
+            endpoint_url = endpoint_template.format(account_id=settings.r2_account_id)
+        else:
+            endpoint_url = endpoint_template
 
         # Initialize S3 client for R2
         self.client = boto3.client(
@@ -232,8 +238,9 @@ class R2StorageService:
         # Generate 8-char UUID
         uuid_str = str(uuid.uuid4())[:8]
 
-        # Get file extension
-        ext = Path(original_filename).suffix.lower().lstrip(".")
+        # Get file extension, bounded: a pathological suffix must not be
+        # able to blow the key past the S3 length limit on its own.
+        ext = Path(original_filename).suffix.lower().lstrip(".")[:16]
         if not ext:
             guessed_ext = mimetypes.guess_extension(content_type, strict=False)
             if guessed_ext:
@@ -250,8 +257,17 @@ class R2StorageService:
         else:
             raise StorageError(f"Unsupported content type: {content_type}")
 
-        # Construct path
+        # Construct path. S3-compatible keys cap at 1024 bytes; trim the
+        # variable base64 segment (opaque, safe to cut) so a pathological
+        # original filename can never push the key over the budget.
         path = f"{content_dir}/{user_id}/{date_prefix}_{safe_filename}_{uuid_str}.{ext}"
+        overflow = len(path.encode("utf-8")) - _MAX_KEY_BYTES
+        if overflow > 0:
+            safe_filename = safe_filename[: max(len(safe_filename) - overflow, 1)]
+            path = (
+                f"{content_dir}/{user_id}/{date_prefix}_{safe_filename}_"
+                f"{uuid_str}.{ext}"
+            )
 
         logger.debug(
             "Generated UGC path",
@@ -388,19 +404,6 @@ class R2StorageService:
         # call below.
         start_time = time.perf_counter()
         try:
-            logger.info(
-                "Starting R2 upload",
-                extra={
-                    "file_path": str(file_path),
-                    "storage_path": storage_path,
-                    "content_type": content_type,
-                    "metadata": metadata,
-                    "bucket": self.bucket,
-                    "endpoint": settings.r2_endpoint,
-                    "file_size": file_size,
-                },
-            )
-
             url = await self._run(
                 self._upload_file_sync,
                 file_path=file_path,
@@ -411,25 +414,22 @@ class R2StorageService:
 
             duration = time.perf_counter() - start_time
 
-            logger.info(
-                "Successfully uploaded file to R2",
-                extra={
-                    "storage_path": storage_path,
-                    "bucket": self.bucket,
-                    "size_bytes": file_size,
-                    "duration_seconds": duration,
-                },
-            )
-
             # Update metrics
-            r2_upload_requests.labels(type=metadata["category"], status="success").inc()
-            r2_upload_bytes.labels(category=metadata["category"]).inc(file_size)
+            category = metadata.get("category", "unknown")
+            r2_upload_requests.labels(type=category, status="success").inc()
+            r2_upload_bytes.labels(category=category).inc(file_size)
             r2_upload_duration.observe(duration)
 
+            # One completion record per upload; the pre-upload fields that
+            # used to live in a separate "starting" line are folded in so
+            # no context is lost by the merge.
             logger.info(
                 "File uploaded successfully",
                 extra={
+                    "file_path": str(file_path),
                     "storage_path": storage_path,
+                    "content_type": content_type,
+                    "bucket": self.bucket,
                     "size_bytes": file_size,
                     "duration_seconds": duration,
                     "presigned_url": url,
@@ -445,7 +445,8 @@ class R2StorageService:
             }
 
         except (BotoCoreError, ClientError) as e:
-            r2_upload_requests.labels(type=metadata["category"], status="error").inc()
+            category = metadata.get("category", "unknown")
+            r2_upload_requests.labels(type=category, status="error").inc()
             r2_upload_failures.labels(error_type=type(e).__name__).inc()
 
             logger.exception(
@@ -463,20 +464,19 @@ class R2StorageService:
     ) -> str:
         """Run the blocking upload + presign pair on a worker thread.
 
-        ``put_object`` needs the file handle to stay open for the duration of
-        the request, so the file read and the upload live together. The
-        presigned URL is generated in the same thread to keep the entire
-        boto3 interaction off the event loop.
+        Uses the managed ``upload_file`` transfer (multipart past the
+        size threshold) instead of a single ``put_object`` so large
+        livestream recordings upload reliably. The presigned URL is
+        generated in the same thread to keep the entire boto3
+        interaction off the event loop.
         """
         assert self.client is not None and self.bucket is not None
-        with open(file_path, "rb") as f:
-            self.client.put_object(
-                Bucket=self.bucket,
-                Key=storage_path,
-                Body=f,
-                ContentType=content_type,
-                Metadata=metadata,
-            )
+        self.client.upload_file(
+            Filename=str(file_path),
+            Bucket=self.bucket,
+            Key=storage_path,
+            ExtraArgs={"ContentType": content_type, "Metadata": metadata},
+        )
         return self.client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": storage_path},

@@ -1,6 +1,7 @@
-# HPA intentionally pinned to a single replica because the operation store
-# uses a RWO PVC with a pod-local SQLite writer. Restore dynamic scaling
-# after migrating to a shared operation backend.
+# Production scales the API horizontally: workspaces are pod-local
+# scratch (R2 archival enforced by the multi-replica boot guard) and
+# operation/watch state is multi-replica safe in Postgres. First phase
+# caps at 3 replicas; raise after observing a scaling cycle.
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -16,7 +17,7 @@ spec:
     kind: Deployment
     name: dyvine-api
   minReplicas: 1
-  maxReplicas: 1
+  maxReplicas: 3
   metrics:
   - type: Resource
     resource:
@@ -43,7 +44,9 @@ spec:
       - type: Percent
         value: 100
         periodSeconds: 60
+      # Capped at 2 so the step can actually apply under
+      # ``maxReplicas: 3`` (a step of 4 could never fire).
       - type: Pods
-        value: 4
+        value: 2
         periodSeconds: 60
       selectPolicy: Max

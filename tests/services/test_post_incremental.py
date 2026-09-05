@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fake_repos import FakeOperationRepository
 
 from dyvine.core.exceptions import OperationNotFoundError, UserNotFoundError
-from dyvine.core.operations import OperationStore
 from dyvine.services import posts as posts_module
 from dyvine.services.posts import PostService
 
@@ -18,7 +18,7 @@ def _make_service() -> PostService:
     """Build a PostService with a mock handler and isolated store."""
     handler = MagicMock()
     handler.kwargs = {"mode": "all"}
-    return PostService(handler=handler, operation_store=OperationStore())
+    return PostService(handler=handler, operation_store=FakeOperationRepository())
 
 
 async def test_collect_new_posts_stops_at_known_id() -> None:

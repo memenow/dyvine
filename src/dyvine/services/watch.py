@@ -11,8 +11,8 @@ Design:
   exactly that task; an exception in one user's loop cannot stall another.
   Tasks are scheduled through the shared ``BackgroundTaskRegistry`` so the
   FastAPI lifespan drains them on shutdown.
-- **Persistence + resume.** Subscriptions live in ``WatchSubscriptionStore``
-  (a dedicated SQLite table), so ``resume_persisted`` can re-arm every
+- **Persistence + resume.** Subscriptions live in ``WatchRepository``
+  (a dedicated Postgres table), so ``resume_persisted`` can re-arm every
   enabled subscription after a restart -- something the operation store
   cannot do because it has no enumeration query and its boot sweep would
   fail any long-lived row.
@@ -26,6 +26,10 @@ Design:
   with the app's uptime accounting) so NTP steps cannot cause negative
   sleeps or catch-up storms. Each due-time carries +/-10% jitter so several
   subscriptions never hammer upstream in lockstep.
+- **Split-brain-free scaling.** API replicas run with ``run_loops=False``
+  (``WATCH_ENABLED=false``): CRUD still works against shared Postgres,
+  but loops run on exactly one watcher replica, which adopts new rows
+  and drops deleted ones through periodic ``reconcile_loops`` passes.
 """
 
 from __future__ import annotations
@@ -40,19 +44,37 @@ from typing import Any
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
     LivestreamError,
-    RateLimitError,
     ServiceError,
     UserNotFoundError,
+    WatchDuplicateError,
     WatchSubscriptionNotFoundError,
 )
 from ..core.logging import ContextLogger
 from ..core.settings import settings
-from ..core.watch_store import WatchSubscriptionRecord, WatchSubscriptionStore
+from ..db import WatchRepository, WatchSubscriptionRecord
 from ..schemas.watch import WatchSubscriptionResponse
 from .livestreams import LivestreamService
 from .posts import PostService
 
 logger = ContextLogger(__name__)
+
+#: Consecutive loop crashes tolerated before the supervisor parks the
+#: subscription (delete + recreate to resume polling).
+_MAX_CONSECUTIVE_CRASHES = 5
+
+#: Backoff ceiling between crash restarts (5 minutes).
+_MAX_CRASH_BACKOFF_SECONDS = 300.0
+
+
+def _crash_backoff_seconds(consecutive_crashes: int) -> float:
+    """Return the restart delay after ``consecutive_crashes`` crashes.
+
+    Exponential from a 30s base (one reconcile interval), capped so a
+    flapping loop never sleeps longer than five minutes between tries.
+    """
+    return min(
+        _MAX_CRASH_BACKOFF_SECONDS, 30.0 * 2.0 ** max(0, consecutive_crashes - 1)
+    )
 
 
 class WatchService:
@@ -72,18 +94,36 @@ class WatchService:
     def __init__(
         self,
         *,
-        watch_store: WatchSubscriptionStore,
+        watch_store: WatchRepository,
         livestream_service: LivestreamService,
         post_service: PostService,
         task_registry: BackgroundTaskRegistry | None = None,
+        run_loops: bool = True,
     ) -> None:
-        """Initialize the watch service from injected dependencies."""
+        """Initialize the watch service from injected dependencies.
+
+        Args:
+            run_loops: When ``False`` (``WATCH_ENABLED=false`` on API
+                replicas) the CRUD surface keeps working against shared
+                Postgres but no watcher loop is ever started locally;
+                the dedicated watcher replica adopts new rows through
+                :meth:`reconcile_loops`.
+        """
         self.settings = settings
         self.watch_store = watch_store
         self.livestream_service = livestream_service
         self.post_service = post_service
         self._task_registry = task_registry
+        self._run_loops = run_loops
         self._loops: dict[str, asyncio.Task[Any]] = {}
+        # Supervisor state: consecutive unexplained loop exits per
+        # subscription, and when the latest one happened. A loop that
+        # survives a full reconcile interval resets its count; one that
+        # keeps crashing backs off exponentially and is parked after
+        # ``_MAX_CONSECUTIVE_CRASHES`` until the subscription is
+        # deleted and recreated (delete clears the crash budget).
+        self._crash_counts: dict[str, int] = {}
+        self._last_crash_monotonic: dict[str, float] = {}
         self._lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
@@ -154,24 +194,36 @@ class WatchService:
                 self._start_loop(existing)
                 return existing, False
 
-            count = await self.watch_store.count_subscriptions()
-            if count >= watch_cfg.max_subscriptions:
-                raise RateLimitError(
-                    "Watch subscription limit reached "
-                    f"({watch_cfg.max_subscriptions}); delete a subscription first"
-                )
-
             checkpoint: dict[str, Any] = {
                 "newest_aweme_id": baseline[0] if baseline else None,
                 "recent_aweme_ids": baseline,
                 "first_run_complete": not backfill,
             }
-            record = await self.watch_store.create_subscription(
-                user_id=user_id,
-                live_poll_seconds=live,
-                post_poll_seconds=post,
-                checkpoint=checkpoint,
-            )
+            try:
+                # Capped insert: the cap check and the row insert are one
+                # atomic unit inside the repository (advisory-locked on
+                # Postgres), so concurrent creators on other replicas
+                # cannot both slip under a stale count. A separate
+                # ``count_subscriptions`` check here would reintroduce
+                # exactly that race.
+                record = await self.watch_store.create_subscription_capped(
+                    user_id=user_id,
+                    live_poll_seconds=live,
+                    post_poll_seconds=post,
+                    checkpoint=checkpoint,
+                    max_subscriptions=watch_cfg.max_subscriptions,
+                )
+            except WatchDuplicateError:
+                # Cross-process race: a sibling replica won the
+                # ``UNIQUE(user_id)`` insert between our re-check and
+                # our write (the lock above is per-process). Converge
+                # to the documented idempotent return instead of
+                # letting a 409/500 escape for a retryable create.
+                winner = await self.watch_store.get_subscription_by_user(user_id)
+                if winner is None:  # deleted between our write and re-read
+                    raise
+                self._start_loop(winner)
+                return winner, False
 
         self._start_loop(record)
         logger.info(
@@ -223,13 +275,158 @@ class WatchService:
 
         Returns the number of loops started. Called from
         ``ServiceContainer.initialize`` after the container is marked ready.
+        A no-op returning ``0`` when this replica does not run loops.
         """
+        if not self._run_loops:
+            return 0
         records = await self.watch_store.list_subscriptions(enabled_only=True)
         for record in records:
             self._start_loop(record)
         if records:
             logger.info("resumed watch subscriptions", extra={"count": len(records)})
         return len(records)
+
+    async def reconcile_loops(self) -> tuple[int, int]:
+        """Adopt new rows and drop dead ones; return ``(started, stopped)``.
+
+        The watcher replica runs this periodically so subscriptions
+        created through a (CRUD-only) API replica start looping without
+        a watcher restart, and rows deleted or disabled elsewhere stop
+        promptly. Crashed loops (done tasks) restart here under the
+        supervisor policy: exponential backoff, a consecutive-crash
+        cap after which the loop is parked with an alert log, and a
+        reset once a restarted loop survives a full interval.
+        """
+        if not self._run_loops:
+            return (0, 0)
+        now = time.monotonic()
+        records = {
+            record.subscription_id: record
+            for record in await self.watch_store.list_subscriptions()
+        }
+        stopped = 0
+        for subscription_id in list(self._loops):
+            record = records.get(subscription_id)
+            task = self._loops.get(subscription_id)
+            if record is None or not record.enabled:
+                await self._cancel_loop(subscription_id)
+                stopped += 1
+            elif task is not None and task.done():
+                self._loops.pop(subscription_id, None)
+                if task.cancelled():
+                    # Deliberately stopped elsewhere; not a crash.
+                    continue
+                stopped += self._note_crash(subscription_id, task, now=now)
+            elif task is not None and subscription_id in self._crash_counts:
+                # Survived a full reconcile interval: healthy again.
+                self._crash_counts.pop(subscription_id, None)
+                self._last_crash_monotonic.pop(subscription_id, None)
+        for subscription_id, record in records.items():
+            if record.enabled or subscription_id in self._loops:
+                continue
+            # Disabled with no live task: a parked/backing-off loop was
+            # already reaped, so the loop above never visits it — yet
+            # its crash budget survives. Clear unconditionally so
+            # disable→re-enable starts from a clean slate instead of
+            # silently inheriting a stale park.
+            if self._crash_counts.pop(subscription_id, None) is not None:
+                self._last_crash_monotonic.pop(subscription_id, None)
+                logger.info(
+                    "watch crash budget cleared on disable",
+                    extra={"subscription_id": subscription_id},
+                )
+        started = 0
+        for subscription_id, record in records.items():
+            if not record.enabled:
+                continue
+            task = self._loops.get(subscription_id)
+            if task is not None and not task.done():
+                continue
+            if not self._restart_allowed(subscription_id, now=now):
+                continue
+            self._start_loop(record)
+            started += 1
+        if started or stopped:
+            logger.info(
+                "reconciled watch loops",
+                extra={"started": started, "stopped": stopped},
+            )
+        return (started, stopped)
+
+    def _note_crash(
+        self, subscription_id: str, task: asyncio.Task[Any], *, now: float
+    ) -> int:
+        """Record a crashed loop; return 1 when it is parked for good.
+
+        Returns 0 when the loop stays eligible for restart (possibly
+        after a backoff delay enforced by :meth:`_restart_allowed`).
+        Only called for done, non-cancelled tasks. The loop swallows
+        its own exceptions and returns the root cause, so the task
+        result carries it; a task that raised instead (never in
+        production, but possible in tests) surfaces it via re-raise.
+        """
+        count = self._crash_counts.get(subscription_id, 0) + 1
+        self._crash_counts[subscription_id] = count
+        self._last_crash_monotonic[subscription_id] = now
+        try:
+            result = task.result()
+        except BaseException as raised:
+            failure: BaseException | None = raised
+        else:
+            failure = result if isinstance(result, BaseException) else None
+        if count > _MAX_CONSECUTIVE_CRASHES:
+            logger.error(
+                "watch loop parked after repeated crashes; "
+                "delete and recreate the subscription once fixed",
+                extra={
+                    "subscription_id": subscription_id,
+                    "consecutive_crashes": count,
+                    "last_error": repr(failure),
+                },
+            )
+            return 1
+        logger.warning(
+            "watch loop crashed; restarting under backoff",
+            extra={
+                "subscription_id": subscription_id,
+                "attempt": count,
+                "max_attempts": _MAX_CONSECUTIVE_CRASHES,
+                "backoff_seconds": _crash_backoff_seconds(count),
+                "last_error": repr(failure),
+            },
+        )
+        return 0
+
+    def _restart_allowed(self, subscription_id: str, *, now: float) -> bool:
+        """Return whether a crashed loop may restart on this pass."""
+        count = self._crash_counts.get(subscription_id, 0)
+        if count == 0:
+            return True
+        if count > _MAX_CONSECUTIVE_CRASHES:
+            return False
+        last_crash = self._last_crash_monotonic.get(subscription_id, 0.0)
+        return now - last_crash >= _crash_backoff_seconds(count)
+
+    async def run_reconcile_forever(self, *, interval_seconds: float = 30.0) -> None:
+        """Loop :meth:`reconcile_loops` until cancelled.
+
+        A failed pass is logged and skipped so one transient database
+        error does not stop subscription adoption and crash
+        supervision permanently. Cancellation propagates to the
+        caller, so the container stops the loop with a plain
+        ``task.cancel()`` during shutdown.
+        """
+        while True:
+            try:
+                await self.reconcile_loops()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "watch reconcile pass failed; continuing on next interval",
+                    extra={"interval_seconds": interval_seconds},
+                )
+            await asyncio.sleep(interval_seconds)
 
     async def stop_all(self) -> None:
         """Cancel every watcher loop.
@@ -281,9 +478,28 @@ class WatchService:
         return lock
 
     def _start_loop(self, record: WatchSubscriptionRecord) -> None:
-        """Spawn the watcher loop for a subscription if not already running."""
+        """Spawn the watcher loop for a subscription if not already running.
+
+        A no-op on CRUD-only replicas (``run_loops=False``): the row
+        persists, and the watcher replica adopts it on reconcile. Also
+        a no-op while the supervisor budget forbids a restart (backoff
+        window or parked after repeated crashes): an idempotent create
+        retry must not silently re-arm a parked loop — only
+        delete-and-recreate resumes it.
+        """
+        if not self._run_loops:
+            return
         existing = self._loops.get(record.subscription_id)
         if existing is not None and not existing.done():
+            return
+        now = time.monotonic()
+        if existing is not None and existing.done() and not existing.cancelled():
+            # A crash awaiting the next reap is replaced here: count it
+            # first so the supervisor budget does not lose the crash.
+            self._loops.pop(record.subscription_id, None)
+            if self._note_crash(record.subscription_id, existing, now=now):
+                return
+        if not self._restart_allowed(record.subscription_id, now=now):
             return
         task = spawn_or_fallback(
             self._task_registry,
@@ -293,15 +509,22 @@ class WatchService:
         self._loops[record.subscription_id] = task
 
     async def _cancel_loop(self, subscription_id: str) -> None:
-        """Cancel and await a subscription's watcher loop if present."""
+        """Cancel and await a subscription's watcher loop if present.
+
+        Also clears the supervisor's crash budget: a deliberate stop
+        (delete, disable, reconcile-drop) is not a crash, so a later
+        re-enable starts from a clean slate.
+        """
         task = self._loops.pop(subscription_id, None)
+        self._crash_counts.pop(subscription_id, None)
+        self._last_crash_monotonic.pop(subscription_id, None)
         if task is None or task.done():
             return
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _watch_loop(self, subscription_id: str) -> None:
+    async def _watch_loop(self, subscription_id: str) -> BaseException | None:
         """Drive one subscription's live + post cadences until cancelled.
 
         Each cadence has its own monotonic due-time recomputed from the
@@ -316,17 +539,22 @@ class WatchService:
         single-loop design: livestreams are long enough that a few minutes'
         detection delay is tolerable, and every subscription has its own loop,
         so one user's backfill never stalls another user's live detection.
+
+        Returns the root-cause exception when the loop crashes (the task
+        stays registered so reconcile reaps it via ``_note_crash``), and
+        ``None`` on a clean exit (deleted/disabled subscription).
         """
         next_live = time.monotonic()
         next_post = time.monotonic()
+        crashed: BaseException | None = None
         try:
             while True:
                 try:
                     record = await self.watch_store.get_subscription(subscription_id)
                 except WatchSubscriptionNotFoundError:
-                    return  # deleted out from under us
+                    return None  # deleted out from under us
                 if not record.enabled:
-                    return
+                    return None
 
                 now = time.monotonic()
                 sleep_for = min(next_live - now, next_post - now)
@@ -345,16 +573,28 @@ class WatchService:
             # download triggered this cycle is its own registry-tracked task
             # and drains independently.
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception(
-                "watch loop crashed; it will be resumed on next restart",
+                "watch loop crashed; the reconcile supervisor will retry "
+                "it with backoff, or park it after repeated crashes",
                 extra={"subscription_id": subscription_id},
             )
+            crashed = exc
         finally:
-            # Self-evict only if the registry slot is still us, mirroring the
-            # livestream downloader's successor-safe cleanup.
-            if self._loops.get(subscription_id) is asyncio.current_task():
+            # Evict on clean exit (deleted/disabled/cancelled) only when
+            # the registry slot is still us, mirroring the livestream
+            # downloader's successor-safe cleanup. A crashed loop stays
+            # registered so the next reconcile pass reaps it through
+            # ``_note_crash`` (backoff/park policy) instead of
+            # restarting it immediately with no alert.
+            if (
+                crashed is None
+                and self._loops.get(subscription_id) is asyncio.current_task()
+            ):
                 self._loops.pop(subscription_id, None)
+        if crashed is not None:
+            return crashed
+        return None
 
     async def _do_live_check(self, record: WatchSubscriptionRecord) -> None:
         """Check whether the user is live and, if so, start a recording.
@@ -384,7 +624,15 @@ class WatchService:
         except LivestreamError:
             return  # offline, no stream, or already recording -> skip
         except RuntimeError:
-            return  # background registry closed during shutdown
+            # Usually the background registry closing during shutdown,
+            # but a persistent non-shutdown RuntimeError would otherwise
+            # loop forever with zero observability, so always log it.
+            logger.warning(
+                "watch live check failed",
+                extra={"subscription_id": record.subscription_id},
+                exc_info=True,
+            )
+            return
         except Exception:
             logger.warning(
                 "watch live check failed",
@@ -418,6 +666,13 @@ class WatchService:
         except (UserNotFoundError, ServiceError):
             return  # upstream/profile failure -> keep checkpoint, retry later
         except RuntimeError:
+            # Same observability rule as the live check: never swallow
+            # silently, even though shutdown is the usual cause.
+            logger.warning(
+                "watch post check failed",
+                extra={"subscription_id": record.subscription_id},
+                exc_info=True,
+            )
             return
         except Exception:
             logger.warning(

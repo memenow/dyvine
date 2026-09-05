@@ -40,8 +40,13 @@ class BackgroundTaskRegistry:
             gracefully before cancelling anything still outstanding.
     """
 
-    def __init__(self, *, drain_timeout: float = 30.0) -> None:
-        """Initialize the registry with no tracked tasks."""
+    def __init__(self, *, drain_timeout: float = 20.0) -> None:
+        """Initialize the registry with no tracked tasks.
+
+        The default fits inside uvicorn's 25s graceful-shutdown window
+        (which itself fits inside Kubernetes' 30s termination grace),
+        so a drain never gets SIGKILLed mid-flight on rollout.
+        """
         self._tasks: set[asyncio.Task[Any]] = set()
         self.drain_timeout = drain_timeout
         # Set inside ``drain`` so any post-drain ``spawn`` is rejected

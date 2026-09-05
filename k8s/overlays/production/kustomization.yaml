@@ -5,9 +5,11 @@ namespace: dyvine
 
 resources:
   - ../../base
-  - ingress.yaml
+  - gateway.yaml
+  - db-egress.yaml
   - hpa.yaml
   - pdb.yaml
+  - watcher-deployment.yaml
 
 patchesJson6902:
   - target:
@@ -15,23 +17,36 @@ patchesJson6902:
       name: dyvine-api
     path: patches.yaml
 
-# ``newTag`` MUST be replaced by the deploy workflow with the immutable
-# commit-hash tag emitted by ``.github/workflows/docker-build.yml``
-# (e.g. ``main-abc1234``). The placeholder ``main-latest`` is a rolling
-# pointer kept here only so ``kustomize build`` succeeds in local dev;
-# any production rollout that does not run::
+patches:
+  # Drops the base PVC (see no-pvc.yaml): prod mounts emptyDir.
+  - path: no-pvc.yaml
+
+# ``newTag: main-latest`` is a placeholder kept only so ``kustomize
+# build`` succeeds in local dev and CI. There is no CD pipeline, so a
+# manual rollout renders the overlay, substitutes the image tag plus
+# the ``INGRESS_HOST`` / ``DB_CIDR`` placeholders below, and pipes the
+# result to ``kubectl apply`` (nothing in the checkout is edited)::
 #
-#   kustomize edit set image \
-#     ghcr.io/memenow/dyvine=ghcr.io/memenow/dyvine:main-<sha>
+#   kubectl kustomize k8s/overlays/production \
+#     | sed -e 's|/dyvine:main-latest|/dyvine:<tag>|g' \
+#           -e "s/INGRESS_HOST/<public host>/g" \
+#           -e "s|DB_CIDR|<postgres CIDR>|g" \
+#     | kubectl apply -f -
 #
-# before ``kubectl apply`` is silently exposed to the registry's view
-# of ``main-latest`` and cannot be rolled back to a known artefact.
+# Applying this overlay as-is would track the registry's rolling
+# ``main-latest`` pointer and could not be rolled back to a known
+# artefact; always pin the tag.
 images:
   - name: ghcr.io/memenow/dyvine
     newTag: main-latest
 
+# ``namespace`` is load-bearing: the base already stamps
+# ``namespace: dyvine`` on its resources, and without it the merge
+# lookup misses (``Name: dyvine-config, Namespace: "" does not
+# exist``) on current kustomize.
 configMapGenerator:
   - name: dyvine-config
+    namespace: dyvine
     behavior: merge
     literals:
       - API_DEBUG=false

@@ -18,16 +18,13 @@
   root) when the f2 downloader returns.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
-
-from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
-from f2.apps.douyin.handler import DouyinHandler  # type: ignore
-from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
-from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
@@ -36,15 +33,43 @@ from ..core.exceptions import (
     OperationNotFoundError,
 )
 from ..core.logging import ContextLogger
-from ..core.operations import OperationStore
 from ..core.path_safety import (
     ensure_within_root,
     relative_to_download_root,
     resolve_within_root,
 )
 from ..core.settings import settings
+from ..db import OperationRepository
 from ..schemas.livestreams import LiveStreamDownloadResponse
 from .users import UserService
+
+if TYPE_CHECKING:
+    from f2.apps.douyin.dl import DouyinDownloader  # type: ignore
+    from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+    from f2.apps.douyin.utils import WebCastIdFetcher  # type: ignore
+else:
+    # Deferred: importing f2 performs real HTTPS requests (see
+    # ``core._lazy_f2``), so the SDK loads on first real use only.
+    # ``APIResponseError`` is intentionally not a placeholder: except
+    # clauses need a real class, so call sites resolve it through
+    # :func:`_api_response_error_type` instead.
+    from ..core._lazy_f2 import LazyF2Symbol
+
+    DouyinDownloader = LazyF2Symbol("f2.apps.douyin.dl", "DouyinDownloader")
+    DouyinHandler = LazyF2Symbol("f2.apps.douyin.handler", "DouyinHandler")
+    WebCastIdFetcher = LazyF2Symbol("f2.apps.douyin.utils", "WebCastIdFetcher")
+
+
+def _api_response_error_type() -> type[Exception]:
+    """Return f2's ``APIResponseError``, importing the SDK on first use.
+
+    Used as an ``except`` expression (evaluated only while handling an
+    exception) because a deferred placeholder cannot serve that position.
+    """
+    from f2.exceptions.api_exceptions import APIResponseError  # type: ignore
+
+    return APIResponseError  # type: ignore[no-any-return]
+
 
 logger = ContextLogger(__name__)
 
@@ -86,7 +111,7 @@ class LivestreamService:
         *,
         douyin_handler: DouyinHandler,
         user_service: UserService,
-        operation_store: OperationStore,
+        operation_store: OperationRepository,
         task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         """Initialize the livestream service using injected dependencies.
@@ -145,7 +170,7 @@ class LivestreamService:
                 )
                 if converted_filter:
                     return converted_filter
-        except APIResponseError as error:
+        except _api_response_error_type() as error:
             logger.debug("WebCastIdFetcher could not convert %s: %s", webcast_id, error)
         except Exception as error:
             logger.debug(
@@ -411,7 +436,7 @@ class LivestreamService:
         if not webcast_id:
             try:
                 webcast_id = await WebCastIdFetcher.get_webcast_id(normalized)
-            except APIResponseError as error:
+            except _api_response_error_type() as error:
                 logger.debug("WebCastIdFetcher could not resolve webcast id: %s", error)
             except Exception as error:
                 logger.debug(

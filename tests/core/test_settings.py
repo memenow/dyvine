@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from dyvine.core.settings import (
     APISettings,
+    DatabaseSettings,
     DouyinSettings,
     R2Settings,
     SecuritySettings,
@@ -24,6 +25,8 @@ def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     # sentinel defaults. Drop it here so we are asserting the true
     # out-of-the-box defaults rather than our test-runtime override.
     monkeypatch.delenv("API_DEBUG", raising=False)
+    monkeypatch.delenv("API_RATE_LIMIT_PER_SECOND", raising=False)
+    monkeypatch.delenv("API_RATE_LIMIT_BURST", raising=False)
     s = APISettings()
     assert s.version == "1.0.0"
     assert s.prefix == "/api/v1"
@@ -31,7 +34,8 @@ def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.debug is False
     assert s.host == "0.0.0.0"
     assert s.port == 8000
-    assert s.operation_db_path == "data/douyin/state/operations.db"
+    assert s.rate_limit_per_second == 10
+    assert s.rate_limit_burst == 20
 
 
 def test_api_settings_port_too_low() -> None:
@@ -62,10 +66,9 @@ def test_security_settings_defaults_pass_in_debug(
 
     """
     monkeypatch.setenv("API_DEBUG", "true")
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     s = Settings()
-    assert s.security.secret_key == "change-me-in-production"
+    assert s.security.api_key == "change-me-in-production"
 
 
 def test_security_settings_rejects_defaults_in_production(
@@ -73,7 +76,9 @@ def test_security_settings_rejects_defaults_in_production(
 ) -> None:
     """Verify security settings rejects defaults in production."""
     monkeypatch.setenv("API_DEBUG", "false")
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    # The shared conftest defaults REQUIRE to false (router-test
+    # convenience); the gate under test only fires when auth is on.
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     with pytest.raises(ValidationError):
         Settings()
@@ -93,7 +98,9 @@ def test_security_settings_rejects_defaults_when_api_debug_unset(
 
     """
     monkeypatch.delenv("API_DEBUG", raising=False)
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    # The shared conftest defaults REQUIRE to false (router-test
+    # convenience); the gate under test only fires when auth is on.
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     with pytest.raises(ValidationError):
         Settings()
@@ -110,10 +117,9 @@ def test_security_settings_isolated_construct_is_permissive(
     inner model would lose all flexibility.
     """
     monkeypatch.setenv("API_DEBUG", "false")
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     s = SecuritySettings()
-    assert s.secret_key == "change-me-in-production"
+    assert s.api_key == "change-me-in-production"
 
 
 # ── R2Settings ───────────────────────────────────────────────────────────
@@ -188,6 +194,62 @@ def test_douyin_settings_proxies_none_by_default() -> None:
     assert s.proxies["https://"] is None
 
 
+# ── DatabaseSettings ─────────────────────────────────────────────────────
+
+
+def test_database_settings_defaults() -> None:
+    """Localhost Postgres default for development."""
+    s = DatabaseSettings()
+    assert s.url == "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine"
+    assert s.pool_size == 5
+    assert s.pool_timeout == 30.0
+    assert s.operation_retention_days == 30
+
+
+def test_multi_replica_settings_defaults() -> None:
+    """Single-replica local development needs no shared storage."""
+    s = APISettings()
+    assert s.multi_replica is False
+    assert s.shared_file_storage is False
+
+
+def test_watch_enabled_defaults_true() -> None:
+    """One process runs watch loops unless explicitly split."""
+    assert Settings().watch_enabled is True
+
+
+def test_watch_enabled_reads_unprefixed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WATCH_ENABLED`` (not ``DOUYIN_WATCH_*``) flips the split."""
+    monkeypatch.setenv("WATCH_ENABLED", "false")
+    assert Settings().watch_enabled is False
+
+
+def test_settings_rejects_default_database_url_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-debug builds must override the localhost database default."""
+    monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
+    monkeypatch.setenv("SECURITY_API_KEY", "real-key-value")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_settings_accepts_explicit_database_url_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit URL + key boot a non-debug build."""
+    monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
+    monkeypatch.setenv("SECURITY_API_KEY", "real-key-value")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://db.internal:5432/dyvine")
+    s = Settings()
+    assert s.database.url == "postgresql+asyncpg://db.internal:5432/dyvine"
+
+
 # ── Settings (composite) ────────────────────────────────────────────────
 
 
@@ -198,7 +260,6 @@ def test_settings_convenience_properties() -> None:
     assert s.version == s.api.version
     assert s.prefix == s.api.prefix
     assert s.project_name == s.api.project_name
-    assert s.operation_db_path == s.api.operation_db_path
 
 
 def test_settings_backward_compat_properties() -> None:

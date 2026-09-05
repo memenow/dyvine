@@ -16,11 +16,12 @@ Authentication:
     ``false`` only when the API is fronted by another authenticated
     layer.
 
-Rate limiting is intentionally **not** enforced inside the application;
-the ``API_RATE_LIMIT_PER_SECOND`` setting is reserved for an external
-gateway / ingress to honour. Internally, the only concurrency control
-comes from the dedupe lock inside ``LivestreamService`` and the bounded
-thread-pool executors owned by ``ServiceContainer``.
+Per-replica rate limiting IS enforced inside the application by
+``middleware.RateLimitMiddleware`` (validated ``X-API-Key``, else
+client IP; 429 envelope with ``Retry-After``). Internal concurrency
+control additionally comes from the dedupe lock inside
+``LivestreamService`` and the bounded thread-pool executors owned by
+``ServiceContainer``.
 """
 
 from typing import Annotated

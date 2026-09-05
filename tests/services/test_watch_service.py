@@ -7,10 +7,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fake_repos import FakeWatchRepository
 
 from dyvine.core.exceptions import LivestreamError, WatchSubscriptionNotFoundError
 from dyvine.core.settings import settings
-from dyvine.core.watch_store import WatchSubscriptionRecord, WatchSubscriptionStore
+from dyvine.db import WatchSubscriptionRecord
 from dyvine.schemas.posts import PostDetail, PostType
 from dyvine.services.posts import IncrementalDownloadResult, UserPostsPage
 from dyvine.services.watch import WatchService
@@ -18,7 +19,7 @@ from dyvine.services.watch import WatchService
 
 def _make_service(tmp_path: Path) -> tuple[WatchService, MagicMock, MagicMock]:
     """Build a WatchService over a real store with mocked sub-services."""
-    store = WatchSubscriptionStore(db_path=str(tmp_path / "watch.db"))
+    store = FakeWatchRepository()
     livestream = MagicMock()
     livestream.download_stream = AsyncMock()
     post = MagicMock()
@@ -57,6 +58,55 @@ async def test_create_subscription_is_idempotent(tmp_path: Path) -> None:
     assert created2 is False
     assert rec1.subscription_id == rec2.subscription_id
     assert len(await service.list_subscriptions()) == 1
+
+
+async def test_create_subscription_converges_cross_process_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A UNIQUE loss against a sibling replica returns the winner (F8).
+
+    The create lock is per-process, so two replicas can both pass the
+    re-check and race the INSERT. The loser must converge to the
+    documented idempotent return instead of surfacing a duplicate
+    error for a retryable create.
+    """
+    from typing import Any
+
+    from dyvine.core.exceptions import WatchDuplicateError
+
+    service, _, _ = _make_service(tmp_path)
+    service._start_loop = MagicMock()  # type: ignore[method-assign]
+    store = service.watch_store
+
+    winner = await store.create_subscription(
+        user_id="user-race", live_poll_seconds=60, post_poll_seconds=300
+    )
+    # Hide the winner from the fast-path and locked re-checks so the
+    # service proceeds to INSERT as if no row existed yet.
+    reads = 0
+    real_get = store.get_subscription_by_user
+
+    async def _flaky_get(user_id: str) -> Any:
+        nonlocal reads
+        reads += 1
+        if reads <= 2:
+            return None
+        return await real_get(user_id)
+
+    async def _always_duplicate(**kwargs: Any) -> Any:
+        raise WatchDuplicateError(
+            "Watch subscription for user user-race already exists",
+            details={"user_id": "user-race"},
+        )
+
+    monkeypatch.setattr(store, "get_subscription_by_user", _flaky_get)
+    monkeypatch.setattr(store, "create_subscription", _always_duplicate)
+
+    record, created = await service.create_subscription(
+        user_id="user-race", backfill_on_create=True
+    )
+    assert created is False
+    assert record.subscription_id == winner.subscription_id
 
 
 async def test_create_subscription_enforces_limit(
@@ -198,6 +248,398 @@ async def test_resume_persisted_starts_loops_and_stop_all_cancels(
     assert service.active_count == 0
 
 
+async def test_reconcile_adopts_and_drops_loops(tmp_path: Path) -> None:
+    """Reconcile starts loops for new rows, stops them for gone rows."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    try:
+        await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        started, stopped = await service.reconcile_loops()
+        assert (started, stopped) == (1, 0)
+        assert service.active_count == 1
+
+        # Steady state: nothing to do.
+        assert await service.reconcile_loops() == (0, 0)
+
+        # A row deleted out-of-band (e.g. via an API replica) stops here.
+        doomed = await service.watch_store.get_subscription_by_user("user01")
+        assert doomed is not None
+        await service.watch_store.delete_subscription(doomed.subscription_id)
+        started, stopped = await service.reconcile_loops()
+        assert (started, stopped) == (0, 1)
+        assert service.active_count == 0
+    finally:
+        await service.stop_all()
+
+
+async def _plant_crash(service: WatchService, subscription_id: str) -> None:
+    """Retire the live loop and plant a failed handle in its place."""
+    original = service._loops.pop(subscription_id)
+    original.cancel()
+    try:
+        await original
+    except asyncio.CancelledError:
+        pass
+
+    async def _boom() -> None:
+        raise RuntimeError("loop boom")
+
+    crashed = asyncio.create_task(_boom())
+    with pytest.raises(RuntimeError, match="loop boom"):
+        await crashed
+    service._loops[subscription_id] = crashed
+
+
+async def test_reconcile_restarts_crashed_loops_under_backoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crashed loop restarts once its backoff elapses, not before."""
+    import time
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        assert service.active_count == 1
+
+        await _plant_crash(service, record.subscription_id)
+        # Crash noted (count 1, 30s backoff) but not yet restarted.
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+        assert service._crash_counts[record.subscription_id] == 1
+
+        clock[0] += 31.0
+        started, _ = await service.reconcile_loops()
+        assert started == 1
+        assert service.active_count == 1
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_parks_flapping_loops_with_alert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past the crash cap the loop stays down and an alert is logged."""
+    import logging
+    import time
+
+    from dyvine.services import watch as watch_module
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cap = watch_module._MAX_CONSECUTIVE_CRASHES
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        for _ in range(cap):
+            await _plant_crash(service, record.subscription_id)
+            assert await service.reconcile_loops() == (0, 0)
+            clock[0] += 400.0  # past any backoff
+            started, _ = await service.reconcile_loops()
+            assert started == 1
+        # One crash too many: parked, never restarted again.
+        await _plant_crash(service, record.subscription_id)
+        with caplog.at_level(logging.ERROR, logger="dyvine.services.watch"):
+            started, stopped = await service.reconcile_loops()
+        assert (started, stopped) == (0, 1)
+        assert service.active_count == 0
+        assert any("parked" in r.getMessage() for r in caplog.records)
+        clock[0] += 3600.0
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+    finally:
+        await service.stop_all()
+
+
+async def test_crashed_loop_stays_registered_with_root_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A real crash is reaped by reconcile with its cause, not None."""
+    import logging
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+    )
+    real_get = service.watch_store.get_subscription
+    calls = 0
+
+    async def flaky_get(subscription_id: str):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom-cause")
+        return await real_get(subscription_id)
+
+    service.watch_store.get_subscription = flaky_get  # type: ignore[method-assign]
+    try:
+        await service.reconcile_loops()
+        task = service._loops[record.subscription_id]
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert isinstance(result, RuntimeError)
+        assert "boom-cause" in str(result)
+        # Crashed task stays registered for reconcile to reap.
+        assert record.subscription_id in service._loops
+        with caplog.at_level(logging.WARNING, logger="dyvine.services.watch"):
+            await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] == 1
+        assert any(
+            getattr(entry, "last_error", "") == "RuntimeError('boom-cause')"
+            for entry in caplog.records
+        )
+    finally:
+        await service.stop_all()
+
+
+async def test_idempotent_create_does_not_rearm_parked_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry POST for a parked subscription stays down (200, no loop)."""
+    import time
+
+    from dyvine.services import watch as watch_module
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cap = watch_module._MAX_CONSECUTIVE_CRASHES
+    try:
+        record, created = await service.create_subscription(
+            user_id="user01", backfill_on_create=True
+        )
+        assert created is True
+        await service.reconcile_loops()
+        for _ in range(cap + 1):
+            await _plant_crash(service, record.subscription_id)
+            await service.reconcile_loops()
+            clock[0] += 400.0
+            await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] > cap
+        assert service.active_count == 0
+        # Idempotent retry returns the row but must not re-arm the loop.
+        same, created = await service.create_subscription(user_id="user01")
+        assert created is False
+        assert same.subscription_id == record.subscription_id
+        assert service.active_count == 0
+        assert record.subscription_id not in service._loops
+    finally:
+        await service.stop_all()
+
+
+async def test_disable_clears_parked_budget_for_reenable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disable→re-enable revives a parked loop from a clean slate."""
+    import time
+
+    from dyvine.services import watch as watch_module
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cap = watch_module._MAX_CONSECUTIVE_CRASHES
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        for _ in range(cap + 1):
+            await _plant_crash(service, record.subscription_id)
+            await service.reconcile_loops()
+            clock[0] += 400.0
+            await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] > cap
+        # Disable while parked (no live task to cancel).
+        await service.watch_store.update_subscription(
+            record.subscription_id, enabled=False
+        )
+        await service.reconcile_loops()
+        assert record.subscription_id not in service._crash_counts
+        # Re-enable restarts the loop instead of inheriting the park.
+        await service.watch_store.update_subscription(
+            record.subscription_id, enabled=True
+        )
+        started, _ = await service.reconcile_loops()
+        assert started == 1
+        assert service.active_count == 1
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_resets_budget_after_healthy_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restarted loop that survives a pass clears its crash count."""
+    import time
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        await _plant_crash(service, record.subscription_id)
+        await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] == 1
+        clock[0] += 31.0
+        await service.reconcile_loops()
+        # The restarted loop is alive on the next pass: budget reset.
+        clock[0] += 30.0
+        assert await service.reconcile_loops() == (0, 0)
+        assert record.subscription_id not in service._crash_counts
+    finally:
+        await service.stop_all()
+
+
+async def test_delete_clears_crash_budget(tmp_path: Path) -> None:
+    """Deleting a flapping subscription never restarts it afterwards."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        await _plant_crash(service, record.subscription_id)
+        await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] == 1
+        await service.delete_subscription(record.subscription_id)
+        assert record.subscription_id not in service._crash_counts
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_restarts_silently_cancelled_handles(
+    tmp_path: Path,
+) -> None:
+    """A cancelled-but-present handle restarts fresh, budget untouched."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        original = service._loops.pop(record.subscription_id)
+        original.cancel()
+        try:
+            await original
+        except asyncio.CancelledError:
+            pass
+        service._loops[record.subscription_id] = original
+        started, _ = await service.reconcile_loops()
+        assert started == 1
+        assert record.subscription_id not in service._crash_counts
+    finally:
+        await service.stop_all()
+
+
+async def test_reconcile_skips_disabled_rows(tmp_path: Path) -> None:
+    """Disabled subscriptions neither start nor keep loops."""
+    service, _, _ = _make_service(tmp_path)
+    record = await service.watch_store.create_subscription(
+        user_id="user01",
+        live_poll_seconds=3600,
+        post_poll_seconds=3600,
+        enabled=False,
+    )
+    try:
+        assert await service.reconcile_loops() == (0, 0)
+        assert service.active_count == 0
+        assert record.subscription_id not in service._loops
+    finally:
+        await service.stop_all()
+
+
+async def test_run_loops_false_is_crud_only(tmp_path: Path) -> None:
+    """CRUD-only replicas persist rows but never start loops."""
+    from fake_repos import FakeWatchRepository
+
+    store = FakeWatchRepository()
+    service = WatchService(
+        watch_store=store,
+        livestream_service=MagicMock(),
+        post_service=MagicMock(),
+        run_loops=False,
+    )
+    record, created = await service.create_subscription(
+        user_id="user01", backfill_on_create=True
+    )
+    assert created is True
+    assert service.active_count == 0
+    assert await service.resume_persisted() == 0
+    assert await service.reconcile_loops() == (0, 0)
+    fetched = await service.get_subscription(record.subscription_id)
+    assert fetched.user_id == "user01"
+    await service.delete_subscription(record.subscription_id)
+    assert await service.list_subscriptions() == []
+
+
+async def test_run_reconcile_forever_loops_until_cancelled(
+    tmp_path: Path,
+) -> None:
+    """The reconcile loop repeats passes and propagates cancellation."""
+    service, _, _ = _make_service(tmp_path)
+    task = asyncio.create_task(service.run_reconcile_forever(interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_run_reconcile_forever_survives_failed_pass(
+    tmp_path: Path,
+) -> None:
+    """One transient failure is logged and skipped, not fatal."""
+    service, _, _ = _make_service(tmp_path)
+    calls = 0
+
+    async def flaky() -> tuple[int, int]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient db error")
+        return (0, 0)
+
+    service.reconcile_loops = flaky  # type: ignore[method-assign]
+    task = asyncio.create_task(service.run_reconcile_forever(interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2
+
+
 async def test_watch_loop_runs_first_cycle_then_cancellable(
     tmp_path: Path,
 ) -> None:
@@ -280,6 +722,33 @@ async def test_delete_subscription_cancels_loop_and_removes_row(
 
     assert service.active_count == 0
     assert await service.watch_store.get_subscription_by_user("user01") is None
+
+
+async def test_start_loop_counts_pending_crash_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash awaiting reap is counted when an idempotent create replaces it."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+    )
+
+    async def _boom() -> None:
+        raise RuntimeError("boom")
+
+    crashed = asyncio.create_task(_boom())
+    await asyncio.sleep(0.02)
+    assert crashed.done()
+    service._loops[record.subscription_id] = crashed
+    monkeypatch.setattr(service, "_restart_allowed", lambda *a, **k: True)
+
+    service._start_loop(record)
+
+    assert service._crash_counts.get(record.subscription_id) == 1
+    assert service._loops[record.subscription_id] is not crashed
+    await service.delete_subscription(record.subscription_id)
 
 
 async def test_delete_unknown_subscription_raises(tmp_path: Path) -> None:

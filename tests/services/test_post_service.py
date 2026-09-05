@@ -7,13 +7,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fake_repos import FakeOperationRepository
 
 from dyvine.core.exceptions import (
     OperationNotFoundError,
     PostNotFoundError,
     ServiceError,
 )
-from dyvine.core.operations import OperationStore
 from dyvine.schemas.posts import DownloadStatus, PostType
 from dyvine.services import posts as posts_mod
 from dyvine.services.posts import PostService
@@ -22,7 +22,7 @@ from dyvine.services.posts import PostService
 def _build_service(
     handler: MagicMock | None = None,
     *,
-    operation_store: OperationStore | None = None,
+    operation_store: FakeOperationRepository | None = None,
 ) -> PostService:
     """Create PostService without calling __init__ (avoids DouyinHandler).
 
@@ -614,7 +614,7 @@ async def test_start_bulk_download_user_not_found(tmp_path) -> None:
     handler = MagicMock()
     handler.fetch_user_profile = AsyncMock(return_value=None)
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     svc = _build_service(handler, operation_store=store)
 
     with pytest.raises(UserNotFoundError):
@@ -634,7 +634,7 @@ async def test_start_bulk_download_returns_pending_response_immediately(
     profile.nickname = "PendingUser"
     handler.fetch_user_profile = AsyncMock(return_value=profile)
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     svc = _build_service(handler, operation_store=store)
 
     scheduled: list[asyncio.Future[None]] = []
@@ -686,7 +686,7 @@ async def test_run_bulk_download_marks_completed_for_zero_post_user(
     from unittest.mock import patch
 
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/user"))
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="u1",
@@ -728,7 +728,7 @@ async def test_run_bulk_download_records_failure_when_user_disappears(
     handler = MagicMock()
     handler.fetch_user_profile = AsyncMock(return_value=None)
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="ghost-user",
@@ -792,7 +792,7 @@ async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/loop-user"))
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="loop-user",
@@ -862,7 +862,7 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/sticky-user"))
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="sticky-user",
@@ -950,7 +950,7 @@ async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/error-user"))
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="error-user",
@@ -1019,7 +1019,7 @@ async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/partial-user"))
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="partial-user",
@@ -1098,7 +1098,7 @@ async def test_run_bulk_download_clamps_in_loop_progress_when_overcount(
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/overflow-user"))
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="overflow-user",
@@ -1167,7 +1167,7 @@ async def test_run_bulk_download_persists_runtime_download_stats(
     handler.fetch_user_profile = AsyncMock(return_value=profile)
     handler.get_or_add_user_data = AsyncMock(return_value=user_path)
 
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="runtime-user",
@@ -1245,7 +1245,7 @@ async def test_run_bulk_download_persists_runtime_download_stats(
 @pytest.mark.asyncio
 async def test_get_bulk_download_status_returns_persisted_state(tmp_path) -> None:
     """Verify get bulk download status returns persisted state."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id="poll-user",
@@ -1283,7 +1283,7 @@ async def test_get_bulk_download_status_returns_persisted_state(tmp_path) -> Non
 @pytest.mark.asyncio
 async def test_get_bulk_download_status_raises_for_unknown_id(tmp_path) -> None:
     """Verify get bulk download status raises for unknown ID."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     svc = _build_service(operation_store=store)
 
     with pytest.raises(OperationNotFoundError):
@@ -1295,7 +1295,7 @@ async def test_get_bulk_download_status_rejects_non_post_operation(
     tmp_path,
 ) -> None:
     """Verify get bulk download status rejects non post operation."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-1",
@@ -1366,3 +1366,39 @@ async def test_process_posts_batch_dispatches_by_type_and_counts_failures(
     assert download_stats[PostType.VIDEO] == 1
     assert download_stats[PostType.IMAGES] == 1
     assert call_count["n"] == 4
+
+
+@pytest.mark.asyncio
+async def test_get_post_detail_interprets_create_time_as_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream timestamps carry no zone and must parse as UTC, not local time."""
+    import calendar
+    import os
+    import time
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset unavailable on this platform")
+    previous_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        handler = MagicMock()
+        post_mock = MagicMock()
+        post_mock._to_dict.return_value = {
+            "aweme_id": "789",
+            "desc": "tz probe",
+            "create_time": "2024-01-15 10-30-00",
+            "statistics": {},
+        }
+        handler.fetch_one_video = AsyncMock(return_value=post_mock)
+        svc = _build_service(handler)
+        result = await svc.get_post_detail("789")
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+    expected = calendar.timegm((2024, 1, 15, 10, 30, 0, 0, 0, 0))
+    assert result.create_time == expected

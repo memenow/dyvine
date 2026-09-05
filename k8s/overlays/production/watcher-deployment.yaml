@@ -1,0 +1,117 @@
+# Single-replica watcher: runs watch-subscription loops, takes no traffic.
+#
+# API replicas scale horizontally with ``WATCH_ENABLED=false`` (CRUD-only
+# against shared Postgres); this Deployment is the exactly-one process
+# with ``WATCH_ENABLED=true``. It boots the same image (so probes and the
+# container contract stay identical) but has no Service or route: the
+# HPA targets the ``dyvine-api`` Deployment by name, so it never touches
+# this one. The ``part-of: dyvine`` NetworkPolicies DO select the watcher
+# pod too — that is intended, since it needs the same Postgres/R2/DNS
+# egress and the same Envoy/kube-system ingress allowlist.
+#
+# Scheduling is a singleton by construction: ``replicas: 1`` with the
+# ``Recreate`` strategy. If the Pod dies, Kubernetes restarts it and
+# ``resume_persisted`` re-arms every enabled subscription; rows created
+# through the API while the watcher is down are adopted by the periodic
+# reconcile pass once it is back.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dyvine-watch
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine-watch
+    app.kubernetes.io/component: watcher
+    app.kubernetes.io/part-of: dyvine
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dyvine-watch
+      app.kubernetes.io/component: watcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dyvine-watch
+        app.kubernetes.io/component: watcher
+        app.kubernetes.io/part-of: dyvine
+    spec:
+      serviceAccountName: dyvine-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: watcher
+        image: ghcr.io/memenow/dyvine:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: dyvine-config
+        - secretRef:
+            name: dyvine-secrets
+        env:
+        - name: WATCH_ENABLED
+          value: "true"
+        - name: API_MULTI_REPLICA
+          value: "true"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /startupz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
+        volumeMounts:
+        - name: runtime-data
+          mountPath: /app/data
+        - name: runtime-logs
+          mountPath: /app/logs
+        - name: runtime-temp
+          mountPath: /app/temp_downloads
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      # Task scratch: finished files archive to R2 (required in
+      # multi-replica mode), so no persistent volume is needed.
+      - name: runtime-data
+        emptyDir: {}
+      - name: runtime-logs
+        emptyDir: {}
+      - name: runtime-temp
+        emptyDir: {}

@@ -4,16 +4,16 @@ The composite `Settings` aggregates four `BaseSettings` subclasses,
 each scoped by a distinct environment-variable prefix:
 
 - `APISettings` (`API_`) — server, CORS, operation DB path.
-- `SecuritySettings` (`SECURITY_`) — secret + API keys, gating flag.
+- `SecuritySettings` (`SECURITY_`) — API key and gating flag.
 - `R2Settings` (`R2_`) — Cloudflare R2 credentials and endpoint.
 - `DouyinSettings` (`DOUYIN_`) — session cookie, headers, proxy,
   download root, and livestream-specific HTTP headers.
 
 A model-level validator (`_validate_security_in_production`) refuses
-to instantiate the container when `api.debug` is `false` and either
-`security.secret_key` or `security.api_key` (when `require_api_key`
-is on) still match the placeholder `change-me-in-production`
-sentinel. The cross-field check lives on the composite class so the
+to instantiate the container when `api.debug` is `false` and
+`security.api_key` (when `require_api_key` is on) still matches the
+placeholder `change-me-in-production` sentinel. The cross-field check
+lives on the composite class so the
 validator sees the parsed payload rather than reading `os.environ`
 directly, which used to silently disagree with `.env`-supplied
 values.
@@ -70,7 +70,40 @@ class APISettings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Server bind address")
     port: int = Field(default=8000, ge=1, le=65535, description="Server bind port")
     rate_limit_per_second: int = Field(
-        default=10, ge=1, description="API rate limiting threshold per second"
+        default=10,
+        ge=1,
+        description=(
+            "Sustained request budget per caller per second, enforced "
+            "per replica by the token-bucket middleware. Buckets key on "
+            "the X-API-Key header only when it matches the configured "
+            "key; anything else shares the client-IP bucket."
+        ),
+    )
+    rate_limit_burst: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Maximum tolerated burst per caller before 429s. Buckets "
+            "refill at rate_limit_per_second; probes, /metrics, and / "
+            "never consume budget."
+        ),
+    )
+    multi_replica: bool = Field(
+        default=False,
+        description=(
+            "More than one API replica serves traffic behind a shared "
+            "Postgres database. Boot refuses to complete unless downloads "
+            "can survive pod boundaries: either R2 archival is configured "
+            "or ``shared_file_storage`` confirms a shared volume."
+        ),
+    )
+    shared_file_storage: bool = Field(
+        default=False,
+        description=(
+            "``DOUYIN_DOWNLOAD_ROOT`` is backed by storage every replica "
+            "can see (e.g. a ReadWriteMany volume). Only consulted when "
+            "``multi_replica`` is true and R2 is unconfigured."
+        ),
     )
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000"],
@@ -82,46 +115,74 @@ class APISettings(BaseSettings):
             "``main.py`` middleware)."
         ),
     )
-    operation_db_path: str = Field(
-        default="data/douyin/state/operations.db",
-        description="Path to the SQLite database used for operation state",
+    model_config = SettingsConfigDict(env_prefix="API_")
+
+
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine"
+
+
+class DatabaseSettings(BaseSettings):
+    """Postgres connection settings for operation and watch state.
+
+    Postgres is the only production backend. The default URL targets a
+    local development database (``docker run -e POSTGRES_USER=dyvine -e
+    POSTGRES_PASSWORD=dyvine -e POSTGRES_DB=dyvine -p 5432:5432
+    postgres:16``); non-debug builds must override it, enforced by the
+    composite validator below.
+
+    Attributes:
+        url: SQLAlchemy database URL (``postgresql+asyncpg://...``).
+        pool_size: Steady-state pooled connections per process.
+        pool_timeout: Seconds to wait for a pooled connection.
+        operation_retention_days: Terminal operation rows older than
+            this are purged at boot and daily; ``0`` disables purging.
+
+    Environment Variables:
+        DATABASE_URL, DATABASE_POOL_SIZE, DATABASE_POOL_TIMEOUT,
+        DATABASE_OPERATION_RETENTION_DAYS.
+    """
+
+    url: str = Field(
+        default=_DEFAULT_DATABASE_URL,
+        description="SQLAlchemy database URL for operation/watch state",
+    )
+    pool_size: int = Field(
+        default=5, ge=1, description="Steady-state pooled DB connections"
+    )
+    pool_timeout: float = Field(
+        default=30.0, ge=1.0, description="Seconds to wait for a DB connection"
+    )
+    operation_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description="Purge terminal operations older than this (0 disables)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="API_")
+    model_config = SettingsConfigDict(env_prefix="DATABASE_")
 
 
 class SecuritySettings(BaseSettings):
     """Security and authentication configuration settings.
 
     Attributes:
-        secret_key: Secret key for cryptographic operations.
         api_key: API authentication key. Required in production unless
             ``require_api_key`` is explicitly set to ``False``.
-        access_token_expire_minutes: JWT token expiration time in minutes.
         require_api_key: When ``True`` (the default), every router request
             must carry the ``X-API-Key`` header set to ``api_key``.
 
     Environment Variables:
-        SECURITY_SECRET_KEY, SECURITY_API_KEY,
-        SECURITY_ACCESS_TOKEN_EXPIRE_MINUTES, SECURITY_REQUIRE_API_KEY.
+        SECURITY_API_KEY, SECURITY_REQUIRE_API_KEY.
 
     Note:
         Default values must be replaced before any production deployment.
         The composite :class:`Settings` validator below cross-checks the
-        secret values against ``API_DEBUG`` so a non-debug build that ships
-        with the placeholder secrets fails to boot.
+        secret value against ``API_DEBUG`` so a non-debug build that ships
+        with the placeholder secret fails to boot.
     """
 
-    secret_key: str = Field(
-        default=_DEFAULT_SECRET_SENTINEL,
-        description="Secret key for cryptographic operations",
-    )
     api_key: str = Field(
         default=_DEFAULT_SECRET_SENTINEL,
         description="API authentication key matched against ``X-API-Key``",
-    )
-    access_token_expire_minutes: int = Field(
-        default=60, ge=1, description="JWT token expiration time in minutes"
     )
     require_api_key: bool = Field(
         default=True,
@@ -403,7 +464,7 @@ class Settings(BaseSettings):
 
         Override for tests by mutating the parsed instance::
 
-            settings.api.operation_db_path = str(tmp_path / "operations.db")
+            settings.api.port = 8080
 
         Or via env vars in `.env` / the process environment::
 
@@ -419,14 +480,27 @@ class Settings(BaseSettings):
     r2: R2Settings = Field(default_factory=R2Settings)
     douyin: DouyinSettings = Field(default_factory=DouyinSettings)
     watch: WatchSettings = Field(default_factory=WatchSettings)
+    database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+
+    # Root-level (unprefixed) flags. ``WATCH_ENABLED`` lives here rather
+    # than under ``DOUYIN_WATCH_`` so the API/watcher split reads as a
+    # deployment concern, not a polling knob.
+    watch_enabled: bool = Field(
+        default=True,
+        description=(
+            "Run watch-subscription loops in this process. API replicas "
+            "set ``WATCH_ENABLED=false`` (CRUD-only against shared "
+            "Postgres) while a single watcher replica runs the loops."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_security_in_production(self) -> Self:
-        """Reject placeholder secret values when ``api.debug`` is False.
+        """Reject placeholder production values when ``api.debug`` is False.
 
         The cross-field check lives on the composite container so the
         validator sees ``api.debug`` from the same parsed payload that
-        populated ``security``. Reading ``API_DEBUG`` straight off
+        populated the nested models. Reading ``API_DEBUG`` straight off
         ``os.environ`` (the previous approach) silently disagreed with
         ``api.debug`` whenever the value lived in a ``.env`` file rather
         than a real environment variable.
@@ -435,30 +509,28 @@ class Settings(BaseSettings):
         deployments that delegate authentication to mTLS or a service
         mesh (and therefore set ``SECURITY_REQUIRE_API_KEY=false``) do
         not need to mint a never-used key just to satisfy a startup
-        check. ``secret_key`` is always validated because it backs
-        cryptographic operations that are not gated by the API-key
-        dependency.
+        check. ``database.url`` is always validated: the localhost
+        default is a development convenience, never a production target.
 
         """
         if self.api.debug:
             return self
 
-        sentinel = _DEFAULT_SECRET_SENTINEL
-        candidates: list[tuple[str, str]] = [
-            ("secret_key", self.security.secret_key),
-        ]
-        if self.security.require_api_key:
-            candidates.append(("api_key", self.security.api_key))
-
-        offenders = [name for name, value in candidates if value in {"", sentinel}]
-        if not offenders:
-            return self
-
-        joined = ", ".join(f"security.{name}" for name in offenders)
-        raise ValueError(
-            f"{joined} must be set to a non-default value when API_DEBUG is "
-            "false; rotate the placeholder before deploying."
-        )
+        offenders: list[str] = []
+        if self.security.require_api_key and self.security.api_key in {
+            "",
+            _DEFAULT_SECRET_SENTINEL,
+        }:
+            offenders.append("security.api_key")
+        if self.database.url in {"", _DEFAULT_DATABASE_URL}:
+            offenders.append("database.url")
+        if offenders:
+            joined = ", ".join(offenders)
+            raise ValueError(
+                f"{joined} must be set to non-default values when API_DEBUG "
+                "is false; rotate the placeholders before deploying."
+            )
+        return self
 
     # Convenience properties for frequently accessed settings
     @property
@@ -486,11 +558,6 @@ class Settings(BaseSettings):
         """Get CORS allowed origins from API settings."""
         return self.api.cors_origins
 
-    @property
-    def operation_db_path(self) -> str:
-        """Get the operation state database path from API settings."""
-        return self.api.operation_db_path
-
     # Backward compatibility properties for legacy code
     @property
     def host(self) -> str:
@@ -501,11 +568,6 @@ class Settings(BaseSettings):
     def port(self) -> int:
         """Get server port from API settings."""
         return self.api.port
-
-    @property
-    def secret_key(self) -> str:
-        """Get secret key from security settings."""
-        return self.security.secret_key
 
     @property
     def api_key(self) -> str:
@@ -572,9 +634,12 @@ class Settings(BaseSettings):
         """Get HTTPS proxy from Douyin settings."""
         return self.douyin.proxy_https
 
-    model_config = SettingsConfigDict(
-        env_file=".env", case_sensitive=True, extra="ignore"
-    )
+    # No ``case_sensitive`` here: pydantic-settings matches env names
+    # against field names exactly when it is set, which would require a
+    # lowercase ``watch_enabled`` variable for the root flag below. Each
+    # nested group carries its own prefixed config, so root-level
+    # case-insensitivity cannot collide with them.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 @lru_cache

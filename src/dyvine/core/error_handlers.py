@@ -26,6 +26,7 @@ from .exceptions import (
     RateLimitError,
     ServiceError,
     ValidationError,
+    WatchDuplicateError,
 )
 from .logging import ContextLogger
 from .settings import settings
@@ -40,6 +41,7 @@ _DYVINE_STATUS_MAPPING: tuple[tuple[type[DyvineError], int], ...] = (
     (AuthenticationError, status.HTTP_401_UNAUTHORIZED),
     (RateLimitError, status.HTTP_429_TOO_MANY_REQUESTS),
     (ValidationError, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    (WatchDuplicateError, status.HTTP_409_CONFLICT),
     (ServiceError, status.HTTP_500_INTERNAL_SERVER_ERROR),
 )
 
@@ -194,6 +196,21 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     """Normalize ``HTTPException`` responses into the standard error envelope."""
     correlation_id = getattr(request.state, "correlation_id", None)
+    if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+        # Authentication rejections bypass the route-level
+        # ``handle_errors`` decorator (``require_api_key`` raises
+        # directly), so this handler is their only logging site.
+        # Everything else reaching here was already logged at
+        # translation time and is deliberately not logged twice.
+        logger.warning(
+            "Authentication rejected: %s",
+            exc.detail,
+            extra={
+                "correlation_id": correlation_id,
+                "path": request.url.path,
+                "method": request.method,
+            },
+        )
     detail = exc.detail
     if isinstance(detail, dict):
         message = str(detail.get("message") or detail.get("error") or exc.detail)

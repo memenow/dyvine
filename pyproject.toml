@@ -14,6 +14,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.1.0",
     "pytest-cov>=7.1.0",
+    "testcontainers[postgres]>=4.0.0,<5.0.0",
 ]
 
 [project]
@@ -47,7 +48,13 @@ dependencies = [
     # Utilities
     "prometheus-client>=0.25.0,<1.0.0",
     "psutil>=7.2.2,<8.0.0",
-    "python-multipart>=0.0.27,<0.1.0",
+    "python-multipart>=0.0.30,<0.1.0",
+
+    # Persistence. Async SQLAlchemy over asyncpg is the only production
+    # backend; Alembic versions the schema (see ``alembic/``).
+    "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
+    "asyncpg>=0.30.0,<1.0.0",
+    "alembic>=1.14.0,<2.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -70,10 +77,17 @@ filterwarnings = [
     "ignore:websockets\\..*:DeprecationWarning",
     "ignore::DeprecationWarning:websockets.*",
     "ignore::DeprecationWarning:websockets_proxy.*",
+    # starlette >= 1.1 deprecates the httpx-backed TestClient in favour of
+    # a not-yet-available ``httpx2``; the suite stays on httpx until that
+    # migration path exists. Drop this once tests move off TestClient.
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
     # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
     # cleanup) to a warning. Older test environments did not surface
     # these; the underlying socket is closed by the OS regardless.
+    # CPython phrases the notice two ways depending on where finalization
+    # runs ("in ..." vs "while finalizing ..."); ignore both spellings.
     "ignore:Exception ignored in.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored while finalizing.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
 ]
 markers = [
     "asyncio: mark test as async/await test"
@@ -96,7 +110,7 @@ override-dependencies = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.1.0",
     "websockets>=16.0",
-    "cryptography>=47.0.0",
+    "cryptography>=50.0.0",
     "black>=26.3.1",
     "aiofiles>=24.1.0",
     "pyyaml>=6.0.2",
@@ -117,6 +131,10 @@ extend-exclude = '''
 [tool.isort]
 profile = "black"
 line_length = 88
+# The repo-local ./alembic/ migration package shadows the third-party
+# distribution name; without this isort classifies `alembic` imports as
+# first-party and disagrees with ruff's isort rules.
+known_third_party = ["alembic"]
 
 [tool.ruff]
 line-length = 88
@@ -132,6 +150,11 @@ select = [
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
 ]
+
+[tool.ruff.lint.isort]
+# Mirror the [tool.isort] override: ./alembic/ is a repo-local package
+# that shadows the third-party distribution name.
+known-third-party = ["alembic"]
 
 [tool.mypy]
 python_version = "3.12"

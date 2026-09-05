@@ -85,11 +85,11 @@ graph TD
     Main[main:app] --> Lifespan[main.lifespan]
     Lifespan --> Container[ServiceContainer.initialize]
     Lifespan --> ContainerS[ServiceContainer.shutdown]
-    Container --> Executors[ThreadPoolExecutor x4]
-    Container --> OS[OperationStore]
-    OS --> SqliteWriter[(SQLite writer)]
-    OS --> SqliteReaders[(per-thread readers)]
-    OS --> Sweep[mark_incomplete_operations_failed]
+    Container --> Executors[ThreadPoolExecutor x2]
+    Container --> OS[OperationRepository]
+    OS --> Pool[(asyncpg pool)]
+    OS --> Sweep[sweep_orphans]
+    Container --> Janitor[RepositoryJanitor]
 
     Main --> RouterL[routers.livestreams]
     Main --> RouterP[routers.posts]
@@ -105,7 +105,7 @@ graph TD
     DL --> SSU[_select_stream_url]
     DL --> Jail[path_safety.resolve_within_root]
     DL --> JailEnsure[path_safety.ensure_within_root]
-    DL --> CreateOp[OperationStore.create_operation]
+    DL --> CreateOp[OperationRepository.create_operation]
     DL --> RSD[_run_stream_download]
 
     RWI --> WCF[WebCastIdFetcher.get_webcast_id]
@@ -119,14 +119,14 @@ graph TD
 
     RSD --> SpawnL[BackgroundTaskRegistry.spawn]
     SpawnL --> DDL[DouyinDownloader.create_stream_tasks]
-    SpawnL --> OPUpdate[OperationStore.update_operation]
+    SpawnL --> OPUpdate[OperationRepository.update_operation]
 
     RouterP --> GBP[PostService.get_post_detail]
     RouterP --> LUP[PostService.get_user_posts]
     RouterP --> SBD[PostService.start_bulk_download]
     RouterP --> GBDS[PostService.get_bulk_download_status]
     SBD --> Validate[handler.fetch_user_profile]
-    SBD --> CreateOpP[OperationStore.create_operation]
+    SBD --> CreateOpP[OperationRepository.create_operation]
     SBD --> SpawnP[BackgroundTaskRegistry.spawn]
     SpawnP --> RBD[_run_bulk_download]
     RBD --> FetchBatch[_fetch_posts_batch]
@@ -137,7 +137,7 @@ graph TD
     RouterU --> GU[UserService.get_user_info]
     RouterU --> SD[UserService.start_download]
     RouterU --> GDS2[UserService.get_download_status]
-    SD --> CreateOpU[OperationStore.create_operation]
+    SD --> CreateOpU[OperationRepository.create_operation]
     SD --> SpawnU[BackgroundTaskRegistry.spawn]
     SpawnU --> PD[_process_download]
     PD --> Storage[R2StorageService.upload_file]
@@ -157,12 +157,12 @@ graph TD
     <h2>Notes</h2>
     <ul>
       <li>Every long-running fan-out is mediated by <code>BackgroundTaskRegistry.spawn</code> via the <code>spawn_or_fallback</code> helper, so the lifespan can drain in-flight work before tearing down the executor pools.</li>
-      <li><code>OperationStore</code> public methods are coroutines that dispatch onto the dedicated <code>sqlite_executor</code>; readers use per-thread connections so progress polls run in parallel with writes.</li>
+      <li><code>OperationRepository</code> methods are natively async coroutines over the shared asyncpg pool; a <code>RepositoryJanitor</code> loop heartbeats owned rows and sweeps orphans.</li>
       <li>The <code>_list_objects_sync</code> path uses the shared <code>r2_head_executor</code> when one is attached so several concurrent listings cannot each spawn their own pool.</li>
     </ul>
 
     <footer>
-      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,lifecycle}.py</code>, <code>core/{operations,background,dependencies,path_safety}.py</code>.
+      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,watch}.py</code>, <code>db/*.py</code>, <code>core/{background,dependencies,path_safety}.py</code>, <code>middleware/rate_limit.py</code>.
     </footer>
   </main>
 

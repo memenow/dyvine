@@ -2,6 +2,32 @@
   path: /spec/replicas
   value: 1
 
+# Production runs the API stateless: task workspaces are pod-local
+# scratch (finished files archive to R2, enforced by the
+# API_MULTI_REPLICA boot guard), so the Deployment can roll and the
+# HPA can scale. Watch loops run on the singleton watcher instead.
+- op: replace
+  path: /spec/strategy
+  value:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+
+- op: replace
+  path: /spec/template/spec/volumes/0
+  value:
+    name: runtime-data
+    emptyDir: {}
+
+- op: add
+  path: /spec/template/spec/containers/0/env
+  value:
+    - name: WATCH_ENABLED
+      value: "false"
+    - name: API_MULTI_REPLICA
+      value: "true"
+
 - op: replace
   path: /spec/template/spec/containers/0/resources/requests/memory
   value: "512Mi"

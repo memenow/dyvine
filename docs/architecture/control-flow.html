@@ -120,13 +120,13 @@ flowchart TD
     Jail -->|Symlink segment| Err422
     Jail -->|Within jail| Dedupe{Active dedupe lock entry?}
     Dedupe -->|Already running| LiveErr
-    Dedupe -->|None| CreateOp[OperationStore.create_operation]
+    Dedupe -->|None| CreateOp[OperationRepository.create_operation]
     CreateOp --> Spawn[BackgroundTaskRegistry.spawn]
     Spawn --> Pending[Return 202 with operation_id]
 
     StartBulk --> ValidateUser{Profile exists?}
     ValidateUser -->|No| ErrUser[UserNotFoundError -> 404]
-    ValidateUser -->|Yes| BulkOp[OperationStore.create_operation]
+    ValidateUser -->|Yes| BulkOp[OperationRepository.create_operation]
     BulkOp --> BulkSpawn[Spawn _run_bulk_download]
     BulkSpawn --> BulkLoop[for page in pages]
     BulkLoop --> CursorCheck{cursor == previous?}

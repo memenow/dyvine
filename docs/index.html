@@ -94,7 +94,7 @@
       <div class="pillrow">
         <span class="pill">Python 3.12+</span>
         <span class="pill">FastAPI</span>
-        <span class="pill">SQLite operation store</span>
+        <span class="pill">Postgres operation store</span>
         <span class="pill">Cloudflare R2 optional</span>
         <span class="pill">Last reviewed: 2026-05-31</span>
       </div>
@@ -109,6 +109,7 @@
         <li><a href="#api-reference">API Reference</a></li>
         <li><a href="#watch-mode">Watch Mode</a></li>
         <li><a href="#operations">Operations</a></li>
+        <li><a href="#batch-cli">Batch CLI</a></li>
         <li><a href="#deployment">Deployment</a></li>
         <li><a href="#development">Development</a></li>
         <li><a href="#security-notes">Security Notes</a></li>
@@ -125,10 +126,10 @@
       </p>
       <ul>
         <li>Async, fire-and-forget downloads return an <code>operation_id</code> immediately and continue on tracked background tasks.</li>
-        <li>Persistent operation state is stored in a WAL-mode SQLite database.</li>
+        <li>Persistent operation state is stored in a shared Postgres database (schema versioned by Alembic).</li>
         <li>Router endpoints are protected by <code>X-API-Key</code> authentication by default.</li>
         <li>User-supplied output paths are resolved inside <code>DOUYIN_DOWNLOAD_ROOT</code> and rejected when they escape the configured root.</li>
-        <li>Dedicated thread pools isolate R2 calls, R2 metadata fan-out, SQLite work, and audit-log writes.</li>
+        <li>Dedicated thread pools isolate R2 calls and R2 metadata fan-out; database IO is natively async over asyncpg.</li>
         <li>Operational endpoints include <code>/livez</code>, <code>/readyz</code>, <code>/startupz</code>, <code>/health</code>, and <code>/metrics</code>.</li>
       </ul>
       <table>
@@ -154,6 +155,7 @@
       <ul>
         <li><a href="https://docs.astral.sh/uv/">uv</a> or Python 3.12+</li>
         <li>Git</li>
+        <li>Postgres 16+ (operation and watch state live in Postgres)</li>
         <li>A valid Douyin session cookie</li>
         <li>Optional Cloudflare R2 credentials and bucket for archival uploads</li>
       </ul>
@@ -162,9 +164,14 @@
 cd dyvine
 uv sync --all-extras</code></pre>
       <h3>Run</h3>
-      <pre><code>uv run uvicorn src.dyvine.main:app --reload</code></pre>
+      <pre><code>docker run -d --name dyvine-pg \
+  -e POSTGRES_USER=dyvine -e POSTGRES_PASSWORD=dyvine \
+  -e POSTGRES_DB=dyvine -p 5432:5432 postgres:16
+cp .env.example .env   # set SECURITY_API_KEY, DOUYIN_COOKIE, DATABASE_URL
+uv run alembic upgrade head
+uv run uvicorn dyvine.main:app --reload</code></pre>
       <p>For a production-style process, run:</p>
-      <pre><code>uv run uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000 \
+      <pre><code>uv run uvicorn dyvine.main:app --host 0.0.0.0 --port 8000 \
     --timeout-graceful-shutdown 25</code></pre>
       <table>
         <thead>
@@ -186,9 +193,9 @@ uv sync --all-extras</code></pre>
       <pre><code>cp .env.example .env</code></pre>
       <p>Minimum required settings for a non-debug deployment:</p>
       <pre><code>API_DEBUG=false
-SECURITY_SECRET_KEY=&lt;48+ bytes of entropy&gt;
 SECURITY_API_KEY=&lt;48+ bytes of entropy&gt;
-DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
+DOUYIN_COOKIE=&lt;browser session cookie&gt;
+DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pre>
       <p>Generate strong local secrets with:</p>
       <pre><code>python -c "import secrets; print(secrets.token_urlsafe(48))"</code></pre>
       <p>
@@ -205,6 +212,14 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
         can be created and written. Retention also applies implicitly whenever R2 is unset, so a
         finished download is never discarded. Bound the retained workspace with
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
+      </p>
+      <p>
+        Persistence targets Postgres: set <code>DATABASE_URL</code> to a
+        <code>postgresql+asyncpg://</code> connection string and tune the pool with
+        <code>DATABASE_POOL_SIZE</code> / <code>DATABASE_POOL_TIMEOUT</code>.
+        <code>DATABASE_OPERATION_RETENTION_DAYS</code> bounds how long terminal
+        operation rows are kept (<code>0</code> disables purging). Apply schema
+        changes with <code>alembic upgrade head</code>.
       </p>
       <h3>Watch Mode configuration (<code>DOUYIN_WATCH_</code> prefix)</h3>
       <p>
@@ -237,6 +252,17 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
       </p>
       <pre><code>X-API-Key: &lt;SECURITY_API_KEY&gt;</code></pre>
 
+      <h3>Rate Limiting</h3>
+      <p>
+        A per-replica token bucket caps each caller (keyed on
+        <code>X-API-Key</code>, else client IP): sustained
+        <code>API_RATE_LIMIT_PER_SECOND</code>, burst
+        <code>API_RATE_LIMIT_BURST</code>. Over-limit callers receive the
+        standard 429 envelope with a <code>Retry-After</code> header. Probes,
+        <code>/metrics</code>, <code>/health</code>, and <code>/</code> are
+        exempt.
+      </p>
+
       <h3>System Endpoints</h3>
       <pre><code>GET /                       # Service metadata and feature list
 GET /livez                  # Process liveness signal
@@ -264,7 +290,7 @@ GET  /api/v1/posts/operations/{operation_id}</code></pre>
       <pre><code>POST /api/v1/livestreams/users/{user_id}/stream:download
 POST /api/v1/livestreams/stream:download
 GET  /api/v1/livestreams/operations/{operation_id}</code></pre>
-      <p>The URL endpoint validates the host against an allowlist of <code>*.douyin.com</code> domains to prevent SSRF.</p>
+      <p>The URL endpoint validates the host against an exact allowlist (<code>douyin.com</code>, <code>www.douyin.com</code>, <code>live.douyin.com</code>, <code>v.douyin.com</code>) to prevent SSRF — other subdomains get 422.</p>
 
       <h3>Watch</h3>
       <pre><code>POST   /api/v1/watch
@@ -405,10 +431,10 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
         <li>New-post deduplication is membership-based using a bounded recent-aweme_id set (capped by <code>DOUYIN_WATCH_RECENT_ID_CAP</code>). The checkpoint is only advanced after a successful run so an interrupted cycle re-downloads at most the most-recent window, which the f2 downloader overwrites idempotently.</li>
         <li>A live check delegates to the existing livestream downloader; a live-status miss or an already-in-progress recording is silently skipped.</li>
         <li>Each triggered download creates a regular operation row (<code>livestream_download</code> or <code>user_posts_incremental_download</code>) that can be polled through the existing operation endpoints.</li>
-        <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> SQLite table (sharing the operation database file) and all enabled subscriptions are re-armed automatically on startup.</li>
-        <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop is logged and resumed on next restart without pulling the pod out of rotation.</li>
+        <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> Postgres table (same database as the operations table) and all enabled subscriptions are re-armed automatically on startup.</li>
+        <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop restarts under exponential backoff and parks after 5 consecutive crashes; a parked subscription resumes only after delete-and-recreate.</li>
         <li><code>/health</code> reports an informational <code>watch_subscriptions</code> field showing the count of currently active watcher loops.</li>
-        <li>Watch Mode shares the single-replica constraint of the rest of the service: subscriptions are stored in pod-local SQLite.</li>
+        <li>Watch scheduling splits across replicas with <code>WATCH_ENABLED</code>: API replicas run with <code>false</code> (subscription CRUD keeps working against shared Postgres, no loops run locally) while exactly one watcher replica runs the loops and adopts new rows through a periodic reconcile pass. See <code>k8s/overlays/production/</code> for the reference split deployment.</li>
       </ul>
 
       <h3>Example</h3>
@@ -431,16 +457,17 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
       <h2>Operations</h2>
       <h3>Persistent Operation Store</h3>
       <p>
-        <code>src/dyvine/core/operations.py</code> owns a SQLite database at
-        <code>data/douyin/state/operations.db</code> by default. Override it with
-        <code>API_OPERATION_DB_PATH</code>.
+        <code>src/dyvine/db/postgres.py</code> persists operations and watch
+        subscriptions in Postgres (SQLAlchemy 2.0 async over asyncpg),
+        connecting to <code>DATABASE_URL</code>. The schema is versioned
+        by Alembic: run <code>alembic upgrade head</code> before the new
+        revision serves traffic.
       </p>
       <ul>
-        <li>WAL journaling allows concurrent readers and a single writer.</li>
-        <li>Per-thread reader connections allow parallel operation polling.</li>
-        <li>A shared writer connection is guarded by a lock.</li>
-        <li>Startup sweeps <code>pending</code> and <code>running</code> rows to <code>failed</code>.</li>
-        <li>SQLite calls run on a dedicated <code>dyvine-sqlite</code> executor.</li>
+        <li>Every operation row carries an <code>owner_id</code> and a heartbeat timestamp.</li>
+        <li>A per-replica janitor heartbeats owned rows and fails rows whose owner went quiet; only genuinely orphaned rows are touched.</li>
+        <li>Terminal rows older than <code>DATABASE_OPERATION_RETENTION_DAYS</code> are purged at boot and daily.</li>
+        <li>Unit tests inject in-memory fakes; the contract suite in <code>tests/db/</code> runs identical assertions against both backends.</li>
       </ul>
       <h3>Background Task Lifecycle</h3>
       <p>
@@ -468,10 +495,41 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
         <tbody>
           <tr><td><code>dyvine-r2</code></td><td>16</td><td>R2 PUT, HEAD, DELETE, and list operations.</td></tr>
           <tr><td><code>dyvine-r2-head</code></td><td>16</td><td>Per-key <code>head_object</code> fan-out during listing hydration.</td></tr>
-          <tr><td><code>dyvine-sqlite</code></td><td>4</td><td>OperationStore reads and writes.</td></tr>
-          <tr><td><code>dyvine-audit</code></td><td>2</td><td>Lifecycle audit-log writes.</td></tr>
+          <tr><td><code>asyncpg pool</code></td><td>5</td><td>Operation/watch reads and writes (<code>DATABASE_POOL_SIZE</code>).</td></tr>
         </tbody>
       </table>
+    </section>
+
+    <section id="batch-cli">
+      <h2>Batch CLI</h2>
+      <p>
+        <code>scripts/dyvine_batch/</code> submits downloads for many users from a
+        text file (one user ID per line, <code>#</code> comments and blanks skipped)
+        and polls them to a summary report:
+      </p>
+      <pre><code># Concurrent: submit all users, then poll together (recommended)
+uv run python -m scripts.dyvine_batch concurrent users.txt --api-key KEY
+
+# Serial: one user at a time
+uv run python -m scripts.dyvine_batch serial users.txt --api-key KEY</code></pre>
+      <p>
+        Configuration precedence per knob is CLI flag, then <code>DYVINE_*</code>
+        environment (<code>DYVINE_API_KEY</code>, <code>DYVINE_API_URL</code>,
+        <code>DYVINE_API_PREFIX</code>, <code>DYVINE_MAX_POLL_ROUNDS</code>), then the
+        repo <code>.env</code> file (<code>SECURITY_API_KEY</code>,
+        <code>API_HOST</code>/<code>API_PORT</code>, <code>API_PREFIX</code>), then the
+        default (<code>http://localhost:8000</code>, prefix <code>/api/v1</code>, 720
+        poll rounds). Useful flags: <code>--include-likes</code>,
+        <code>--max-concurrent</code>, <code>--poll-interval</code>,
+        <code>--timeout</code>, <code>--max-poll-rounds</code> (a job that never turns
+        terminal fails after this many polls instead of looping forever).
+      </p>
+      <p>
+        Exit codes: <code>0</code> on success (individual download failures are
+        reported, not errors), <code>1</code> on configuration/input errors,
+        <code>2</code> on CLI usage errors or unexpected crashes, <code>130</code> on
+        keyboard interrupt.
+      </p>
     </section>
 
     <section id="deployment">
@@ -491,15 +549,33 @@ docker run -d \
         <li>The image is multi-stage and runs as non-root user <code>1000</code>.</li>
         <li>The runtime layer uses <code>python -m uvicorn</code> with <code>--timeout-graceful-shutdown 25</code>.</li>
         <li>The build removes the <code>f2</code>-injected <code>black</code> binary from the production layer.</li>
+        <li><code>DATABASE_URL</code> in <code>.env</code> must point at a reachable Postgres; migrate legacy stores first with <code>uv run python -m scripts.migrate_watch_to_pg</code>.</li>
       </ul>
       <h3>Kubernetes</h3>
-      <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay.</p>
-      <pre><code>kubectl apply -k k8s/base
-kubectl apply -k k8s/overlays/production</code></pre>
+      <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay. There is no CD pipeline and no releases: migrate first, then render the overlay with the image tag, public host, and Postgres CIDR substituted.</p>
+      <pre><code>kubectl apply -k k8s/jobs/migrate
+kubectl wait --for=condition=complete job/dyvine-migrate \
+  -n dyvine --timeout=660s
+
+kubectl kustomize k8s/overlays/production \
+  | sed -e 's|/dyvine:main-latest|/dyvine:&lt;tag&gt;|g' \
+        -e "s/INGRESS_HOST/&lt;public host&gt;/g" \
+        -e "s|DB_CIDR|&lt;postgres CIDR&gt;|g" \
+  | kubectl apply -f -</code></pre>
+      <p>
+        The overlay starts 3 API replicas
+        (<code>WATCH_ENABLED=false</code>) plus 1 watcher replica
+        (<code>WATCH_ENABLED=true</code>) behind an Envoy Gateway
+        <code>Gateway</code> + <code>HTTPRoute</code> (TLS via
+        cert-manager). After rollout, smoke test through a
+        port-forward: <code>/readyz</code> must be ready and an
+        unauthenticated <code>GET /api/v1/watch</code> must return 401.
+      </p>
       <div class="note">
-        <strong>Scaling note:</strong> The default operation store is pod-local SQLite backed by a
-        <code>ReadWriteOnce</code> PVC and a single writer. Replace it with a shared backend before
-        scaling beyond one replica.
+        <strong>Scaling note:</strong> The API scales horizontally when R2 archival is
+        configured (<code>API_MULTI_REPLICA=true</code>, enforced at boot) or download
+        workspaces sit on shared storage; without either, stay on one replica. Watch
+        loops run on exactly one watcher replica.
       </div>
     </section>
 
@@ -523,12 +599,8 @@ make test          # pytest</code></pre>
           <tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, quality gates, container scan, Docker build and push.</td></tr>
-          <tr><td><code>docker-build.yml</code></td><td>Reusable workflow</td><td>Multi-platform image build and registry push.</td></tr>
-          <tr><td><code>deploy-dev.yml</code></td><td>Push to <code>main</code></td><td>Apply the production overlay against the development cluster.</td></tr>
-          <tr><td><code>deploy-prod.yml</code></td><td>Tag push</td><td>Apply against the production cluster.</td></tr>
-          <tr><td><code>release.yml</code></td><td>Tag push</td><td>GitHub release creation.</td></tr>
-          <tr><td><code>security.yml</code></td><td>Weekly schedule and manual</td><td>Dependency and container security audit.</td></tr>
+          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, lint/type gates, migration drift check, manifest render check, container scan. No image push, no releases: this project ships by manual <code>kubectl</code> rollout.</td></tr>
+          <tr><td><code>security.yml</code></td><td>Pull request and push to <code>main</code>, weekly schedule, manual</td><td>Dependency and container security audit.</td></tr>
         </tbody>
       </table>
     </section>
@@ -555,9 +627,8 @@ make test          # pytest</code></pre>
       <h2>Maintenance Notes</h2>
       <ul>
         <li><code>README.md</code> is the concise maintainer entry point; keep it in sync with this page.</li>
-        <li><code>AGENTS.md</code> and <code>CLAUDE.md</code> contain repository-local agent guidance and GitNexus workflow reminders.</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
-        <li>Runtime downloads, operation-store SQLite files, WAL/SHM files, logs, and generated caches are local artifacts and should not be committed.</li>
+        <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
         <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
       </ul>
     </section>

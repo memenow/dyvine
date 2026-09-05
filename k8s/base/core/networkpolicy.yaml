@@ -2,10 +2,17 @@
 # Ingress policy for the dyvine-api Pods.
 #
 # Allows traffic on the container's HTTP port (8000) from:
-#   * Pods in the ``ingress-nginx`` namespace so the ingress controller can
-#     proxy external requests to the API. Selection is based on the
-#     ``kubernetes.io/metadata.name`` label that the kubelet sets
-#     automatically on every namespace from Kubernetes 1.22 onward.
+#   * Pods in the ``envoy-gateway-system`` namespace so the Envoy
+#     data-plane proxies can forward external requests to the API.
+#     In Envoy Gateway's default deployment mode the managed Envoy
+#     fleet runs in the controller namespace (``envoy-gateway-system``),
+#     NOT in the Gateway's own namespace — so this selector is where
+#     edge traffic legitimately comes from. If the cluster ever moves
+#     to Gateway Namespace Mode (data plane per Gateway namespace),
+#     add this namespace (``dyvine``) to the ``from`` list below.
+#     Selection is based on the ``kubernetes.io/metadata.name`` label
+#     that the kubelet sets automatically on every namespace from
+#     Kubernetes 1.22 onward.
 #   * Pods in the ``kube-system`` namespace so kubelet/apiserver-side
 #     probes (liveness, readiness, startup) keep working on clusters that
 #     route probes through a namespace-scoped identity rather than the
@@ -24,17 +31,19 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
+  # ``part-of`` covers the API pods, the singleton watcher pod, and the
+  # short-lived migration Job: all three need the same egress
+  # allowlist, and only the API pods sit behind the Service.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: dyvine
-      app.kubernetes.io/component: api
+      app.kubernetes.io/part-of: dyvine
   policyTypes:
     - Ingress
   ingress:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: envoy-gateway-system
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
@@ -73,11 +82,12 @@ spec:
 #     accidentally granting in-cluster east-west access beyond the DNS
 #     exception above.
 #
-# The service does not currently connect to a PostgreSQL (or other
-# database) server: runtime state is persisted in a SQLite file stored
-# on the ``dyvine-operation-state`` PVC (see
-# ``API_OPERATION_DB_PATH=/app/data/douyin/state/operations.db`` in the
-# Deployment), so no database egress rule is required.
+# Operation and watch state live in the shared Postgres database
+# (``DATABASE_URL`` from ``dyvine-secrets``), so the Pods need TCP 5432
+# egress. The base rule below covers managed databases on the public
+# internet with the same RFC1918/CG-NAT exclusions as the HTTPS rule;
+# operators running Postgres in-cluster (or with a known CIDR) should
+# narrow this via an overlay patch to the database's exact endpoints.
 #
 # All other egress traffic is implicitly denied because declaring an
 # egress rule on a NetworkPolicy switches the pod into allowlist mode
@@ -92,10 +102,12 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
+  # ``part-of`` covers the API pods, the singleton watcher pod, and the
+  # short-lived migration Job: all three need the same egress
+  # allowlist, and only the API pods sit behind the Service.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: dyvine
-      app.kubernetes.io/component: api
+      app.kubernetes.io/part-of: dyvine
   policyTypes:
     - Egress
   egress:
@@ -124,3 +136,17 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+    # Outbound Postgres for the shared operation/watch database. Same
+    # private-range exclusions as above; narrow to the database CIDR
+    # via an overlay when the endpoint is known.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+      ports:
+        - protocol: TCP
+          port: 5432

@@ -1,0 +1,73 @@
+# One-shot schema migration, applied manually BEFORE the new
+# Deployment revision rolls out (this project has no CD pipeline).
+#
+# Sequencing matters: the Job upgrades the database to the revision the
+# new image expects, so applying it after (or concurrently with) the
+# Deployment would boot new code against an old schema. Apply this
+# directory first, wait for ``condition=complete`` (the wait must cover
+# the 600s ``activeDeadlineSeconds`` below), and only then apply the
+# production overlay::
+#
+#   kubectl apply -k k8s/jobs/migrate
+#   kubectl wait --for=condition=complete job/dyvine-migrate \
+#     -n dyvine --timeout=660s
+#
+# The Job is intentionally NOT part of the base kustomization: Job specs
+# are largely immutable, so re-applying a completed Job with a new image
+# tag fails. Delete any previous run first (``kubectl delete job
+# dyvine-migrate -n dyvine --ignore-not-found``) and wait for the
+# deletion to complete, or two alembic upgrades can overlap and fight
+# over the migration lock.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dyvine-migrate
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: migrate
+    app.kubernetes.io/part-of: dyvine
+spec:
+  # Migrations must finish (or fail loudly) rather than retry forever.
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  # Keep finished Jobs around for an hour for log inspection, then reap.
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dyvine
+        app.kubernetes.io/component: migrate
+        app.kubernetes.io/part-of: dyvine
+    spec:
+      restartPolicy: Never
+      serviceAccountName: dyvine-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: migrate
+        image: ghcr.io/memenow/dyvine:latest
+        imagePullPolicy: Always
+        command: ["/app/.venv/bin/alembic", "upgrade", "head"]
+        envFrom:
+        - configMapRef:
+            name: dyvine-config
+        - secretRef:
+            name: dyvine-secrets
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL

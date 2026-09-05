@@ -20,3 +20,11 @@ data:
   R2_BUCKET_NAME: "mmn-dev-data"
   DOUYIN_USER_AGENT: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
   DOUYIN_REFERER: "https://www.douyin.com/"
+  # Postgres knobs. The connection string itself (``DATABASE_URL``,
+  # credentials included) lives in the ``dyvine-secrets`` Secret; only
+  # the non-secret tunables are configured here. The schema is versioned
+  # by Alembic — run ``alembic upgrade head`` (same ``DATABASE_URL``)
+  # before the new revision serves traffic.
+  DATABASE_POOL_SIZE: "5"
+  DATABASE_POOL_TIMEOUT: "30"
+  DATABASE_OPERATION_RETENTION_DAYS: "30"

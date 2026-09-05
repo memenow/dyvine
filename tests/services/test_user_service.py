@@ -9,9 +9,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fake_repos import FakeOperationRepository
 
 from dyvine.core.exceptions import OperationNotFoundError
-from dyvine.core.operations import OperationStore
 from dyvine.core.settings import settings
 from dyvine.services.users import DownloadResponse, UserService
 
@@ -43,7 +43,7 @@ async def test_start_download_tracks_operation(
 
     monkeypatch.setattr("dyvine.core.background.asyncio.create_task", fake_create_task)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     monkeypatch.setattr(service, "get_user_info", AsyncMock(return_value=MagicMock()))
 
     response = await service.start_download("user-123")
@@ -69,7 +69,7 @@ async def test_get_download_status_returns_persisted_state(
         future.set_result(None)
         return future
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     monkeypatch.setattr(service, "get_user_info", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr("dyvine.core.background.asyncio.create_task", resolved_future)
 
@@ -84,7 +84,7 @@ async def test_get_download_status_returns_persisted_state(
 @pytest.mark.asyncio
 async def test_get_download_status_raises_for_unknown_task() -> None:
     """Verify get download status raises for unknown task."""
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     with pytest.raises(OperationNotFoundError):
         await service.get_download_status("missing-task")
 
@@ -92,7 +92,7 @@ async def test_get_download_status_raises_for_unknown_task() -> None:
 @pytest.mark.asyncio
 async def test_get_download_status_rejects_non_user_operation(tmp_path) -> None:
     """Verify get download status rejects non user operation."""
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="livestream_download",
         subject_id="room-1",
@@ -131,7 +131,7 @@ async def test_get_user_info_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     result = await service.get_user_info("test-user")
     assert result.nickname == "TestUser"
     assert result.user_id == "test-user"
@@ -158,7 +158,7 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     with pytest.raises(UserNotFoundError):
         await service.get_user_info("missing-user")
 
@@ -189,7 +189,7 @@ async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     result = await service.get_user_info("live-user")
     assert result.is_living is True
     assert result.room_id == 42
@@ -222,7 +222,7 @@ async def test_process_download_no_posts(
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="empty-user",
@@ -263,7 +263,7 @@ async def test_process_download_sets_failed_on_error(
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="bad-user",
@@ -306,7 +306,7 @@ async def test_process_download_skips_when_nothing_requested(
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="opt-out-user",
@@ -373,7 +373,7 @@ async def test_process_download_runs_when_only_likes_requested(
 
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="likes-only-user",
@@ -455,7 +455,7 @@ async def test_process_download_breaks_on_sticky_cursor(
     monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
     monkeypatch.chdir(tmp_path)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="sticky-cursor-user",
@@ -543,7 +543,7 @@ async def test_process_download_likes_reports_progress_as_indeterminate(
     # inside ``tmp_path`` and we never touch the repo tree.
     monkeypatch.chdir(tmp_path)
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     operation = await service.operation_store.create_operation(
         operation_type="user_content_download",
         subject_id="likes-progress-user",
@@ -620,7 +620,7 @@ async def test_upload_directory_to_r2_counts_partial_failures(
         if Path(local_path).resolve() == failing_target:
             raise users_mod.ServiceError("simulated upload outage")
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     service.storage.generate_ugc_path = MagicMock(return_value="r2/path")
     service.storage.generate_metadata = MagicMock(return_value={"category": "posts"})
     monkeypatch.setattr(service.storage, "upload_file", fake_upload_file)
@@ -673,7 +673,7 @@ async def test_upload_directory_to_r2_keeps_files_when_delete_disabled(
         """Record the upload without unlinking the local file."""
         uploaded_paths.append(Path(local_path))
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     service.storage.generate_ugc_path = MagicMock(return_value="r2/path")
     service.storage.generate_metadata = MagicMock(return_value={"category": "posts"})
     monkeypatch.setattr(service.storage, "upload_file", fake_upload_file)
@@ -766,7 +766,7 @@ async def test_process_download_uploads_only_files_changed_in_current_batch(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
     monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     monkeypatch.setattr(service, "_r2_upload_enabled", lambda: True)
     monkeypatch.setattr(service, "_should_retain_workspace", lambda: True)
     service.storage.generate_ugc_path = MagicMock(return_value="r2/path")
@@ -871,7 +871,7 @@ async def test_process_download_retries_stale_upload_failures(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
     monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     monkeypatch.setattr(service, "_r2_upload_enabled", lambda: True)
     monkeypatch.setattr(service, "_should_retain_workspace", lambda: False)
     service.storage.generate_ugc_path = MagicMock(return_value="r2/path")
@@ -952,7 +952,7 @@ async def test_process_download_retains_workspace_when_r2_unconfigured(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
     monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     # Pin the unconfigured-R2 retain path so a developer ``.env`` with real R2
     # credentials cannot flip this test onto the cleanup branch.
     monkeypatch.setattr(service, "_r2_upload_enabled", lambda: False)
@@ -1077,7 +1077,7 @@ async def test_finalize_status_clamps_progress_when_downloaded_exceeds_total(
     inside the documented 0..100 range so dashboards do not render
     nonsense values.
     """
-    store = OperationStore(str(tmp_path / "operations.db"))
+    store = FakeOperationRepository()
     operation = await store.create_operation(
         operation_type="user_content_download",
         subject_id="overflow-user",
@@ -1262,7 +1262,7 @@ async def test_concurrent_downloads_use_isolated_temp_directories(
     monkeypatch.setattr(users_mod, "DouyinHandler", handler_factory)
     monkeypatch.setattr(users_mod.asyncio, "sleep", AsyncMock())
 
-    service = UserService()
+    service = UserService(FakeOperationRepository())
     # Exercise the R2-archival cleanup branch deterministically: force
     # archival mode (not local retention) so each per-task workspace is
     # removed after the run regardless of whether R2 is configured in the

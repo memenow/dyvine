@@ -28,15 +28,14 @@ when downloads already succeeded) rather than silently passing as
 ``completed``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-
-from f2.apps.douyin.db import AsyncUserDB  # type: ignore
-from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+from typing import TYPE_CHECKING, Any
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
@@ -46,9 +45,9 @@ from ..core.exceptions import (
     UserNotFoundError,
 )
 from ..core.logging import ContextLogger
-from ..core.operations import OperationStore
 from ..core.pagination import MAX_PAGES_FALLBACK, PAGE_MULTIPLIER, PAGE_SLACK
 from ..core.path_safety import relative_to_download_root
+from ..db import OperationRepository
 from ..schemas.posts import (
     BulkDownloadResponse,
     DownloadStatus,
@@ -57,6 +56,17 @@ from ..schemas.posts import (
     PostType,
     VideoInfo,
 )
+
+if TYPE_CHECKING:
+    from f2.apps.douyin.db import AsyncUserDB  # type: ignore
+    from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+else:
+    # Deferred: importing f2 performs real HTTPS requests (see
+    # ``core._lazy_f2``), so the SDK loads on first real use only.
+    from ..core._lazy_f2 import LazyF2Symbol
+
+    AsyncUserDB = LazyF2Symbol("f2.apps.douyin.db", "AsyncUserDB")
+    DouyinHandler = LazyF2Symbol("f2.apps.douyin.handler", "DouyinHandler")
 
 logger = ContextLogger(__name__)
 
@@ -141,23 +151,23 @@ class PostService:
         self,
         handler: DouyinHandler,
         *,
-        operation_store: OperationStore | None = None,
+        operation_store: OperationRepository,
         task_registry: BackgroundTaskRegistry | None = None,
     ) -> None:
         """Initialize the PostService instance.
 
         Args:
             handler: Configured DouyinHandler instance for Douyin operations.
-            operation_store: Persistent operation record store. A private
-                ``OperationStore`` is created when not provided, which is the
-                path unit tests take.
+            operation_store: Persistent operation record repository.
+                Required; the container injects the Postgres-backed
+                implementation and unit tests inject a fake.
             task_registry: Optional registry that owns long-lived bulk
                 download tasks. When omitted (e.g. in tests) the service
                 falls back to ``asyncio.create_task`` so the public API
                 remains testable without a full service container.
         """
         self.handler = handler
-        self.operation_store = operation_store or OperationStore()
+        self.operation_store = operation_store
         self._task_registry = task_registry
         logger.info("PostService initialized", extra={"handler_config": handler.kwargs})
 
@@ -183,14 +193,16 @@ class PostService:
 
             post_data = post._to_dict()
 
-            # Parse create_time string into a Unix timestamp (integer)
+            # Parse create_time string into a Unix timestamp (integer).
+            # The upstream format carries no zone; interpret it as UTC so
+            # the result does not depend on the server's local timezone.
             create_time_str = post_data.get("create_time")
             create_time = 0
             if create_time_str:
                 try:
                     create_time_dt = datetime.strptime(
                         create_time_str, "%Y-%m-%d %H-%M-%S"
-                    )
+                    ).replace(tzinfo=UTC)
                     create_time = int(create_time_dt.timestamp())
                 except (ValueError, TypeError):
                     create_time = 0
@@ -739,7 +751,7 @@ class PostService:
             OperationNotFoundError: If no bulk or incremental download
                 operation matches the provided identifier.
         """
-        # ``OperationStore.get_operation`` already raises
+        # ``OperationRepository.get_operation`` already raises
         # ``OperationNotFoundError`` with a descriptive message when the
         # row is missing; re-wrapping here would just discard the
         # original ``error_code`` and ``details``.
@@ -1243,8 +1255,8 @@ class PostService:
 # ----------------------------------------------------------------------
 # Module-level helpers shared between ``_run_bulk_download`` and
 # ``get_bulk_download_status``. Keeping them at module scope makes the
-# serialization shape easy to unit test and avoids leaking sqlite-aware
-# logic into the response model.
+# serialization shape easy to unit test and avoids leaking
+# persistence-aware logic into the response model.
 # ----------------------------------------------------------------------
 
 

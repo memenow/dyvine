@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
+import fake_repos
 import pytest
+from fake_repos import (
+    FakeOperationRepository,
+    FakeOperationState,
+    FakeWatchRepository,
+)
 from fastapi import HTTPException
 
 from dyvine.core import dependencies
@@ -18,12 +25,24 @@ class DummyHandler:
         self.kwargs = kwargs
 
 
+def _fake_stores() -> tuple[FakeOperationRepository, FakeWatchRepository]:
+    """Return an operation/watch fake pair for container injection."""
+    return FakeOperationRepository(), FakeWatchRepository()
+
+
 @pytest.fixture(autouse=True)
 def reset_container_cache() -> None:
     """Test helper for this module."""
     dependencies.get_service_container.cache_clear()
     yield
     dependencies.get_service_container.cache_clear()
+
+
+def _stub_douyin_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace the f2 handler with a construction double."""
+    monkeypatch.setattr(
+        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
+    )
 
 
 @pytest.mark.asyncio
@@ -42,15 +61,18 @@ async def test_service_container_initializes_with_douyin_handler(
 
     monkeypatch.setattr(dependencies, "DouyinHandler", build_handler)
 
+    operation_store, watch_store = _fake_stores()
     container = dependencies.ServiceContainer()
-    await container.initialize()
-
-    handler = container.douyin_handler
-    assert isinstance(handler, DummyHandler)
-    assert captured_kwargs.get("mode") == "all"
-    assert captured_kwargs.get("interval") == "all"
-    assert captured_kwargs.get("path") == str(tmp_path)
-    assert captured_kwargs.get("max_tasks") == 3
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        handler = container.douyin_handler
+        assert isinstance(handler, DummyHandler)
+        assert captured_kwargs.get("mode") == "all"
+        assert captured_kwargs.get("interval") == "all"
+        assert captured_kwargs.get("path") == str(tmp_path)
+        assert captured_kwargs.get("max_tasks") == 3
+    finally:
+        await container.shutdown()
 
 
 def test_get_service_container_returns_singleton(
@@ -116,33 +138,216 @@ def test_require_api_key_accepts_matching_header(
 
 
 @pytest.mark.asyncio
-async def test_service_container_reconciles_incomplete_operations(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+async def test_service_container_sweeps_orphans_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify service container reconciles incomplete operations."""
-    monkeypatch.setattr(
-        dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
-    )
-    monkeypatch.setattr(
-        dependencies.settings.api,
-        "operation_db_path",
-        str(tmp_path / "operations.db"),
-    )
+    """Boot fails rows orphaned by dead replicas, nothing else."""
+    _stub_douyin_handler(monkeypatch)
+    state = FakeOperationState()
+    dead_owner = FakeOperationRepository(owner_id="dead-replica", state=state)
 
-    preexisting = dependencies.OperationStore(str(tmp_path / "operations.db"))
-    operation = await preexisting.create_operation(
+    old = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat()
+    monkeypatch.setattr(fake_repos, "_now_iso", lambda: old)
+    orphan = await dead_owner.create_operation(
         operation_type="user_content_download",
         subject_id="user-1",
         status="running",
         message="running",
     )
+    monkeypatch.undo()
 
+    operation_store = FakeOperationRepository(owner_id="boot-owner", state=state)
     container = dependencies.ServiceContainer()
-    await container.initialize()
+    await container.initialize(
+        operation_store=operation_store,
+        watch_store=FakeWatchRepository(),
+    )
+    try:
+        refreshed = await container.operation_store.get_operation(orphan.operation_id)
+        assert refreshed.status == "failed"
+        assert "stopped heartbeating" in refreshed.message
+    finally:
+        await container.shutdown()
 
-    refreshed = await container.operation_store.get_operation(operation.operation_id)
-    assert refreshed.status == "failed"
-    assert refreshed.error == "Operation interrupted during process restart"
+
+@pytest.mark.asyncio
+async def test_service_container_purges_terminal_rows_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boot enforces retention; disabled retention purges nothing."""
+    from dyvine.core.exceptions import OperationNotFoundError
+
+    _stub_douyin_handler(monkeypatch)
+    state = FakeOperationState()
+    store = FakeOperationRepository(owner_id="boot-owner", state=state)
+    old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    monkeypatch.setattr(fake_repos, "_now_iso", lambda: old)
+    stale = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="completed",
+        message="done",
+    )
+    monkeypatch.undo()
+
+    monkeypatch.setattr(dependencies.settings.database, "operation_retention_days", 30)
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=store, watch_store=FakeWatchRepository())
+    try:
+        with pytest.raises(OperationNotFoundError):
+            await container.operation_store.get_operation(stale.operation_id)
+    finally:
+        await container.shutdown()
+
+    fresh_state = FakeOperationState()
+    fresh_store = FakeOperationRepository(owner_id="boot-owner", state=fresh_state)
+    monkeypatch.setattr(fake_repos, "_now_iso", lambda: old)
+    kept = await fresh_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="completed",
+        message="done",
+    )
+    monkeypatch.undo()
+    monkeypatch.setattr(dependencies.settings.database, "operation_retention_days", 0)
+    container = dependencies.ServiceContainer()
+    await container.initialize(
+        operation_store=fresh_store, watch_store=FakeWatchRepository()
+    )
+    try:
+        assert (
+            await container.operation_store.get_operation(kept.operation_id)
+        ).status == "completed"
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_rejects_mixed_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing exactly one repository override is a loud error."""
+    _stub_douyin_handler(monkeypatch)
+    container = dependencies.ServiceContainer()
+    with pytest.raises(ValueError, match="both .* or neither"):
+        await container.initialize(operation_store=FakeOperationRepository())
+
+
+@pytest.mark.asyncio
+async def test_service_container_multi_replica_requires_shared_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-replica boot fails without R2 or a shared volume."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.api, "shared_file_storage", False)
+    for field in (
+        "account_id",
+        "access_key_id",
+        "secret_access_key",
+        "bucket_name",
+        "endpoint",
+    ):
+        monkeypatch.setattr(dependencies.settings.r2, field, "")
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    with pytest.raises(RuntimeError, match="API_MULTI_REPLICA=true requires"):
+        await container.initialize(
+            operation_store=operation_store, watch_store=watch_store
+        )
+    # Failed before any thread or pool existed: nothing to unwind.
+    assert container._initialized is False
+    assert container._r2_executor is None
+
+
+@pytest.mark.asyncio
+async def test_service_container_multi_replica_passes_with_r2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2 archival satisfies the multi-replica download constraint."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.r2, "account_id", "acc")
+    monkeypatch.setattr(dependencies.settings.r2, "access_key_id", "key")
+    monkeypatch.setattr(dependencies.settings.r2, "secret_access_key", "secret")
+    monkeypatch.setattr(dependencies.settings.r2, "bucket_name", "bucket")
+    monkeypatch.setattr(dependencies.settings.r2, "endpoint", "https://example.test")
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert container._initialized is True
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_multi_replica_passes_with_shared_fs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared volume exempts multi-replica boot from the R2 rule."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.api, "shared_file_storage", True)
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert container._initialized is True
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_watch_disabled_is_crud_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``WATCH_ENABLED=false`` builds CRUD without loops or reconcile."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings, "watch_enabled", False)
+
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        service = container.watch_service
+        record, created = await service.create_subscription(
+            user_id="user-crud", backfill_on_create=True
+        )
+        assert created is True
+        assert service.active_count == 0
+        assert container._watch_reconcile_task is None
+        fetched = await service.get_subscription(record.subscription_id)
+        assert fetched.user_id == "user-crud"
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_service_container_boot_failure_unwinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreachable database fails boot without leaking threads."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(
+        dependencies.settings.database,
+        "url",
+        "postgresql+asyncpg://u:p@127.0.0.1:1/db",
+    )
+    container = dependencies.ServiceContainer()
+    # asyncpg surfaces a refused connection as a raw ``OSError`` before
+    # SQLAlchemy can wrap it; either way boot must fail loudly.
+    with pytest.raises(OSError):
+        await container.initialize()
+
+    assert container._initialized is False
+    assert container._r2_executor is None
+    assert container._r2_head_executor is None
+    assert container._db is None
+    assert container._janitor_task is None
 
 
 def test_service_container_requires_initialization(
@@ -150,9 +355,9 @@ def test_service_container_requires_initialization(
 ) -> None:
     """Accessing a service before awaiting ``initialize`` must fail loudly.
 
-    ``initialize`` is a coroutine because it awaits SQLite recovery via
-    ``asyncio.to_thread``. Synchronous property access has no safe way to
-    bootstrap, so the container should raise rather than block the caller.
+    ``initialize`` is a coroutine because boot recovery awaits database
+    IO. Synchronous property access has no safe way to bootstrap, so
+    the container should raise rather than block the caller.
 
     """
     monkeypatch.setattr(
@@ -182,35 +387,33 @@ async def test_service_container_exposes_post_service(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
     )
 
+    operation_store, watch_store = _fake_stores()
     container = dependencies.ServiceContainer()
-    await container.initialize()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        post_service = container.post_service
+        assert isinstance(post_service, dependencies.PostService)
 
-    post_service = container.post_service
-    assert isinstance(post_service, dependencies.PostService)
-
-    operation = await post_service.operation_store.create_operation(
-        operation_type="user_posts_bulk_download",
-        subject_id="user-shared-store",
-        status="pending",
-        message="scheduled",
-    )
-    fetched = await container.operation_store.get_operation(operation.operation_id)
-    assert fetched.operation_id == operation.operation_id
-    assert dependencies.get_post_service.__name__ == "get_post_service"
+        operation = await post_service.operation_store.create_operation(
+            operation_type="user_posts_bulk_download",
+            subject_id="user-shared-store",
+            status="pending",
+            message="scheduled",
+        )
+        fetched = await container.operation_store.get_operation(operation.operation_id)
+        assert fetched.operation_id == operation.operation_id
+        assert dependencies.get_post_service.__name__ == "get_post_service"
+    finally:
+        await container.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_service_container_survives_watch_resume_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A watch resume failure must not abort startup (watch is non-critical)."""
     monkeypatch.setattr(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
-    )
-    monkeypatch.setattr(
-        dependencies.settings.api,
-        "operation_db_path",
-        str(tmp_path / "operations.db"),
     )
     monkeypatch.setattr(
         dependencies.WatchService,
@@ -218,38 +421,42 @@ async def test_service_container_survives_watch_resume_failure(
         AsyncMock(side_effect=RuntimeError("resume boom")),
     )
 
+    operation_store, watch_store = _fake_stores()
     container = dependencies.ServiceContainer()
-    await container.initialize()  # must not raise despite the resume failure
-
-    # The container still came up; non-watch services remain usable.
-    assert container._initialized is True
-    assert isinstance(container.post_service, dependencies.PostService)
-    await container.shutdown()
+    await container.initialize(
+        operation_store=operation_store, watch_store=watch_store
+    )  # must not raise despite the resume failure
+    try:
+        # The container still came up; non-watch services remain usable.
+        assert container._initialized is True
+        assert isinstance(container.post_service, dependencies.PostService)
+    finally:
+        await container.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_service_container_survives_watch_store_init_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+async def test_service_container_survives_watch_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A watch-store construction failure leaves the rest of startup intact."""
+    """A watch-service construction failure leaves the rest intact."""
     monkeypatch.setattr(
         dependencies, "DouyinHandler", lambda kwargs: DummyHandler(kwargs)
     )
-    monkeypatch.setattr(
-        dependencies.settings.api,
-        "operation_db_path",
-        str(tmp_path / "operations.db"),
-    )
 
-    def _boom(*args: object, **kwargs: object) -> object:
-        raise RuntimeError("watch store boom")
+    class _BoomWatchService:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("watch build boom")
 
-    monkeypatch.setattr(dependencies, "WatchSubscriptionStore", _boom)
+    monkeypatch.setattr(dependencies, "WatchService", _BoomWatchService)
 
+    operation_store, watch_store = _fake_stores()
     container = dependencies.ServiceContainer()
-    await container.initialize()  # must not raise or leak the executors above
-
-    assert container._initialized is True
-    assert isinstance(container.post_service, dependencies.PostService)
-    assert container._watch_store is None
-    await container.shutdown()  # clean teardown even without a watch store
+    await container.initialize(
+        operation_store=operation_store, watch_store=watch_store
+    )  # must not raise or leak the executors above
+    try:
+        assert container._initialized is True
+        assert isinstance(container.post_service, dependencies.PostService)
+        assert "watch_service" not in container._services
+    finally:
+        await container.shutdown()  # clean teardown even without watch

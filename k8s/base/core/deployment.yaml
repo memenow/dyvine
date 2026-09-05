@@ -10,9 +10,11 @@ metadata:
 spec:
   replicas: 1
   # Recreate is required because ``runtime-data`` is backed by a
-  # ReadWriteOnce PVC. A rolling update would spin up a surge Pod that
-  # cannot attach the volume (on multi-node clusters) or would briefly
-  # contend for the same SQLite writer (on single-node clusters).
+  # ReadWriteOnce PVC holding per-task download workspaces. A rolling
+  # update would spin up a surge Pod that cannot attach the volume on
+  # multi-node clusters. (Operation state itself lives in the shared
+  # Postgres database and is multi-replica safe; only the file
+  # workspaces pin this Deployment to one Pod.)
   strategy:
     type: Recreate
   selector:
@@ -44,9 +46,9 @@ spec:
             name: dyvine-config
         - secretRef:
             name: dyvine-secrets
-        env:
-        - name: API_OPERATION_DB_PATH
-          value: /app/data/douyin/state/operations.db
+        # ``DATABASE_URL`` (credentials included) is injected from the
+        # ``dyvine-secrets`` Secret, which the operator creates out of
+        # band; pool/retention knobs live in ``dyvine-config``.
         resources:
           requests:
             memory: "256Mi"

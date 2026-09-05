@@ -9,8 +9,11 @@ modules with side effects at import time (e.g. Prometheus metrics in storage.py)
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -26,33 +29,78 @@ import pytest
 # auth-bypass path is exercised explicitly by dedicated tests.
 os.environ.setdefault("API_DEBUG", "true")
 os.environ.setdefault("SECURITY_REQUIRE_API_KEY", "false")
+# Effectively disable the token-bucket middleware for the shared app:
+# buckets key on client IP and ``TestClient`` always dials from the
+# same one, so production-sized limits would 429 unrelated tests once
+# the suite's cumulative traffic exceeds the burst. Tight-limit
+# behavior is covered by ``tests/middleware/`` on purpose-built apps.
+os.environ.setdefault("API_RATE_LIMIT_PER_SECOND", "1000000")
+os.environ.setdefault("API_RATE_LIMIT_BURST", "1000000")
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+# ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
+# pytest only puts each test file's own directory on ``sys.path``, so
+# without this a test under ``tests/db/`` could not ``import
+# fake_repos`` from its sibling directory.
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+
 
 @pytest.fixture(autouse=True)
-def reset_singletons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Reset cached state and isolate operation storage between tests.
+def preserve_event_loop_affinity() -> Iterator[None]:
+    """Re-anchor the ambient event loop across each test.
 
-    The autouse fixture also strips ``SECURITY_SECRET_KEY`` and
-    ``SECURITY_API_KEY`` from the process environment before each test runs.
+    pytest-asyncio lazily side-creates an ambient loop the first time an
+    async fixture needs one (on Python <= 3.13 ``get_event_loop`` still
+    creates instead of raising, and pytest-asyncio suppresses that
+    deprecation internally). The loop is never closed by anyone, which is
+    harmless while the event-loop policy keeps referencing it — but stdlib
+    ``asyncio.run`` (used by the batch CLI entry points under test) resets
+    the policy's current loop to ``None`` on close, orphaning the ambient
+    loop so a later GC fails an unrelated test (or session teardown) with
+    ``unclosed event loop`` unraisables. Restoring whatever was current
+    before the test keeps the orphan referenced and silent. Loops a test
+    abandons itself are unaffected: they are still collected and still
+    fail loudly.
+    """
+    try:
+        before = asyncio.get_running_loop()
+    except RuntimeError:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                before = asyncio.get_event_loop()
+            except RuntimeError:  # Python 3.14+: nothing set, nothing to keep
+                before = None
+    yield
+    asyncio.set_event_loop(before)
+
+
+@pytest.fixture(autouse=True)
+def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset cached singletons between tests.
+
+    The autouse fixture also strips ``SECURITY_API_KEY`` and
+    ``DATABASE_URL`` from the process environment before each test runs.
     ``get_settings`` calls ``load_dotenv`` on import, which leaks any real
     credentials from the developer's ``.env`` into ``os.environ`` and would
-    otherwise make ``SecuritySettings`` tests assert against a live secret
-    instead of the documented ``change-me-in-production`` sentinel.
+    otherwise make settings tests assert against live secrets instead of
+    the documented defaults.
+
+    Persistence isolation needs no work here: services take their
+    repositories by injection, so unit tests use the in-memory fakes
+    from ``tests.fake_repos`` while only ``tests/db/`` touches
+    a real database.
     """
     from dyvine.core.dependencies import get_service_container
-    from dyvine.core.settings import get_settings, settings
+    from dyvine.core.settings import get_settings
 
-    monkeypatch.delenv("SECURITY_SECRET_KEY", raising=False)
     monkeypatch.delenv("SECURITY_API_KEY", raising=False)
-    monkeypatch.setattr(
-        settings.api,
-        "operation_db_path",
-        str(tmp_path / "operations.db"),
-    )
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     # ``get_settings`` is ``lru_cache``d on the module so a settings test
     # that monkeypatches an env var would otherwise see a stale Settings
     # instance leaked from a previous test. Clearing both cached
@@ -90,3 +138,57 @@ def storage_service_no_init():
     service = object.__new__(R2StorageService)
     service._executor = None  # type: ignore[attr-defined]
     return service
+
+
+def _upgrade_to_head(config) -> None:
+    """Run ``alembic upgrade head`` on a thread without a loop.
+
+    This fixture is pulled from async test context, so the calling
+    thread already runs an event loop -- and ``env.py`` drives its
+    own ``asyncio.run``. A worker thread gives it a clean loop.
+    """
+    import threading
+
+    from alembic import command
+
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            command.upgrade(config, "head")
+        except BaseException as exc:  # propagate to the caller
+            errors.append(exc)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
+
+
+@pytest.fixture(scope="session")
+def postgres_url():
+    """Start a containerised Postgres and migrate it to ``head``.
+
+    Shared by ``tests/db`` and ``tests/scripts``. The Alembic
+    environment reads its URL from the already-imported
+    ``dyvine.core.settings.settings`` singleton (``cache_clear`` alone
+    cannot rebuild it), so the singleton's URL is patched narrowly
+    around the upgrade and restored before any test runs.
+    """
+    from alembic.config import Config
+    from testcontainers.community.postgres import PostgresContainer
+
+    import dyvine.core.settings as settings_module
+
+    root_dir = Path(__file__).resolve().parents[1]
+    with PostgresContainer("postgres:16") as container:
+        raw_url = container.get_connection_url()
+        url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+        previous = settings_module.settings.database.url
+        settings_module.settings.database.url = url
+        try:
+            _upgrade_to_head(Config(str(root_dir / "alembic.ini")))
+        finally:
+            settings_module.settings.database.url = previous
+        yield url
