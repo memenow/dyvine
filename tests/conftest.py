@@ -82,8 +82,19 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
             None,
         )
         if loop is not None and not loop.is_closed():
-            print(f"\nPROBE-LEAKED-LOOP thread={thread} loop={loop!r}")
-            print(stack[-4000:])
+            owners: list[str] = []
+            for ref in _gc.get_referrers(loop):
+                if isinstance(ref, dict):
+                    keys = [k for k, v in list(ref.items())[:50] if v is loop]
+                    owners.append(f"dict{keys}")
+                else:
+                    owners.append(type(ref).__name__)
+            print(
+                f"\nPROBE-LEAKED-LOOP thread={thread} loop={loop!r} "
+                f"self_pipe={loop._ssock is not None} owners={owners[:8]}"
+            )
+            print("PROBE-STACK-HEAD:" + stack[:3000])
+            print("PROBE-STACK-TAIL:" + stack[-1500:])
 
 
 # ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
