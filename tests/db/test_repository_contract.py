@@ -28,6 +28,7 @@ from sqlalchemy import text
 import dyvine.db.postgres as postgres_module
 from dyvine.core.exceptions import (
     OperationNotFoundError,
+    RateLimitError,
     ServiceError,
     WatchDuplicateError,
     WatchSubscriptionNotFoundError,
@@ -648,6 +649,45 @@ async def test_update_subscription_none_checkpoint_clears(
     )
     updated = await repo.update_subscription(created.subscription_id, checkpoint=None)
     assert updated.checkpoint == {}
+
+
+async def test_create_subscription_capped_enforces_cap(
+    backend: BackendContext,
+) -> None:
+    """At-cap inserts raise with the documented message on both legs."""
+    repo = backend.make_watch()
+    await repo.create_subscription_capped(
+        **_subscription_kwargs("cap-1"), max_subscriptions=2
+    )
+    await repo.create_subscription_capped(
+        **_subscription_kwargs("cap-2"), max_subscriptions=2
+    )
+    with pytest.raises(RateLimitError, match="limit reached"):
+        await repo.create_subscription_capped(
+            **_subscription_kwargs("cap-3"), max_subscriptions=2
+        )
+    assert await repo.count_subscriptions() == 2
+
+
+async def test_capped_create_never_overshoots_cap(
+    backend: BackendContext,
+) -> None:
+    """Concurrent creators split the cap exactly, none over."""
+    repo = backend.make_watch()
+    results = await asyncio.gather(
+        *(
+            repo.create_subscription_capped(
+                **_subscription_kwargs(f"race-{index}"), max_subscriptions=3
+            )
+            for index in range(6)
+        ),
+        return_exceptions=True,
+    )
+    succeeded = [r for r in results if not isinstance(r, BaseException)]
+    refused = [r for r in results if isinstance(r, RateLimitError)]
+    assert len(succeeded) == 3
+    assert len(refused) == 3
+    assert await repo.count_subscriptions() == 3
 
 
 async def test_update_subscription_ignores_unknown_fields(

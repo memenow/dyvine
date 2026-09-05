@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..core.exceptions import (
     OperationNotFoundError,
+    RateLimitError,
     ServiceError,
     WatchDuplicateError,
     WatchSubscriptionNotFoundError,
@@ -52,6 +53,10 @@ _SUBSCRIPTION_UPDATABLE_FIELDS = frozenset(
 )
 
 _ORPHAN_MESSAGE = "Operation interrupted: owning replica stopped heartbeating"
+
+#: Advisory-lock key serialising capped watch-subscription creates
+#: across replicas (see ``create_subscription_capped``).
+_WATCH_CAP_LOCK_KEY = "dyvine_watch_subscription_cap"
 
 
 def _now_iso() -> str:
@@ -326,6 +331,67 @@ class PostgresWatchRepository:
         try:
             async with self._sessions.session() as session:
                 async with session.begin():
+                    session.add(row)
+        except IntegrityError as exc:
+            raise WatchDuplicateError(
+                f"Watch subscription for user {user_id} already exists",
+                details={"user_id": user_id},
+            ) from exc
+        return _watch_to_record(row)
+
+    async def create_subscription_capped(
+        self,
+        *,
+        user_id: str,
+        live_poll_seconds: int,
+        post_poll_seconds: int,
+        enabled: bool = True,
+        checkpoint: dict[str, Any] | None = None,
+        subscription_id: str | None = None,
+        max_subscriptions: int,
+    ) -> WatchSubscriptionRecord:
+        """Insert a subscription, enforcing the cap atomically.
+
+        A transaction-scoped advisory lock serialises concurrent
+        creators across replicas: without it, two processes could both
+        count N < cap and both insert. The lock dies with the
+        transaction, so there is no cleanup path to forget.
+        """
+        stamp = _now_iso()
+        row = WatchSubscriptionRow(
+            subscription_id=subscription_id or str(uuid.uuid4()),
+            user_id=user_id,
+            enabled=enabled,
+            live_poll_seconds=live_poll_seconds,
+            post_poll_seconds=post_poll_seconds,
+            checkpoint=dict(checkpoint or {}),
+            last_live_check=None,
+            last_post_check=None,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        try:
+            async with self._sessions.session() as session:
+                async with session.begin():
+                    await session.execute(
+                        select(
+                            func.pg_advisory_xact_lock(
+                                func.hashtext(_WATCH_CAP_LOCK_KEY)
+                            )
+                        )
+                    )
+                    total = (
+                        await session.execute(
+                            select(func.count()).select_from(WatchSubscriptionRow)
+                        )
+                    ).scalar()
+                    if int(total or 0) >= max_subscriptions:
+                        raise RateLimitError(
+                            "Watch subscription limit reached "
+                            f"({max_subscriptions}); "
+                            "delete a subscription first",
+                            details={"max_subscriptions": max_subscriptions},
+                        )
                     session.add(row)
         except IntegrityError as exc:
             raise WatchDuplicateError(

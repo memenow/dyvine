@@ -386,6 +386,54 @@ async def test_poll_job_maps_likes_counters() -> None:
         await client.poll_job(http, client.DyvineClient(settings), job)
     assert job.status == "running"
     assert job.progress == pytest.approx(0.5)
+
+
+async def test_poll_job_likes_null_progress() -> None:
+    """``progress: null`` (contract-legal) normalises to 0, not TypeError."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "running",
+                "message": "working",
+                "progress": None,
+                "total_items": 4,
+                "completed_items": 2,
+                "error": None,
+            },
+        )
+
+    settings = _settings(include_likes=True)
+    job = client.DownloadJob(user_id="u1", operation_id="op-1", status="submitted")
+    async with httpx.AsyncClient(transport=_transport(_handler)) as http:
+        await client.poll_job(http, client.DyvineClient(settings), job)
+    assert job.status == "running"
+    assert job.progress == 0.0
+
+
+async def test_poll_job_likes_non_numeric_progress() -> None:
+    """A garbage ``progress`` value degrades to 0 instead of crashing."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "running",
+                "message": "working",
+                "progress": "halfway",
+                "total_items": 4,
+                "completed_items": 2,
+                "error": None,
+            },
+        )
+
+    settings = _settings(include_likes=True)
+    job = client.DownloadJob(user_id="u1", operation_id="op-1", status="submitted")
+    async with httpx.AsyncClient(transport=_transport(_handler)) as http:
+        await client.poll_job(http, client.DyvineClient(settings), job)
+    assert job.status == "running"
+    assert job.progress == 0.0
     assert (job.total_downloaded, job.total_posts) == (2, 4)
     assert job.completed_at is None
 

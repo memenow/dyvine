@@ -159,7 +159,13 @@ async def poll_job(
         # generic OperationResponse (total_items / completed_items,
         # progress in 0-100, no per-post failed count). Map those onto
         # the job's bulk-style counters so progress is not stuck at 0/0.
-        job.progress = data.get("progress", 0.0) / 100
+        # ``progress`` is Optional in OperationResponse (and NULL in the
+        # DB before the first write), so normalise missing, null, and
+        # non-numeric values instead of dividing blindly.
+        raw_progress = data.get("progress") or 0.0
+        job.progress = (
+            (raw_progress / 100) if isinstance(raw_progress, (int, float)) else 0.0
+        )
         job.total_posts = data.get("total_items", 0) or 0
         job.total_downloaded = data.get("completed_items", 0) or 0
         job.failed_count = 0

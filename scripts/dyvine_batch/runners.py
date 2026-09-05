@@ -81,12 +81,23 @@ async def run_concurrent(
         while pending and poll_round < settings.max_poll_rounds:
             poll_round += 1
             await asyncio.sleep(settings.poll_interval)
+            targets = list(pending.values())
             results = await asyncio.gather(
-                *(poll_job(http, client, job) for job in pending.values())
+                *(poll_job(http, client, job) for job in targets),
+                return_exceptions=True,
             )
             still_pending: dict[str, DownloadJob] = {}
-            for job in results:
+            for job, result in zip(targets, results, strict=True):
                 assert job.operation_id is not None
+                if isinstance(result, BaseException):
+                    if isinstance(result, (asyncio.CancelledError, KeyboardInterrupt)):
+                        raise result
+                    # poll_job guards its own IO, so anything surfacing
+                    # here is a bug: fail just this job, never the run.
+                    job.status = "failed"
+                    job.message = f"轮询异常: {result!r}"
+                    print(f"  [FAILED] 用户 {job.user_id} {job.message}")
+                    continue
                 if job.status in TERMINAL_STATUSES:
                     duration = ""
                     if job.completed_at and job.submitted_at:
@@ -161,7 +172,7 @@ async def run_serial(
             except Exception as exc:
                 print(f"  异常: {exc}")
                 jobs.append(
-                    DownloadJob(user_id=user_id, status="error", message=str(exc))
+                    DownloadJob(user_id=user_id, status="failed", message=str(exc))
                 )
 
     print(f"\n{'=' * 50}")

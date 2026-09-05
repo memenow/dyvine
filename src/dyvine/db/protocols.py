@@ -109,6 +109,33 @@ class WatchRepository(Protocol):
         """
         ...
 
+    async def create_subscription_capped(
+        self,
+        *,
+        user_id: str,
+        live_poll_seconds: int,
+        post_poll_seconds: int,
+        enabled: bool = True,
+        checkpoint: dict[str, Any] | None = None,
+        subscription_id: str | None = None,
+        max_subscriptions: int,
+    ) -> WatchSubscriptionRecord:
+        """Create a subscription, enforcing the cap atomically.
+
+        The cap check and the insert are one atomic unit: concurrent
+        creators on other replicas or processes cannot both slip under
+        a stale count the way a separate ``count_subscriptions`` check
+        allows. Backends without cross-process locking (the in-memory
+        fake) implement the same check-then-insert ordering, which is
+        exact wherever only one process writes.
+
+        Raises:
+            RateLimitError: If the table already holds
+                ``max_subscriptions`` rows.
+            WatchDuplicateError: If ``user_id`` already has one.
+        """
+        ...
+
     async def get_subscription(self, subscription_id: str) -> WatchSubscriptionRecord:
         """Fetch by ID or raise ``WatchSubscriptionNotFoundError``."""
         ...

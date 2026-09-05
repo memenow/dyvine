@@ -16,6 +16,7 @@ from typing import Any
 
 from dyvine.core.exceptions import (
     OperationNotFoundError,
+    RateLimitError,
     ServiceError,
     WatchDuplicateError,
     WatchSubscriptionNotFoundError,
@@ -304,6 +305,39 @@ class FakeWatchRepository:
         self._rows[record.subscription_id] = record
         self._by_user[user_id] = record.subscription_id
         return record
+
+    async def create_subscription_capped(
+        self,
+        *,
+        user_id: str,
+        live_poll_seconds: int,
+        post_poll_seconds: int,
+        enabled: bool = True,
+        checkpoint: dict[str, Any] | None = None,
+        subscription_id: str | None = None,
+        max_subscriptions: int,
+    ) -> WatchSubscriptionRecord:
+        """Check-then-insert; exact wherever one process writes.
+
+        The in-memory fake has no cross-process lock to take, so this
+        mirrors the ordering (cap first, then duplicate) without the
+        advisory lock the Postgres backend uses.
+        """
+        if len(self._rows) >= max_subscriptions:
+            raise RateLimitError(
+                "Watch subscription limit reached "
+                f"({max_subscriptions}); "
+                "delete a subscription first",
+                details={"max_subscriptions": max_subscriptions},
+            )
+        return await self.create_subscription(
+            user_id=user_id,
+            live_poll_seconds=live_poll_seconds,
+            post_poll_seconds=post_poll_seconds,
+            enabled=enabled,
+            checkpoint=checkpoint,
+            subscription_id=subscription_id,
+        )
 
     async def get_subscription(self, subscription_id: str) -> WatchSubscriptionRecord:
         """Fetch by ID or raise ``WatchSubscriptionNotFoundError``."""

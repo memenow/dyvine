@@ -44,7 +44,6 @@ from typing import Any
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
     LivestreamError,
-    RateLimitError,
     ServiceError,
     UserNotFoundError,
     WatchDuplicateError,
@@ -195,24 +194,24 @@ class WatchService:
                 self._start_loop(existing)
                 return existing, False
 
-            count = await self.watch_store.count_subscriptions()
-            if count >= watch_cfg.max_subscriptions:
-                raise RateLimitError(
-                    "Watch subscription limit reached "
-                    f"({watch_cfg.max_subscriptions}); delete a subscription first"
-                )
-
             checkpoint: dict[str, Any] = {
                 "newest_aweme_id": baseline[0] if baseline else None,
                 "recent_aweme_ids": baseline,
                 "first_run_complete": not backfill,
             }
             try:
-                record = await self.watch_store.create_subscription(
+                # Capped insert: the cap check and the row insert are one
+                # atomic unit inside the repository (advisory-locked on
+                # Postgres), so concurrent creators on other replicas
+                # cannot both slip under a stale count. A separate
+                # ``count_subscriptions`` check here would reintroduce
+                # exactly that race.
+                record = await self.watch_store.create_subscription_capped(
                     user_id=user_id,
                     live_poll_seconds=live,
                     post_poll_seconds=post,
                     checkpoint=checkpoint,
+                    max_subscriptions=watch_cfg.max_subscriptions,
                 )
             except WatchDuplicateError:
                 # Cross-process race: a sibling replica won the

@@ -96,22 +96,22 @@ class TokenBucketLimiter:
         When idle eviction alone cannot get back under the cap (a
         rotating-key flood keeps every bucket fresh), the stalest
         buckets are dropped regardless of idle age so memory stays
-        bounded; that only resets an attacker's burst allowance.
+        bounded; that only resets an attacker's burst allowance. Both
+        rules apply in a single pass so the admit path never pays two
+        full scans per request under exactly the flood the cap defends
+        against.
         """
         horizon = now - _BUCKET_IDLE_EVICT_SECONDS
-        stale = [
-            key
+        fresh = [
+            (bucket.last_refill_monotonic, key)
             for key, bucket in self._buckets.items()
-            if bucket.last_refill_monotonic < horizon
+            if bucket.last_refill_monotonic >= horizon
         ]
-        for key in stale:
-            del self._buckets[key]
-        while len(self._buckets) > _MAX_TRACKED_KEYS:
-            oldest = min(
-                self._buckets,
-                key=lambda key: self._buckets[key].last_refill_monotonic,
-            )
-            del self._buckets[oldest]
+        fresh.sort(reverse=True)  # newest first
+        keep = {key for _, key in fresh[:_MAX_TRACKED_KEYS]}
+        self._buckets = {
+            key: bucket for key, bucket in self._buckets.items() if key in keep
+        }
 
     def allow(self, key: str, *, now: float | None = None) -> float:
         """Consume one token for ``key``; return seconds to wait.

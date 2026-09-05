@@ -126,7 +126,8 @@ jobs:
     - name: Render production overlay
       # Placeholders (INGRESS_HOST, DB_CIDR) render as literal strings;
       # this gate catches YAML errors and drifting JSON6902 paths, not
-      # placeholder values (the deploy workflows substitute those).
+      # placeholder values (a manual rollout substitutes those via the
+      # sed pipeline documented in the overlay's kustomization.yaml).
       # ``kubectl`` ships on the runner image; no extra setup needed.
       run: kubectl kustomize k8s/overlays/production > /dev/null
 
