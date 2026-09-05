@@ -47,6 +47,17 @@ Populate at least:
 API_DEBUG=false
 SECURITY_API_KEY=<48+ bytes of entropy>
 DOUYIN_COOKIE=<browser session cookie>
+DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine
+```
+
+Start a local Postgres and apply the schema (operation and watch state
+live in Postgres, versioned by Alembic):
+
+```bash
+docker run -d --name dyvine-pg \
+  -e POSTGRES_USER=dyvine -e POSTGRES_PASSWORD=dyvine \
+  -e POSTGRES_DB=dyvine -p 5432:5432 postgres:16
+uv run alembic upgrade head
 ```
 
 Run the API locally:
@@ -70,11 +81,13 @@ Configuration is environment-driven through `dyvine.core.settings`:
 
 | Prefix | Purpose |
 | --- | --- |
-| `API_` | Server bind settings, CORS, API prefix, operation DB path |
+| `API_` | Server bind, CORS, prefix, rate limiting, multi-replica flags |
 | `SECURITY_` | Secret key, API key, and router auth gate |
+| `DATABASE_` | Postgres URL, pool sizing, operation retention |
 | `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode |
 | `DOUYIN_WATCH_` | Watch Mode polling cadences, subscription cap, dedupe window, backfill flag |
 | `R2_` | Cloudflare R2 account, key, bucket, and endpoint |
+| (none) | `WATCH_ENABLED`: run watch loops in this process (see below) |
 
 `API_DEBUG=false` rejects placeholder production secrets. R2 is optional: by
 default `/readyz` reports `not_ready` until every R2 field and `DOUYIN_COOKIE`
@@ -85,6 +98,20 @@ reports it as `disabled`. When R2 is left unconfigured the service retains
 downloads implicitly rather than discarding them. `/readyz` also verifies that
 the retained workspace can be created and written. `/health` remains
 informational and returns `200 OK` even when dependencies are missing.
+
+Rate limiting is enforced per replica by a token bucket keyed on
+`X-API-Key` (else client IP): `API_RATE_LIMIT_PER_SECOND` sustained,
+`API_RATE_LIMIT_BURST` burst. Over-limit callers get the standard 429
+envelope with `Retry-After`; probes, `/metrics`, `/health`, and `/`
+are exempt.
+
+Watch scheduling splits across replicas with `WATCH_ENABLED`: API
+replicas set it to `false` (subscription CRUD keeps working against
+shared Postgres, no loops run locally) while exactly one watcher
+replica runs the loops and adopts new rows through a periodic
+reconcile pass. Crashed loops restart under exponential backoff and
+park after 5 consecutive crashes until the subscription is deleted
+and recreated.
 
 ## Common Commands
 
@@ -165,6 +192,35 @@ flags: `--include-likes` (download liked posts too),
 `--max-concurrent`, `--poll-interval`, `--timeout`. Exit code is `0`
 unless configuration, input, or the run itself fails.
 
+## Deployment
+
+Docker:
+
+```bash
+docker build -t dyvine:latest .
+docker run -d --name dyvine -p 8000:8000 \
+  -v "$(pwd)/data:/app/data" -v "$(pwd)/logs:/app/logs" \
+  --env-file .env --restart unless-stopped dyvine:latest
+```
+
+`DATABASE_URL` in `.env` must point at a reachable Postgres; the SQLite
+and watch-flat-file era is over — migrate first with
+`uv run python -m scripts.migrate_watch_to_pg`.
+
+Kubernetes (Kustomize; see `k8s/`):
+
+```bash
+kubectl apply -k k8s/overlays/production
+```
+
+The deploy workflows run the schema migration as a Job first, wait for
+`condition=complete`, then apply the overlay: 3 API replicas
+(`WATCH_ENABLED=false`) plus 1 watcher replica (`WATCH_ENABLED=true`).
+Production finishes with a smoke test that curls `/readyz` through the
+service endpoint. Secrets come from `DEV_DATABASE_URL` /
+`PROD_DATABASE_URL` plus the app secret keys; domains follow the
+storage matrix in `.env.example`.
+
 ## Project Structure
 
 | Path | Purpose |
@@ -188,13 +244,14 @@ unless configuration, input, or the run itself fails.
 
 - Keep public documentation in static HTML under `docs/` and use
   `docs/index.html` as the entry point.
-- Keep `README.md`, `AGENTS.md`, `CLAUDE.md`, `.env.example`, and
-  `docs/index.html` synchronized when configuration, commands, probes, or
-  deployment behavior changes.
+- Keep `README.md`, `.env.example`, and `docs/index.html` synchronized
+  when configuration, commands, probes, or deployment behavior changes.
 - Runtime downloads, logs, and local credentials are intentionally ignored.
-- Operation/watch state is multi-replica safe in Postgres, but per-task
-  download workspaces live on a ReadWriteOnce volume. Do not scale beyond
-  one replica until the workspaces move to shared storage.
+- The API scales horizontally when R2 archival is configured
+  (`API_MULTI_REPLICA=true`, enforced at boot) or download workspaces sit
+  on shared storage; without either, stay on one replica. Watch loops run
+  on exactly one watcher replica — see `k8s/overlays/production/` and the
+  storage matrix in `.env.example`.
 
 ## Contributing
 
