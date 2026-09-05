@@ -230,15 +230,18 @@ def test_decode_page_token_round_trips() -> None:
     assert _decode_page_token(token) == 987
 
 
-def test_decode_page_token_falls_back_to_zero_for_invalid_input() -> None:
-    """Garbage tokens must not surface as a 5xx; the cursor restarts."""
+def test_decode_page_token_rejects_corrupt_input() -> None:
+    """Omitted tokens start at 0; corrupt server-issued tokens raise."""
+    from dyvine.core.exceptions import ValidationError
     from dyvine.routers.posts import _decode_page_token
 
     assert _decode_page_token(None) == 0
     assert _decode_page_token("") == 0
-    assert _decode_page_token("!!!not-base64!!!") == 0
-    # Valid base64 that decodes to non-numeric ASCII also resets.
-    assert _decode_page_token("YWJj") == 0  # base64 for "abc"
+    with pytest.raises(ValidationError):
+        _decode_page_token("!!!not-base64!!!")
+    # Valid base64 that decodes to non-numeric ASCII also raises.
+    with pytest.raises(ValidationError):
+        _decode_page_token("YWJj")  # base64 for "abc"
 
 
 def test_router_registers_operation_route_before_post_id() -> None:
@@ -367,3 +370,20 @@ async def test_get_bulk_download_operation_unexpected_error(
             service=mock_post_service, operation_id="op-12345"
         )
     assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_list_user_posts_rejects_corrupt_page_token(
+    mock_post_service: MagicMock,
+) -> None:
+    """A corrupt server-issued page token must fail fast with 422."""
+    from dyvine.routers.posts import list_user_posts
+
+    with pytest.raises(HTTPException) as exc_info:
+        await list_user_posts(
+            service=mock_post_service,
+            user_id="user01",
+            page_token="!!!not-base64!!!",
+            count=20,
+        )
+    assert exc_info.value.status_code == 422

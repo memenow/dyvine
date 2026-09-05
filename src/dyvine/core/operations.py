@@ -550,7 +550,7 @@ class OperationStore:
         return operation
 
     async def get_operation(self, operation_id: str) -> OperationRecord:
-        """Fetch a single operation or raise ``DownloadError``."""
+        """Fetch a single operation or raise ``OperationNotFoundError``."""
         return await self._run(self._get_operation_sync, operation_id)
 
     def _get_operation_sync(self, operation_id: str) -> OperationRecord:
@@ -582,7 +582,7 @@ class OperationStore:
             The latest matching operation.
 
         Raises:
-            DownloadError: If no operation matches the subject identifier.
+            OperationNotFoundError: If no operation matches the subject identifier.
         """
         return await self._run(
             self._get_latest_operation_for_subject_sync,

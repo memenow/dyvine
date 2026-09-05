@@ -36,8 +36,8 @@ if str(SRC_DIR) not in sys.path:
 def reset_singletons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Reset cached state and isolate operation storage between tests.
 
-    The autouse fixture also strips ``SECURITY_SECRET_KEY`` and
-    ``SECURITY_API_KEY`` from the process environment before each test runs.
+    The autouse fixture also strips ``SECURITY_API_KEY`` from the
+    process environment before each test runs.
     ``get_settings`` calls ``load_dotenv`` on import, which leaks any real
     credentials from the developer's ``.env`` into ``os.environ`` and would
     otherwise make ``SecuritySettings`` tests assert against a live secret
@@ -46,7 +46,6 @@ def reset_singletons(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from dyvine.core.dependencies import get_service_container
     from dyvine.core.settings import get_settings, settings
 
-    monkeypatch.delenv("SECURITY_SECRET_KEY", raising=False)
     monkeypatch.delenv("SECURITY_API_KEY", raising=False)
     monkeypatch.setattr(
         settings.api,

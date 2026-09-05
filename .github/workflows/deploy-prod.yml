@@ -107,7 +107,6 @@ jobs:
         # a future ``kubectl apply --prune -l app.kubernetes.io/managed-by=kustomize``
         # sweep does not treat this Secret as stray and delete it.
         kubectl create secret generic dyvine-secrets \
-          --from-literal=SECURITY_SECRET_KEY="${{ secrets.PROD_SECURITY_SECRET_KEY }}" \
           --from-literal=SECURITY_API_KEY="${{ secrets.PROD_SECURITY_API_KEY }}" \
           --from-literal=R2_ACCOUNT_ID="${{ secrets.R2_ACCOUNT_ID }}" \
           --from-literal=R2_ACCESS_KEY_ID="${{ secrets.R2_ACCESS_KEY_ID }}" \

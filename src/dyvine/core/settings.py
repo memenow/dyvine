@@ -4,16 +4,16 @@ The composite `Settings` aggregates four `BaseSettings` subclasses,
 each scoped by a distinct environment-variable prefix:
 
 - `APISettings` (`API_`) — server, CORS, operation DB path.
-- `SecuritySettings` (`SECURITY_`) — secret + API keys, gating flag.
+- `SecuritySettings` (`SECURITY_`) — API key and gating flag.
 - `R2Settings` (`R2_`) — Cloudflare R2 credentials and endpoint.
 - `DouyinSettings` (`DOUYIN_`) — session cookie, headers, proxy,
   download root, and livestream-specific HTTP headers.
 
 A model-level validator (`_validate_security_in_production`) refuses
-to instantiate the container when `api.debug` is `false` and either
-`security.secret_key` or `security.api_key` (when `require_api_key`
-is on) still match the placeholder `change-me-in-production`
-sentinel. The cross-field check lives on the composite class so the
+to instantiate the container when `api.debug` is `false` and
+`security.api_key` (when `require_api_key` is on) still matches the
+placeholder `change-me-in-production` sentinel. The cross-field check
+lives on the composite class so the
 validator sees the parsed payload rather than reading `os.environ`
 directly, which used to silently disagree with `.env`-supplied
 values.
@@ -94,34 +94,24 @@ class SecuritySettings(BaseSettings):
     """Security and authentication configuration settings.
 
     Attributes:
-        secret_key: Secret key for cryptographic operations.
         api_key: API authentication key. Required in production unless
             ``require_api_key`` is explicitly set to ``False``.
-        access_token_expire_minutes: JWT token expiration time in minutes.
         require_api_key: When ``True`` (the default), every router request
             must carry the ``X-API-Key`` header set to ``api_key``.
 
     Environment Variables:
-        SECURITY_SECRET_KEY, SECURITY_API_KEY,
-        SECURITY_ACCESS_TOKEN_EXPIRE_MINUTES, SECURITY_REQUIRE_API_KEY.
+        SECURITY_API_KEY, SECURITY_REQUIRE_API_KEY.
 
     Note:
         Default values must be replaced before any production deployment.
         The composite :class:`Settings` validator below cross-checks the
-        secret values against ``API_DEBUG`` so a non-debug build that ships
-        with the placeholder secrets fails to boot.
+        secret value against ``API_DEBUG`` so a non-debug build that ships
+        with the placeholder secret fails to boot.
     """
 
-    secret_key: str = Field(
-        default=_DEFAULT_SECRET_SENTINEL,
-        description="Secret key for cryptographic operations",
-    )
     api_key: str = Field(
         default=_DEFAULT_SECRET_SENTINEL,
         description="API authentication key matched against ``X-API-Key``",
-    )
-    access_token_expire_minutes: int = Field(
-        default=60, ge=1, description="JWT token expiration time in minutes"
     )
     require_api_key: bool = Field(
         default=True,
@@ -435,30 +425,21 @@ class Settings(BaseSettings):
         deployments that delegate authentication to mTLS or a service
         mesh (and therefore set ``SECURITY_REQUIRE_API_KEY=false``) do
         not need to mint a never-used key just to satisfy a startup
-        check. ``secret_key`` is always validated because it backs
-        cryptographic operations that are not gated by the API-key
-        dependency.
+        check.
 
         """
         if self.api.debug:
             return self
 
-        sentinel = _DEFAULT_SECRET_SENTINEL
-        candidates: list[tuple[str, str]] = [
-            ("secret_key", self.security.secret_key),
-        ]
-        if self.security.require_api_key:
-            candidates.append(("api_key", self.security.api_key))
-
-        offenders = [name for name, value in candidates if value in {"", sentinel}]
-        if not offenders:
+        if not self.security.require_api_key:
             return self
 
-        joined = ", ".join(f"security.{name}" for name in offenders)
-        raise ValueError(
-            f"{joined} must be set to a non-default value when API_DEBUG is "
-            "false; rotate the placeholder before deploying."
-        )
+        if self.security.api_key in {"", _DEFAULT_SECRET_SENTINEL}:
+            raise ValueError(
+                "security.api_key must be set to a non-default value when "
+                "API_DEBUG is false; rotate the placeholder before deploying."
+            )
+        return self
 
     # Convenience properties for frequently accessed settings
     @property
@@ -501,11 +482,6 @@ class Settings(BaseSettings):
     def port(self) -> int:
         """Get server port from API settings."""
         return self.api.port
-
-    @property
-    def secret_key(self) -> str:
-        """Get secret key from security settings."""
-        return self.security.secret_key
 
     @property
     def api_key(self) -> str:

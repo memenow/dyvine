@@ -73,7 +73,10 @@ filterwarnings = [
     # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
     # cleanup) to a warning. Older test environments did not surface
     # these; the underlying socket is closed by the OS regardless.
+    # CPython phrases the notice two ways depending on where finalization
+    # runs ("in ..." vs "while finalizing ..."); ignore both spellings.
     "ignore:Exception ignored in.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored while finalizing.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
 ]
 markers = [
     "asyncio: mark test as async/await test"

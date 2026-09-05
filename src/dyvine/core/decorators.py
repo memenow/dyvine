@@ -93,7 +93,11 @@ def handle_errors(
                 ),
                 400,
             )
-            log.error(
+            # Client errors (4xx) are routine rejections, not service
+            # faults: log them at warning level like the global
+            # ``dyvine_error_handler`` does so error logs stay actionable.
+            log_method = log.error if status_code >= 500 else log.warning
+            log_method(
                 "%s: %s",
                 type(exc).__name__,
                 exc,

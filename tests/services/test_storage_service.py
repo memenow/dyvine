@@ -7,7 +7,8 @@ import re
 
 import pytest
 
-from dyvine.services.storage import ContentType, R2StorageService, StorageError
+from dyvine.core.exceptions import StorageError
+from dyvine.services.storage import ContentType, R2StorageService
 
 
 def build_service_without_init() -> R2StorageService:

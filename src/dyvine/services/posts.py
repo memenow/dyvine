@@ -28,15 +28,14 @@ when downloads already succeeded) rather than silently passing as
 ``completed``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
-
-from f2.apps.douyin.db import AsyncUserDB  # type: ignore
-from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+from typing import TYPE_CHECKING, Any
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
 from ..core.exceptions import (
@@ -57,6 +56,17 @@ from ..schemas.posts import (
     PostType,
     VideoInfo,
 )
+
+if TYPE_CHECKING:
+    from f2.apps.douyin.db import AsyncUserDB  # type: ignore
+    from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+else:
+    # Deferred: importing f2 performs real HTTPS requests (see
+    # ``core._lazy_f2``), so the SDK loads on first real use only.
+    from ..core._lazy_f2 import LazyF2Symbol
+
+    AsyncUserDB = LazyF2Symbol("f2.apps.douyin.db", "AsyncUserDB")
+    DouyinHandler = LazyF2Symbol("f2.apps.douyin.handler", "DouyinHandler")
 
 logger = ContextLogger(__name__)
 
@@ -183,14 +193,16 @@ class PostService:
 
             post_data = post._to_dict()
 
-            # Parse create_time string into a Unix timestamp (integer)
+            # Parse create_time string into a Unix timestamp (integer).
+            # The upstream format carries no zone; interpret it as UTC so
+            # the result does not depend on the server's local timezone.
             create_time_str = post_data.get("create_time")
             create_time = 0
             if create_time_str:
                 try:
                     create_time_dt = datetime.strptime(
                         create_time_str, "%Y-%m-%d %H-%M-%S"
-                    )
+                    ).replace(tzinfo=UTC)
                     create_time = int(create_time_dt.timestamp())
                 except (ValueError, TypeError):
                     create_time = 0

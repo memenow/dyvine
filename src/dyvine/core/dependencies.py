@@ -35,12 +35,13 @@ Example:
             return await service.get_user_info(user_id)
 """
 
+from __future__ import annotations
+
 import hmac
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from f2.apps.douyin.handler import DouyinHandler  # type: ignore
 from fastapi import Header, HTTPException, status
 
 from ..services.livestreams import LivestreamService
@@ -52,6 +53,15 @@ from .logging import ContextLogger
 from .operations import OperationStore
 from .settings import settings
 from .watch_store import WatchSubscriptionStore
+
+if TYPE_CHECKING:
+    from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+else:
+    # Deferred: importing f2 performs real HTTPS requests (see
+    # ``core._lazy_f2``), so the SDK loads on first handler use only.
+    from ._lazy_f2 import LazyF2Symbol
+
+    DouyinHandler = LazyF2Symbol("f2.apps.douyin.handler", "DouyinHandler")
 
 logger = ContextLogger(__name__)
 

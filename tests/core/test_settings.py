@@ -62,10 +62,9 @@ def test_security_settings_defaults_pass_in_debug(
 
     """
     monkeypatch.setenv("API_DEBUG", "true")
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     s = Settings()
-    assert s.security.secret_key == "change-me-in-production"
+    assert s.security.api_key == "change-me-in-production"
 
 
 def test_security_settings_rejects_defaults_in_production(
@@ -73,7 +72,9 @@ def test_security_settings_rejects_defaults_in_production(
 ) -> None:
     """Verify security settings rejects defaults in production."""
     monkeypatch.setenv("API_DEBUG", "false")
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    # The shared conftest defaults REQUIRE to false (router-test
+    # convenience); the gate under test only fires when auth is on.
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     with pytest.raises(ValidationError):
         Settings()
@@ -93,7 +94,9 @@ def test_security_settings_rejects_defaults_when_api_debug_unset(
 
     """
     monkeypatch.delenv("API_DEBUG", raising=False)
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
+    # The shared conftest defaults REQUIRE to false (router-test
+    # convenience); the gate under test only fires when auth is on.
+    monkeypatch.setenv("SECURITY_REQUIRE_API_KEY", "true")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     with pytest.raises(ValidationError):
         Settings()
@@ -110,10 +113,9 @@ def test_security_settings_isolated_construct_is_permissive(
     inner model would lose all flexibility.
     """
     monkeypatch.setenv("API_DEBUG", "false")
-    monkeypatch.setenv("SECURITY_SECRET_KEY", "change-me-in-production")
     monkeypatch.setenv("SECURITY_API_KEY", "change-me-in-production")
     s = SecuritySettings()
-    assert s.secret_key == "change-me-in-production"
+    assert s.api_key == "change-me-in-production"
 
 
 # ── R2Settings ───────────────────────────────────────────────────────────

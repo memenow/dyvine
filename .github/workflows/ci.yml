@@ -14,7 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        # ``requires-python`` allows 3.14, so the matrix covers it instead of
+        # leaving the newest supported interpreter untested.
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
     - uses: actions/checkout@v4
@@ -70,7 +72,7 @@ jobs:
       run: uv run ruff check .
 
     - name: Type check with MyPy
-      run: uv run mypy src/
+      run: uv run mypy src/dyvine
 
   container-scan:
     name: Container Vulnerability Scan

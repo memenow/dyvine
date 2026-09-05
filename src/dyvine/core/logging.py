@@ -64,6 +64,38 @@ def clear_logging_context() -> None:
     _context_var.set({})
 
 
+# Attribute names owned by ``logging.LogRecord`` itself. Anything else found
+# on a record arrived through an ``extra=`` mapping and is forwarded into
+# the JSON payload as structured context.
+_RESERVED_RECORD_ATTRS = frozenset(
+    {
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "message",
+        "module",
+        "msecs",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "taskName",
+        "thread",
+        "threadName",
+    }
+)
+
+
 class JSONFormatter(logging.Formatter):
     """JSON formatter for structured logging."""
 
@@ -93,11 +125,18 @@ class JSONFormatter(logging.Formatter):
                 "traceback": self.formatException(record.exc_info),
             }
 
-        for attr in ["correlation_id", "extra"]:
-            if hasattr(record, attr):
-                log_data[attr] = getattr(record, attr)
+        # ``ContextLogger`` flattens request context (correlation_id,
+        # user_id, operation_id, ...) into per-record attributes via
+        # ``extra=``. Re-emit every attribute that is neither stdlib-owned
+        # nor already normalized above; normalized keys always win on
+        # collision. ``default=str`` keeps one exotic context value from
+        # breaking log serialization.
+        for key, value in vars(record).items():
+            if key in _RESERVED_RECORD_ATTRS or key in log_data:
+                continue
+            log_data[key] = value
 
-        return json.dumps(log_data)
+        return json.dumps(log_data, default=str)
 
 
 def setup_logging() -> None:

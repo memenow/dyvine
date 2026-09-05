@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, Path, Query, status
 
 from ..core.decorators import handle_errors
 from ..core.dependencies import get_post_service, require_api_key
+from ..core.exceptions import ValidationError
 from ..core.logging import ContextLogger
 from ..schemas.posts import BulkDownloadResponse, ListPostsResponse, PostDetail
 from ..services.posts import PostService
@@ -209,11 +210,11 @@ def _encode_page_token(cursor: int) -> str:
 def _decode_page_token(token: str | None) -> int:
     """Decode an opaque page token back into the numeric upstream cursor.
 
-    Invalid tokens fall back to ``0`` so a client retry with corrupted
-    state still serves the first page rather than failing the whole
-    request. ``ValidationError`` is intentionally not raised because the
-    cursor is opaque to clients and they cannot debug a structured
-    rejection.
+    The token is server-issued, so a value that fails to decode signals
+    corruption (or forgery) rather than a fresh client: fail fast with
+    ``ValidationError`` (mapped to HTTP 422) instead of silently
+    restarting at cursor ``0`` and repeating already-served work. An
+    omitted token still means "first page".
     """
     if not token:
         return 0
@@ -221,5 +222,8 @@ def _decode_page_token(token: str | None) -> int:
         padding = "=" * (-len(token) % 4)
         decoded = base64.urlsafe_b64decode(token + padding).decode("ascii")
         return max(int(decoded), 0)
-    except (ValueError, UnicodeDecodeError):
-        return 0
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValidationError(
+            "Invalid page token; omit it to start at the first page",
+            details={"page_token": token},
+        ) from exc

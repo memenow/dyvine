@@ -11,11 +11,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from dyvine.core.exceptions import StorageError
 from dyvine.services.storage import (
     LIST_OBJECTS_HEAD_MAX_WORKERS,
     ContentType,
     R2StorageService,
-    StorageError,
 )
 
 
@@ -126,6 +126,48 @@ def test_generate_ugc_path_video_standardizes_to_mp4() -> None:
     assert path.startswith("videos/u1/")
 
 
+def test_generate_ugc_path_truncates_pathological_filenames() -> None:
+    """A 5k-char filename must still yield a key within the byte budget."""
+    svc = _build_service()
+    path = svc.generate_ugc_path("u1", "x" * 5000 + ".png", "image/png")
+    assert len(path.encode("utf-8")) <= 900
+    assert path.endswith(".png")
+
+
+def test_generate_ugc_path_bounds_extension_length() -> None:
+    """A pathological suffix alone must not blow the key budget."""
+    svc = _build_service()
+    path = svc.generate_ugc_path("u1", "file." + "a" * 100, "image/png")
+    assert path.endswith("." + "a" * 16)
+
+
+def test_r2_endpoint_supports_template_and_literal_forms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``{account_id}`` templates interpolate; complete URLs pass through."""
+    from unittest.mock import patch
+
+    from dyvine.core.settings import settings
+
+    monkeypatch.setattr(settings.r2, "account_id", "acc123")
+    monkeypatch.setattr(settings.r2, "access_key_id", "key")
+    monkeypatch.setattr(settings.r2, "secret_access_key", "secret")
+    monkeypatch.setattr(settings.r2, "bucket_name", "bucket")
+    monkeypatch.setattr(
+        settings.r2, "endpoint", "https://{account_id}.r2.cloudflarestorage.com"
+    )
+    with patch("dyvine.services.storage.boto3.client") as mock_client:
+        R2StorageService()
+    _, kwargs = mock_client.call_args
+    assert kwargs["endpoint_url"] == "https://acc123.r2.cloudflarestorage.com"
+
+    monkeypatch.setattr(settings.r2, "endpoint", "https://custom.example.com")
+    with patch("dyvine.services.storage.boto3.client") as mock_client:
+        R2StorageService()
+    _, kwargs = mock_client.call_args
+    assert kwargs["endpoint_url"] == "https://custom.example.com"
+
+
 # ── upload_file ──────────────────────────────────────────────────────────
 
 
@@ -163,7 +205,7 @@ async def test_upload_file_success(tmp_path: Path) -> None:
     )
     assert result["storage_path"] == "videos/u/test.mp4"
     assert result["presigned_url"] == "https://signed.url"
-    svc.client.put_object.assert_called_once()  # type: ignore[union-attr]
+    svc.client.upload_file.assert_called_once()  # type: ignore[union-attr]
 
 
 # ── get_object_metadata ─────────────────────────────────────────────────

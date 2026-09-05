@@ -45,7 +45,6 @@ Populate at least:
 
 ```dotenv
 API_DEBUG=false
-SECURITY_SECRET_KEY=<48+ bytes of entropy>
 SECURITY_API_KEY=<48+ bytes of entropy>
 DOUYIN_COOKIE=<browser session cookie>
 ```

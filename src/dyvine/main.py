@@ -30,9 +30,9 @@ Middleware:
 Environment configuration:
     `API_*`, `SECURITY_*`, `DOUYIN_*`, and `R2_*` variables drive
     `core.settings.Settings`. The composite validator refuses to boot
-    when `API_DEBUG=false` and either `SECURITY_SECRET_KEY` or
-    `SECURITY_API_KEY` (when `SECURITY_REQUIRE_API_KEY` is true) still
-    matches the placeholder sentinel.
+    when `API_DEBUG=false` and `SECURITY_API_KEY` (when
+    `SECURITY_REQUIRE_API_KEY` is true) still matches the placeholder
+    sentinel.
 
 Examples:
     Local development::
@@ -81,6 +81,24 @@ http_request_duration_seconds = Histogram(
     ["method", "route", "status_code"],
 )
 logger = ContextLogger(__name__)
+
+_process: psutil.Process | None = None
+
+
+def _get_process() -> psutil.Process:
+    """Return the shared process handle, creating it on first use.
+
+    A freshly constructed ``psutil.Process`` reports ``0.0`` from the
+    first ``cpu_percent()`` call (it only establishes the sampling
+    baseline), so ``/health`` must reuse one handle instead of minting
+    a new object per request. The baseline sample is taken here so the
+    very first scrape already measures a real interval.
+    """
+    global _process
+    if _process is None:
+        _process = psutil.Process()
+        _process.cpu_percent()
+    return _process
 
 
 def _local_retention_workspace_ready() -> bool:
@@ -147,6 +165,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     # === STARTUP PHASE ===
     setup_logging()
+    # Prime the shared psutil handle (see ``_get_process``) so the first
+    # ``/health`` scrape already reports a real CPU interval.
+    _get_process()
     app.state.logger = ContextLogger(__name__)
     # Use a monotonic baseline so uptime measurements stay correct across
     # NTP step adjustments and any wall-clock skew. Wall-clock timestamps
@@ -685,8 +706,10 @@ async def health_check(request: Request) -> JSONResponse:
         ```
 
     """
-    # Get current process information
-    process = psutil.Process()
+    # Get current process information via the shared, primed handle so
+    # ``cpu_percent`` measures a real interval instead of the 0.0 that a
+    # freshly constructed ``psutil.Process`` always reports first.
+    process = _get_process()
     # ``start_monotonic`` is set at the top of the lifespan startup hook,
     # which always runs before any HTTP request. The ``getattr`` fallback
     # protects exotic call paths (e.g. tests instantiating ``app`` without

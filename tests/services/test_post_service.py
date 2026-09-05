@@ -1366,3 +1366,39 @@ async def test_process_posts_batch_dispatches_by_type_and_counts_failures(
     assert download_stats[PostType.VIDEO] == 1
     assert download_stats[PostType.IMAGES] == 1
     assert call_count["n"] == 4
+
+
+@pytest.mark.asyncio
+async def test_get_post_detail_interprets_create_time_as_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream timestamps carry no zone and must parse as UTC, not local time."""
+    import calendar
+    import os
+    import time
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("tzset unavailable on this platform")
+    previous_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        handler = MagicMock()
+        post_mock = MagicMock()
+        post_mock._to_dict.return_value = {
+            "aweme_id": "789",
+            "desc": "tz probe",
+            "create_time": "2024-01-15 10-30-00",
+            "statistics": {},
+        }
+        handler.fetch_one_video = AsyncMock(return_value=post_mock)
+        svc = _build_service(handler)
+        result = await svc.get_post_detail("789")
+    finally:
+        if previous_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_tz
+        time.tzset()
+    expected = calendar.timegm((2024, 1, 15, 10, 30, 0, 0, 0, 0))
+    assert result.create_time == expected

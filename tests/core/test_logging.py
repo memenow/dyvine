@@ -215,3 +215,30 @@ def test_context_logger_shares_correlation_id_across_instances() -> None:
 
     first.add_context(tenant="acme")
     assert second.context["tenant"] == "acme"
+
+
+def test_json_formatter_emits_flattened_context_fields() -> None:
+    """End-to-end: context fields forwarded via extra must reach JSON output."""
+    import io
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JSONFormatter())
+    std_logger = logging.getLogger("test.e2e-context")
+    std_logger.addHandler(handler)
+    std_logger.setLevel(logging.INFO)
+    try:
+        ctx = ContextLogger("test.e2e-context")
+        ctx.set_correlation_id("cid-e2e")
+        ctx.add_context(user_id="user-1", operation_id="op-1")
+        try:
+            ctx.info("hello")
+        finally:
+            ctx.set_correlation_id(None)
+            ctx.clear_context()
+    finally:
+        std_logger.removeHandler(handler)
+    data = json.loads(stream.getvalue().strip())
+    assert data["correlation_id"] == "cid-e2e"
+    assert data["user_id"] == "user-1"
+    assert data["operation_id"] == "op-1"
