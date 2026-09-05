@@ -139,6 +139,28 @@ def test_resolve_settings_root_prefix_normalizes_to_empty(tmp_path: Path) -> Non
     assert "//" not in f"{resolved.api_prefix}/posts/x"
 
 
+async def test_run_serial_submit_crash_records_current_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A submit-time blow-up records the current user, not a stale job."""
+
+    async def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("submit blew up")
+
+    def _factory() -> Any:
+        return httpx.AsyncClient(
+            transport=_transport(lambda request: httpx.Response(202, json={}))
+        )
+
+    monkeypatch.setattr(runners, "submit_download", _boom)
+    jobs = await runners.run_serial(
+        _settings(max_poll_rounds=1), ["u1", "u2"], client_factory=_factory
+    )
+    assert [job.user_id for job in jobs] == ["u1", "u2"]
+    assert [job.status for job in jobs] == ["failed", "failed"]
+    assert all(job.operation_id is None for job in jobs)
+
+
 async def test_run_serial_keeps_operation_id_on_poll_crash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -148,6 +148,7 @@ async def run_serial(
             print(f"\n{'=' * 50}")
             print(f"用户: {user_id}")
             print(f"{'=' * 50}")
+            job: DownloadJob | None = None
             try:
                 job = await submit_download(http, client, user_id)
                 if not job.operation_id:
@@ -173,7 +174,7 @@ async def run_serial(
                 jobs.append(job)
             except Exception as exc:
                 print(f"  异常: {exc}")
-                if job.operation_id:
+                if job is not None and job.operation_id:
                     # Already submitted server-side: keep the ID so the
                     # operation stays trackable, like concurrent mode.
                     job.status = "failed"
