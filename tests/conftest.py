@@ -105,7 +105,21 @@ class _ProbePolicy(_real_policy.__class__):  # type: ignore[misc]
 
 with _warnings.catch_warnings():
     _warnings.simplefilter("ignore", DeprecationWarning)
-    _asyncio.set_event_loop_policy(_ProbePolicy())
+    _probe_policy_instance = _ProbePolicy()
+    _asyncio.set_event_loop_policy(_probe_policy_instance)
+
+_probe_policy_swaps: list[tuple[str, str]] = []
+_orig_set_event_loop_policy = _asyncio.set_event_loop_policy
+
+
+def _spy_set_event_loop_policy(policy) -> None:  # type: ignore[no-untyped-def]
+    if policy is not _probe_policy_instance:
+        _probe_policy_swaps.append((repr(policy), "".join(_traceback.format_stack())))
+    return _orig_set_event_loop_policy(policy)
+
+
+_asyncio.set_event_loop_policy = _spy_set_event_loop_policy  # type: ignore[method-assign]
+_asyncio.events.set_event_loop_policy = _spy_set_event_loop_policy  # type: ignore[attr-defined]
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untyped-def]
@@ -117,6 +131,14 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
         if isinstance(o, _asyncio.AbstractEventLoop) and not o.is_closed()
     ]
     print(f"\nPROBE-UNCLOSED-COUNT={len(live)}")
+    print(f"PROBE-ENTRY-COUNT={len(_probe_loops)}")
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", DeprecationWarning)
+        current = _asyncio.get_event_loop_policy()
+    print(f"PROBE-POLICY-IS-MINE={current is _probe_policy_instance}")
+    print(f"PROBE-SWAP-COUNT={len(_probe_policy_swaps)}")
+    for i, (policy_repr, stack) in enumerate(_probe_policy_swaps[:3]):
+        print(f"PROBE-SWAP-{i}={policy_repr}:" + stack[-2000:])
     for loop in live:
         owners: list[str] = []
         for ref in _gc.get_referrers(loop):
