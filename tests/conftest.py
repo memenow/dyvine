@@ -9,15 +9,11 @@ modules with side effects at import time (e.g. Prometheus metrics in storage.py)
 
 from __future__ import annotations
 
-import asyncio as _asyncio
-import asyncio.selector_events as _selector_events
-import gc as _gc
+import asyncio
 import os
 import sys
-import threading as _threading
-import traceback as _traceback
-import warnings as _warnings
-import weakref as _weakref
+import warnings
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -45,206 +41,6 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# TEMPORARY CI DIAGNOSTIC (revert before merge): identify the event loop
-# that survives the session unclosed (with its self-pipe sockets) and fails
-# CI legs at teardown with PytestUnraisableExceptionWarning after all tests
-# pass. Records per-loop creation/run/ping stacks in memory and prints only
-# loops still alive and unclosed at session finish. Prints nothing locally.
-_probe_loops: list[dict] = []
-_probe_ctors: list[dict] = []
-_orig_selector_init = _selector_events.BaseSelectorEventLoop.__init__
-
-
-def _spy_selector_init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-    _probe_ctors.append(
-        {
-            "ref": _weakref.ref(self),
-            "thread": _threading.current_thread().name,
-            "stack": "".join(_traceback.format_stack()),
-        }
-    )
-    return _orig_selector_init(self, *args, **kwargs)
-
-
-_selector_events.BaseSelectorEventLoop.__init__ = _spy_selector_init  # type: ignore[method-assign]
-
-
-def _probe_record(loop, kind: str) -> None:  # type: ignore[no-untyped-def]
-    thread = _threading.current_thread().name
-    for entry in _probe_loops:
-        if entry["ref"]() is loop:
-            slot = entry[kind]
-            if len(slot) < 2:
-                slot.append((thread, "".join(_traceback.format_stack())))
-            return
-
-
-def _probe_wrap(loop, name: str) -> None:  # type: ignore[no-untyped-def]
-    orig = getattr(loop, name)
-    kind = "runs" if name in ("run_forever", "run_until_complete") else "pings"
-
-    def _wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
-        _probe_record(loop, kind)
-        return orig(*args, **kwargs)
-
-    try:
-        setattr(loop, name, _wrapped)
-    except (AttributeError, TypeError):
-        pass
-
-
-with _warnings.catch_warnings():
-    _warnings.simplefilter("ignore", DeprecationWarning)
-    _real_policy = _asyncio.get_event_loop_policy()
-
-
-class _ProbePolicy(_real_policy.__class__):  # type: ignore[misc]
-    def new_event_loop(self):  # type: ignore[no-untyped-def]
-        loop = super().new_event_loop()
-        _probe_loops.append(
-            {
-                "thread": _threading.current_thread().name,
-                "created": "".join(_traceback.format_stack()),
-                "ref": _weakref.ref(loop),
-                "runs": [],
-                "pings": [],
-            }
-        )
-        for name in (
-            "run_forever",
-            "run_until_complete",
-            "call_soon_threadsafe",
-            "add_signal_handler",
-        ):
-            _probe_wrap(loop, name)
-        return loop
-
-
-with _warnings.catch_warnings():
-    _warnings.simplefilter("ignore", DeprecationWarning)
-    _probe_policy_instance = _ProbePolicy()
-    _asyncio.set_event_loop_policy(_probe_policy_instance)
-
-_probe_policy_swaps: list[tuple[str, str]] = []
-_orig_set_event_loop_policy = _asyncio.set_event_loop_policy
-
-
-def _spy_set_event_loop_policy(policy) -> None:  # type: ignore[no-untyped-def]
-    if policy is not _probe_policy_instance:
-        _probe_policy_swaps.append((repr(policy), "".join(_traceback.format_stack())))
-    return _orig_set_event_loop_policy(policy)
-
-
-_asyncio.set_event_loop_policy = _spy_set_event_loop_policy  # type: ignore[method-assign]
-_asyncio.events.set_event_loop_policy = _spy_set_event_loop_policy  # type: ignore[attr-defined]
-
-
-_probe_log_path = "/tmp/probe_new_loops.log"
-try:
-    open(_probe_log_path, "w", encoding="utf-8").close()
-except OSError:
-    pass
-
-
-def _probe_emit(text: str) -> None:
-    with open(_probe_log_path, "a", encoding="utf-8") as fh:
-        fh.write(text + "\n")
-    print(text)
-
-
-def _probe_report_loop(loop, tag: str) -> None:  # type: ignore[no-untyped-def]
-    """TEMPORARY CI DIAGNOSTIC (revert before merge): describe one loop."""
-    owners: list[str] = []
-    for ref in _gc.get_referrers(loop):
-        if isinstance(ref, dict):
-            keys = [k for k, v in list(ref.items())[:50] if v is loop]
-            owners.append(f"dict{keys}")
-        else:
-            owners.append(type(ref).__name__)
-    ready = [repr(getattr(h, "_callback", None)) for h in list(loop._ready)][:6]
-    _probe_emit(
-        f"\nPROBE-LEAKED-LOOP-{tag} loop={loop!r} "
-        f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
-    )
-    _probe_emit(f"PROBE-READY-{tag}={ready}")
-    matches = [e for e in _probe_loops if e["ref"]() is loop]
-    _probe_emit(f"PROBE-MATCHES-{tag}={len(matches)}")
-    ctor_matches = [e for e in _probe_ctors if e["ref"]() is loop]
-    _probe_emit(f"PROBE-CTOR-MATCHES-{tag}={len(ctor_matches)}")
-    for m, cm in enumerate(ctor_matches):
-        _probe_emit(f"PROBE-CTOR-{tag}-{m}-THREAD={cm['thread']}")
-        _probe_emit(f"PROBE-CTOR-{tag}-{m}:" + cm["stack"][:6500])
-    if not matches:
-        _probe_emit(f"PROBE-ORIGIN-{tag}=unknown (bypassed the event-loop policy?)")
-        return
-    for m, match in enumerate(matches):
-        _probe_emit(f"PROBE-CREATED-{tag}-{m}-THREAD={match['thread']}")
-        _probe_emit(f"PROBE-CREATED-{tag}-{m}:" + match["created"][:6500])
-        for i, (thread, stack) in enumerate(match["runs"]):
-            _probe_emit(f"PROBE-RUN-{tag}-{m}-{i}-THREAD={thread}:" + stack[-2500:])
-        for i, (thread, stack) in enumerate(match["pings"]):
-            _probe_emit(f"PROBE-PING-{tag}-{m}-{i}-THREAD={thread}:" + stack[-2500:])
-
-
-_probe_reported: list = []
-
-
-def _probe_known(loop) -> bool:  # type: ignore[no-untyped-def]
-    return any(ref() is loop for ref in _probe_reported)
-
-
-def _probe_runner_owned(loop) -> bool:  # type: ignore[no-untyped-def]
-    # Runner-owned loops are closed by fixture teardown right after this
-    # hook; only non-Runner-owned survivors are true leaks.
-    return any(type(ref).__name__ == "Runner" for ref in _gc.get_referrers(loop))
-
-
-def pytest_runtest_teardown(item) -> None:  # type: ignore[no-untyped-def]
-    """TEMPORARY CI DIAGNOSTIC (revert before merge): flag loops leaked by this test."""
-    _gc.collect()
-    for o in _gc.get_objects():
-        if (
-            isinstance(o, _asyncio.AbstractEventLoop)
-            and not o.is_closed()
-            and not _probe_known(o)
-            and not _probe_runner_owned(o)
-        ):
-            _probe_reported.append(_weakref.ref(o))
-            _probe_emit(f"\nPROBE-NEW-UNCLOSED-LOOP test={item.nodeid}")
-            _probe_report_loop(o, "NEW")
-
-
-def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untyped-def]
-    """TEMPORARY CI DIAGNOSTIC (revert before merge)."""
-    _gc.collect()
-    live = [
-        o
-        for o in _gc.get_objects()
-        if isinstance(o, _asyncio.AbstractEventLoop) and not o.is_closed()
-    ]
-    _probe_emit(f"\nPROBE-UNCLOSED-COUNT={len(live)}")
-    _probe_emit(f"PROBE-ENTRY-COUNT={len(_probe_loops)}")
-    with _warnings.catch_warnings():
-        _warnings.simplefilter("ignore", DeprecationWarning)
-        current = _asyncio.get_event_loop_policy()
-    _probe_emit(f"PROBE-POLICY-IS-MINE={current is _probe_policy_instance}")
-    _probe_emit(f"PROBE-SWAP-COUNT={len(_probe_policy_swaps)}")
-    for i, (policy_repr, stack) in enumerate(_probe_policy_swaps[:3]):
-        _probe_emit(f"PROBE-SWAP-{i}={policy_repr}:" + stack[-2000:])
-    for loop in live:
-        _probe_report_loop(loop, "FINAL")
-    try:
-        with open(_probe_log_path, encoding="utf-8") as fh:
-            dump = fh.read()
-    except OSError:
-        dump = ""
-    # Per-test hook output is captured by pytest, so replay the whole
-    # probe log here where it is visible in CI logs.
-    print("PROBE-LOG-BEGIN")
-    print(dump[-60000:])
-    print("PROBE-LOG-END")
-
-
 # ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
 # pytest only puts each test file's own directory on ``sys.path``, so
 # without this a test under ``tests/db/`` could not ``import
@@ -252,6 +48,36 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
 TESTS_DIR = Path(__file__).resolve().parent
 if str(TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(TESTS_DIR))
+
+
+@pytest.fixture(autouse=True)
+def preserve_event_loop_affinity() -> Iterator[None]:
+    """Re-anchor the ambient event loop across each test.
+
+    pytest-asyncio lazily side-creates an ambient loop the first time an
+    async fixture needs one (on Python <= 3.13 ``get_event_loop`` still
+    creates instead of raising, and pytest-asyncio suppresses that
+    deprecation internally). The loop is never closed by anyone, which is
+    harmless while the event-loop policy keeps referencing it — but stdlib
+    ``asyncio.run`` (used by the batch CLI entry points under test) resets
+    the policy's current loop to ``None`` on close, orphaning the ambient
+    loop so a later GC fails an unrelated test (or session teardown) with
+    ``unclosed event loop`` unraisables. Restoring whatever was current
+    before the test keeps the orphan referenced and silent. Loops a test
+    abandons itself are unaffected: they are still collected and still
+    fail loudly.
+    """
+    try:
+        before = asyncio.get_running_loop()
+    except RuntimeError:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            try:
+                before = asyncio.get_event_loop()
+            except RuntimeError:  # Python 3.14+: nothing set, nothing to keep
+                before = None
+    yield
+    asyncio.set_event_loop(before)
 
 
 @pytest.fixture(autouse=True)
