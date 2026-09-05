@@ -127,6 +127,10 @@ extend-exclude = '''
 [tool.isort]
 profile = "black"
 line_length = 88
+# The repo-local ./alembic/ migration package shadows the third-party
+# distribution name; without this isort classifies `alembic` imports as
+# first-party and disagrees with ruff's isort rules.
+known_third_party = ["alembic"]
 
 [tool.ruff]
 line-length = 88
@@ -142,6 +146,11 @@ select = [
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
 ]
+
+[tool.ruff.lint.isort]
+# Mirror the [tool.isort] override: ./alembic/ is a repo-local package
+# that shadows the third-party distribution name.
+known-third-party = ["alembic"]
 
 [tool.mypy]
 python_version = "3.12"
