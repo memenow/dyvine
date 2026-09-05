@@ -28,8 +28,8 @@ Middleware:
        the router) enforces a per-replica token bucket keyed on the
        validated `X-API-Key` (else client IP, preferring the rightmost
        `X-Forwarded-For` entry); over-limit callers get the standard
-       429 envelope with `Retry-After`. Probes, `/metrics` (both
-       spellings), and `/` are exempt.
+       429 envelope with `Retry-After`. Probes, `/health`, `/metrics`
+       (both spellings), and `/` are exempt.
     Exception handlers registered through `register_error_handlers`
     translate `DyvineError` subclasses and `HTTPException` into a
     single error envelope; they are not middleware.

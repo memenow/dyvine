@@ -492,7 +492,14 @@ class WatchService:
         existing = self._loops.get(record.subscription_id)
         if existing is not None and not existing.done():
             return
-        if not self._restart_allowed(record.subscription_id, now=time.monotonic()):
+        now = time.monotonic()
+        if existing is not None and existing.done() and not existing.cancelled():
+            # A crash awaiting the next reap is replaced here: count it
+            # first so the supervisor budget does not lose the crash.
+            self._loops.pop(record.subscription_id, None)
+            if self._note_crash(record.subscription_id, existing, now=now):
+                return
+        if not self._restart_allowed(record.subscription_id, now=now):
             return
         task = spawn_or_fallback(
             self._task_registry,

@@ -724,6 +724,33 @@ async def test_delete_subscription_cancels_loop_and_removes_row(
     assert await service.watch_store.get_subscription_by_user("user01") is None
 
 
+async def test_start_loop_counts_pending_crash_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash awaiting reap is counted when an idempotent create replaces it."""
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+    )
+
+    async def _boom() -> None:
+        raise RuntimeError("boom")
+
+    crashed = asyncio.create_task(_boom())
+    await asyncio.sleep(0.02)
+    assert crashed.done()
+    service._loops[record.subscription_id] = crashed
+    monkeypatch.setattr(service, "_restart_allowed", lambda *a, **k: True)
+
+    service._start_loop(record)
+
+    assert service._crash_counts.get(record.subscription_id) == 1
+    assert service._loops[record.subscription_id] is not crashed
+    await service.delete_subscription(record.subscription_id)
+
+
 async def test_delete_unknown_subscription_raises(tmp_path: Path) -> None:
     """Deleting a non-existent subscription raises the typed not-found error."""
     service, _, _ = _make_service(tmp_path)

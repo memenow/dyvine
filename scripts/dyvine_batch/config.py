@@ -112,7 +112,9 @@ def resolve_settings(
         raise SettingsError(f"API prefix must start with '/': {prefix!r}")
     # A trailing slash would double up against endpoint paths
     # (``/api/v1/`` + ``/posts/...``), which the server answers 404.
-    prefix = prefix.rstrip("/") or "/"
+    # A bare ``/`` means "no prefix", not the literal root path, so it
+    # normalizes to ``""`` — otherwise joins would produce ``//posts``.
+    prefix = prefix.rstrip("/")
 
     if max_concurrent < 1:
         raise SettingsError("--max-concurrent must be at least 1")

@@ -91,6 +91,23 @@ def test_resolve_settings_empty_port_falls_back(tmp_path: Path) -> None:
     assert resolved.api_url == "http://example.com:8000"
 
 
+def test_resolve_settings_root_prefix_normalizes_to_empty(tmp_path: Path) -> None:
+    """A bare ``/`` prefix means "no prefix", not a literal root segment."""
+    resolved = config.resolve_settings(
+        api_url="http://example.com:8000",
+        api_key="k",
+        api_prefix="/",
+        include_likes=False,
+        max_concurrent=3,
+        poll_interval=5.0,
+        timeout=30.0,
+        environ={},
+        dotenv_path=tmp_path / "nope.env",
+    )
+    assert resolved.api_prefix == ""
+    assert "//" not in f"{resolved.api_prefix}/posts/x"
+
+
 async def test_run_serial_keeps_operation_id_on_poll_crash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

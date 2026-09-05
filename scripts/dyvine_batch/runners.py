@@ -66,6 +66,8 @@ async def run_concurrent(
         print(f"\n  提交完成: {len(submitted)} 成功, {len(failed)} 失败")
         for job in failed:
             print(f"    - 用户 {job.user_id}: {job.message}")
+            if job.error_details:
+                print(f"      详情: {job.error_details}")
         for job in submitted:
             print(
                 f"  [已提交] 用户 {job.user_id} " f"-> operation_id: {job.operation_id}"
