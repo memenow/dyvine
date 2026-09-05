@@ -85,7 +85,7 @@ graph TD
     Main[main:app] --> Lifespan[main.lifespan]
     Lifespan --> Container[ServiceContainer.initialize]
     Lifespan --> ContainerS[ServiceContainer.shutdown]
-    Container --> Executors[ThreadPoolExecutor x3]
+    Container --> Executors[ThreadPoolExecutor x2]
     Container --> OS[OperationRepository]
     OS --> Pool[(asyncpg pool)]
     OS --> Sweep[sweep_orphans]
@@ -162,7 +162,7 @@ graph TD
     </ul>
 
     <footer>
-      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,lifecycle}.py</code>, <code>db/*.py</code>, <code>core/{background,dependencies,path_safety}.py</code>.
+      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,watch}.py</code>, <code>db/*.py</code>, <code>core/{background,dependencies,path_safety}.py</code>, <code>middleware/rate_limit.py</code>.
     </footer>
   </main>
 

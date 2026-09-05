@@ -128,7 +128,7 @@
         <li>Persistent operation state is stored in a shared Postgres database (schema versioned by Alembic).</li>
         <li>Router endpoints are protected by <code>X-API-Key</code> authentication by default.</li>
         <li>User-supplied output paths are resolved inside <code>DOUYIN_DOWNLOAD_ROOT</code> and rejected when they escape the configured root.</li>
-        <li>Dedicated thread pools isolate R2 calls, R2 metadata fan-out, and audit-log writes; database IO is natively async over asyncpg.</li>
+        <li>Dedicated thread pools isolate R2 calls and R2 metadata fan-out; database IO is natively async over asyncpg.</li>
         <li>Operational endpoints include <code>/livez</code>, <code>/readyz</code>, <code>/startupz</code>, <code>/health</code>, and <code>/metrics</code>.</li>
       </ul>
       <table>
@@ -477,7 +477,6 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
           <tr><td><code>dyvine-r2</code></td><td>16</td><td>R2 PUT, HEAD, DELETE, and list operations.</td></tr>
           <tr><td><code>dyvine-r2-head</code></td><td>16</td><td>Per-key <code>head_object</code> fan-out during listing hydration.</td></tr>
           <tr><td><code>asyncpg pool</code></td><td>5</td><td>Operation/watch reads and writes (<code>DATABASE_POOL_SIZE</code>).</td></tr>
-          <tr><td><code>dyvine-audit</code></td><td>2</td><td>Lifecycle audit-log writes.</td></tr>
         </tbody>
       </table>
     </section>

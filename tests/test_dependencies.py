@@ -294,7 +294,6 @@ async def test_service_container_boot_failure_unwinds(
     assert container._initialized is False
     assert container._r2_executor is None
     assert container._r2_head_executor is None
-    assert container._audit_executor is None
     assert container._db is None
     assert container._janitor_task is None
 

@@ -17,11 +17,9 @@ content into Cloudflare R2. The service:
   (``{images,videos}/{user_id}/...``) and livestream recordings
   (``livestreams/{user_id}/{stream_id}/recording_{ts}.mp4``).
 
-Storage-class transitions and retention rules live in
-``services/lifecycle.py`` (``LifecycleManager``); that helper is
-exercised by tests but is not currently wired into the runtime
-container. The dedicated ``audit_executor`` provisioned by
-``ServiceContainer`` is reserved for it.
+Storage-class transitions and retention rules are not implemented:
+finished files stay in standard storage until an operator archives
+them.
 """
 
 import asyncio

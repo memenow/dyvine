@@ -13,9 +13,7 @@
   separate executors: a 16-worker `r2_executor` for upload / head /
   delete / list operations, and a 16-worker `r2_head_executor` for
   the per-key `head_object` fan-out triggered inside
-  `_list_objects_sync`. A 2-worker `audit_executor` is provisioned
-  for `LifecycleManager` audit writes (the manager itself is not yet
-  wired into the runtime container).
+  `_list_objects_sync`.
 
 `initialize` is awaited from the FastAPI lifespan; `shutdown` drains
 the `BackgroundTaskRegistry`, stops the janitor, disposes the
@@ -76,13 +74,11 @@ else:
 
 logger = ContextLogger(__name__)
 
-# Dedicated thread pool sizes per blocking-IO domain. R2 uploads are the
-# dominant long-running call and audit log writes are rare but must never
-# starve the upload pool. (Database IO is fully async via asyncpg and
-# needs no executor.) Keeping each domain in its own bounded pool
-# prevents a burst in one from exhausting the default asyncio executor
-# (``min(32, cpu+4)``) that every ``asyncio.to_thread`` call would
-# otherwise share.
+# Dedicated thread pool sizes per blocking-IO domain. (Database IO is
+# fully async via asyncpg and needs no executor.) Keeping each domain
+# in its own bounded pool prevents a burst in one from exhausting the
+# default asyncio executor (``min(32, cpu+4)``) that every
+# ``asyncio.to_thread`` call would otherwise share.
 R2_EXECUTOR_MAX_WORKERS = 16
 # ``head_object`` fan-out runs inside ``R2StorageService._list_objects_sync``
 # while the surrounding listing already occupies a worker on
@@ -90,7 +86,6 @@ R2_EXECUTOR_MAX_WORKERS = 16
 # ``head_object`` requests across every in-flight listing instead of letting
 # each listing spawn its own short-lived ``ThreadPoolExecutor``.
 R2_HEAD_EXECUTOR_MAX_WORKERS = 16
-AUDIT_EXECUTOR_MAX_WORKERS = 2
 
 
 class ServiceContainer:
@@ -129,7 +124,6 @@ class ServiceContainer:
         self._initialized = False
         self._r2_executor: ThreadPoolExecutor | None = None
         self._r2_head_executor: ThreadPoolExecutor | None = None
-        self._audit_executor: ThreadPoolExecutor | None = None
         # Shared registry for long-lived background downloads. Services
         # retrieve this via dependency injection and call ``spawn`` instead
         # of bare ``asyncio.create_task`` so the lifespan can drain them
@@ -178,10 +172,6 @@ class ServiceContainer:
             - ``r2_executor`` (16 workers): R2 upload/head/delete/list
             - ``r2_head_executor`` (16 workers): per-key ``head_object``
               fan-out triggered inside ``R2StorageService._list_objects_sync``
-            - ``audit_executor`` (2 workers): reserved for ``LifecycleManager``
-              audit writes; the manager is exercised in tests but not yet
-              wired into the runtime container, so the pool is currently
-              idle in production.
 
         Note:
             This method is awaited by the FastAPI lifespan. Direct access
@@ -222,10 +212,6 @@ class ServiceContainer:
         self._r2_head_executor = ThreadPoolExecutor(
             max_workers=R2_HEAD_EXECUTOR_MAX_WORKERS,
             thread_name_prefix="dyvine-r2-head",
-        )
-        self._audit_executor = ThreadPoolExecutor(
-            max_workers=AUDIT_EXECUTOR_MAX_WORKERS,
-            thread_name_prefix="dyvine-audit",
         )
 
         # Everything below can fail (unreachable database, bad
@@ -404,7 +390,7 @@ class ServiceContainer:
                 logger.exception("startup abort: pool dispose failed")
             finally:
                 self._db = None
-        for attr in ("_r2_head_executor", "_r2_executor", "_audit_executor"):
+        for attr in ("_r2_head_executor", "_r2_executor"):
             executor = getattr(self, attr)
             if executor is not None:
                 try:
@@ -477,9 +463,8 @@ class ServiceContainer:
 
         # Reverse of init order. The R2 head pool is drained first so any
         # ``list_objects`` follow-up still has a working main pool to
-        # report back through; the audit pool drains last so any final
-        # write triggered by an earlier shutdown step still lands.
-        for attr in ("_r2_head_executor", "_r2_executor", "_audit_executor"):
+        # report back through.
+        for attr in ("_r2_head_executor", "_r2_executor"):
             executor = getattr(self, attr)
             if executor is not None:
                 executor.shutdown(wait=True)

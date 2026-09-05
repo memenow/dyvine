@@ -144,18 +144,44 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
   "http://localhost:8000/api/v1/watch/SUBSCRIPTION_ID"
 ```
 
+## Batch Download CLI
+
+`scripts/dyvine_batch/` submits user downloads from a text file (one user
+ID per line) and polls them to a summary report:
+
+```bash
+# Concurrent: submit all users, then poll together (recommended)
+uv run python -m scripts.dyvine_batch concurrent users.txt --api-key KEY
+
+# Serial: one user at a time
+uv run python -m scripts.dyvine_batch serial users.txt --api-key KEY
+```
+
+Configuration precedence per knob is CLI flag, then `DYVINE_*`
+environment (`DYVINE_API_KEY`, `DYVINE_API_URL`, `DYVINE_API_PREFIX`),
+then the repo `.env` file (`SECURITY_API_KEY`, `API_HOST`/`API_PORT`),
+then the default (`http://localhost:8000`, prefix `/api/v1`). Useful
+flags: `--include-likes` (download liked posts too),
+`--max-concurrent`, `--poll-interval`, `--timeout`. Exit code is `0`
+unless configuration, input, or the run itself fails.
+
 ## Project Structure
 
 | Path | Purpose |
 | --- | --- |
 | `src/dyvine/main.py` | FastAPI app, middleware, routers, probes, metrics |
-| `src/dyvine/core/` | Settings, logging, dependency container, operation store, path safety |
+| `src/dyvine/core/` | Settings, logging, dependency container, path safety |
+| `src/dyvine/db/` | Postgres repositories, session factory, janitor (Alembic-versioned) |
+| `src/dyvine/middleware/` | Token-bucket rate limiting |
 | `src/dyvine/routers/` | User, post, livestream, and watch HTTP endpoints |
 | `src/dyvine/services/` | Douyin SDK orchestration, background work, R2 storage, watch scheduling |
 | `src/dyvine/schemas/` | Pydantic request and response models |
+| `scripts/dyvine_batch/` | Batch user-download CLI (`serial` / `concurrent`) |
+| `scripts/migrate_watch_to_pg.py` | One-shot SQLite → Postgres watch migration |
+| `alembic/` | Database migration scripts and environment |
 | `tests/` | Pytest suite mirroring the source tree |
 | `docs/` | Static HTML project documentation and Mermaid architecture diagrams |
-| `k8s/` | Base and production overlay manifests |
+| `k8s/` | Base, production overlay, and migration-Job manifests |
 | `.github/` | CI, image build, deployment, release, and security workflows |
 
 ## Development Notes
