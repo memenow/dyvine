@@ -139,6 +139,81 @@ _asyncio.set_event_loop_policy = _spy_set_event_loop_policy  # type: ignore[meth
 _asyncio.events.set_event_loop_policy = _spy_set_event_loop_policy  # type: ignore[attr-defined]
 
 
+_probe_log_path = "/tmp/probe_new_loops.log"
+try:
+    open(_probe_log_path, "w", encoding="utf-8").close()
+except OSError:
+    pass
+
+
+def _probe_emit(text: str) -> None:
+    with open(_probe_log_path, "a", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+    print(text)
+
+
+def _probe_report_loop(loop, tag: str) -> None:  # type: ignore[no-untyped-def]
+    """TEMPORARY CI DIAGNOSTIC (revert before merge): describe one loop."""
+    owners: list[str] = []
+    for ref in _gc.get_referrers(loop):
+        if isinstance(ref, dict):
+            keys = [k for k, v in list(ref.items())[:50] if v is loop]
+            owners.append(f"dict{keys}")
+        else:
+            owners.append(type(ref).__name__)
+    ready = [repr(getattr(h, "_callback", None)) for h in list(loop._ready)][:6]
+    _probe_emit(
+        f"\nPROBE-LEAKED-LOOP-{tag} loop={loop!r} "
+        f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
+    )
+    _probe_emit(f"PROBE-READY-{tag}={ready}")
+    matches = [e for e in _probe_loops if e["ref"]() is loop]
+    _probe_emit(f"PROBE-MATCHES-{tag}={len(matches)}")
+    ctor_matches = [e for e in _probe_ctors if e["ref"]() is loop]
+    _probe_emit(f"PROBE-CTOR-MATCHES-{tag}={len(ctor_matches)}")
+    for m, cm in enumerate(ctor_matches):
+        _probe_emit(f"PROBE-CTOR-{tag}-{m}-THREAD={cm['thread']}")
+        _probe_emit(f"PROBE-CTOR-{tag}-{m}:" + cm["stack"][:6500])
+    if not matches:
+        _probe_emit(f"PROBE-ORIGIN-{tag}=unknown (bypassed the event-loop policy?)")
+        return
+    for m, match in enumerate(matches):
+        _probe_emit(f"PROBE-CREATED-{tag}-{m}-THREAD={match['thread']}")
+        _probe_emit(f"PROBE-CREATED-{tag}-{m}:" + match["created"][:6500])
+        for i, (thread, stack) in enumerate(match["runs"]):
+            _probe_emit(f"PROBE-RUN-{tag}-{m}-{i}-THREAD={thread}:" + stack[-2500:])
+        for i, (thread, stack) in enumerate(match["pings"]):
+            _probe_emit(f"PROBE-PING-{tag}-{m}-{i}-THREAD={thread}:" + stack[-2500:])
+
+
+_probe_reported: list = []
+
+
+def _probe_known(loop) -> bool:  # type: ignore[no-untyped-def]
+    return any(ref() is loop for ref in _probe_reported)
+
+
+def _probe_runner_owned(loop) -> bool:  # type: ignore[no-untyped-def]
+    # Runner-owned loops are closed by fixture teardown right after this
+    # hook; only non-Runner-owned survivors are true leaks.
+    return any(type(ref).__name__ == "Runner" for ref in _gc.get_referrers(loop))
+
+
+def pytest_runtest_teardown(item) -> None:  # type: ignore[no-untyped-def]
+    """TEMPORARY CI DIAGNOSTIC (revert before merge): flag loops leaked by this test."""
+    _gc.collect()
+    for o in _gc.get_objects():
+        if (
+            isinstance(o, _asyncio.AbstractEventLoop)
+            and not o.is_closed()
+            and not _probe_known(o)
+            and not _probe_runner_owned(o)
+        ):
+            _probe_reported.append(_weakref.ref(o))
+            _probe_emit(f"\nPROBE-NEW-UNCLOSED-LOOP test={item.nodeid}")
+            _probe_report_loop(o, "NEW")
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untyped-def]
     """TEMPORARY CI DIAGNOSTIC (revert before merge)."""
     _gc.collect()
@@ -147,46 +222,27 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
         for o in _gc.get_objects()
         if isinstance(o, _asyncio.AbstractEventLoop) and not o.is_closed()
     ]
-    print(f"\nPROBE-UNCLOSED-COUNT={len(live)}")
-    print(f"PROBE-ENTRY-COUNT={len(_probe_loops)}")
+    _probe_emit(f"\nPROBE-UNCLOSED-COUNT={len(live)}")
+    _probe_emit(f"PROBE-ENTRY-COUNT={len(_probe_loops)}")
     with _warnings.catch_warnings():
         _warnings.simplefilter("ignore", DeprecationWarning)
         current = _asyncio.get_event_loop_policy()
-    print(f"PROBE-POLICY-IS-MINE={current is _probe_policy_instance}")
-    print(f"PROBE-SWAP-COUNT={len(_probe_policy_swaps)}")
+    _probe_emit(f"PROBE-POLICY-IS-MINE={current is _probe_policy_instance}")
+    _probe_emit(f"PROBE-SWAP-COUNT={len(_probe_policy_swaps)}")
     for i, (policy_repr, stack) in enumerate(_probe_policy_swaps[:3]):
-        print(f"PROBE-SWAP-{i}={policy_repr}:" + stack[-2000:])
+        _probe_emit(f"PROBE-SWAP-{i}={policy_repr}:" + stack[-2000:])
     for loop in live:
-        owners: list[str] = []
-        for ref in _gc.get_referrers(loop):
-            if isinstance(ref, dict):
-                keys = [k for k, v in list(ref.items())[:50] if v is loop]
-                owners.append(f"dict{keys}")
-            else:
-                owners.append(type(ref).__name__)
-        ready = [repr(getattr(h, "_callback", None)) for h in list(loop._ready)][:6]
-        print(
-            f"\nPROBE-LEAKED-LOOP loop={loop!r} "
-            f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
-        )
-        print(f"PROBE-READY={ready}")
-        matches = [e for e in _probe_loops if e["ref"]() is loop]
-        print(f"PROBE-MATCHES={len(matches)}")
-        ctor_matches = [e for e in _probe_ctors if e["ref"]() is loop]
-        print(f"PROBE-CTOR-MATCHES={len(ctor_matches)}")
-        for m, cm in enumerate(ctor_matches):
-            print(f"PROBE-CTOR-{m}-THREAD={cm['thread']}")
-            print(f"PROBE-CTOR-{m}:" + cm["stack"][:6500])
-        if not matches:
-            print("PROBE-ORIGIN=unknown (bypassed the event-loop policy?)")
-            continue
-        for m, match in enumerate(matches):
-            print(f"PROBE-CREATED-{m}-THREAD={match['thread']}")
-            print(f"PROBE-CREATED-{m}:" + match["created"][:6500])
-            for i, (thread, stack) in enumerate(match["runs"]):
-                print(f"PROBE-RUN-{m}-{i}-THREAD={thread}:" + stack[-2500:])
-            for i, (thread, stack) in enumerate(match["pings"]):
-                print(f"PROBE-PING-{m}-{i}-THREAD={thread}:" + stack[-2500:])
+        _probe_report_loop(loop, "FINAL")
+    try:
+        with open(_probe_log_path, encoding="utf-8") as fh:
+            dump = fh.read()
+    except OSError:
+        dump = ""
+    # Per-test hook output is captured by pytest, so replay the whole
+    # probe log here where it is visible in CI logs.
+    print("PROBE-LOG-BEGIN")
+    print(dump[-60000:])
+    print("PROBE-LOG-END")
 
 
 # ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
