@@ -24,6 +24,10 @@ Middleware:
     2. `request_middleware` assigns a UUID4 correlation ID per request
        (or accepts a UUID provided via `X-Request-ID`), measures
        duration, and exposes the ID via `X-Correlation-ID`.
+    3. `RateLimitMiddleware` enforces a per-replica token bucket keyed
+       on `X-API-Key` (else client IP); over-limit callers get the
+       standard 429 envelope with `Retry-After`. Probes, `/metrics`,
+       and `/` are exempt.
     Exception handlers registered through `register_error_handlers`
     translate `DyvineError` subclasses and `HTTPException` into a
     single error envelope; they are not middleware.
@@ -68,6 +72,7 @@ from .core.error_handlers import register_error_handlers
 from .core.logging import ContextLogger, setup_logging
 from .core.path_safety import ensure_within_root, get_task_workspace_root
 from .core.settings import settings
+from .middleware import RateLimitMiddleware
 from .routers import livestreams, posts, users, watch
 
 http_requests_total = Counter(
@@ -425,6 +430,16 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
     logger.clear_context()
 
     return response
+
+
+# Per-replica token-bucket limiting, nested INSIDE the correlation
+# middleware (Starlette runs later-added middleware closer to the
+# router) so 429 denials still carry a correlation ID.
+app.add_middleware(
+    RateLimitMiddleware,
+    requests_per_second=settings.api.rate_limit_per_second,
+    burst_size=settings.api.rate_limit_burst,
+)
 
 
 # Register error handlers

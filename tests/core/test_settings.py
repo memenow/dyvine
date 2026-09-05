@@ -25,6 +25,8 @@ def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     # sentinel defaults. Drop it here so we are asserting the true
     # out-of-the-box defaults rather than our test-runtime override.
     monkeypatch.delenv("API_DEBUG", raising=False)
+    monkeypatch.delenv("API_RATE_LIMIT_PER_SECOND", raising=False)
+    monkeypatch.delenv("API_RATE_LIMIT_BURST", raising=False)
     s = APISettings()
     assert s.version == "1.0.0"
     assert s.prefix == "/api/v1"
@@ -32,6 +34,8 @@ def test_api_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.debug is False
     assert s.host == "0.0.0.0"
     assert s.port == 8000
+    assert s.rate_limit_per_second == 10
+    assert s.rate_limit_burst == 20
 
 
 def test_api_settings_port_too_low() -> None:

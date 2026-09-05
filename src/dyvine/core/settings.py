@@ -70,7 +70,22 @@ class APISettings(BaseSettings):
     host: str = Field(default="0.0.0.0", description="Server bind address")
     port: int = Field(default=8000, ge=1, le=65535, description="Server bind port")
     rate_limit_per_second: int = Field(
-        default=10, ge=1, description="API rate limiting threshold per second"
+        default=10,
+        ge=1,
+        description=(
+            "Sustained request budget per caller per second, enforced "
+            "per replica by the token-bucket middleware. Buckets key on "
+            "the X-API-Key header when present, else the client IP."
+        ),
+    )
+    rate_limit_burst: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Maximum tolerated burst per caller before 429s. Buckets "
+            "refill at rate_limit_per_second; probes, /metrics, and / "
+            "never consume budget."
+        ),
     )
     multi_replica: bool = Field(
         default=False,

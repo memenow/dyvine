@@ -26,6 +26,13 @@ import pytest
 # auth-bypass path is exercised explicitly by dedicated tests.
 os.environ.setdefault("API_DEBUG", "true")
 os.environ.setdefault("SECURITY_REQUIRE_API_KEY", "false")
+# Effectively disable the token-bucket middleware for the shared app:
+# buckets key on client IP and ``TestClient`` always dials from the
+# same one, so production-sized limits would 429 unrelated tests once
+# the suite's cumulative traffic exceeds the burst. Tight-limit
+# behavior is covered by ``tests/middleware/`` on purpose-built apps.
+os.environ.setdefault("API_RATE_LIMIT_PER_SECOND", "1000000")
+os.environ.setdefault("API_RATE_LIMIT_BURST", "1000000")
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
