@@ -82,7 +82,7 @@ Configuration is environment-driven through `dyvine.core.settings`:
 | Prefix | Purpose |
 | --- | --- |
 | `API_` | Server bind, CORS, prefix, rate limiting, multi-replica flags |
-| `SECURITY_` | Secret key, API key, and router auth gate |
+| `SECURITY_` | API key (`SECURITY_API_KEY`) and router auth gate (`SECURITY_REQUIRE_API_KEY`) |
 | `DATABASE_` | Postgres URL, pool sizing, operation retention |
 | `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode |
 | `DOUYIN_WATCH_` | Watch Mode polling cadences, subscription cap, dedupe window, backfill flag |
@@ -207,19 +207,30 @@ docker run -d --name dyvine -p 8000:8000 \
 and watch-flat-file era is over — migrate first with
 `uv run python -m scripts.migrate_watch_to_pg`.
 
-Kubernetes (Kustomize; see `k8s/`):
+Kubernetes (Kustomize; see `k8s/`). There is no CD pipeline and no
+releases: roll out manually. Migrate first, then render the overlay
+with the image tag, public host, and Postgres CIDR substituted (the
+checkout stays untouched):
 
 ```bash
-kubectl apply -k k8s/overlays/production
+kubectl apply -k k8s/jobs/migrate
+kubectl wait --for=condition=complete job/dyvine-migrate \
+  -n dyvine --timeout=660s
+
+kubectl kustomize k8s/overlays/production \
+  | sed -e 's/newTag: main-latest/newTag: <tag>/' \
+        -e "s/INGRESS_HOST/<public host>/g" \
+        -e "s|DB_CIDR|<postgres CIDR>|g" \
+  | kubectl apply -f -
 ```
 
-The deploy workflows run the schema migration as a Job first, wait for
-`condition=complete`, then apply the overlay: 3 API replicas
-(`WATCH_ENABLED=false`) plus 1 watcher replica (`WATCH_ENABLED=true`).
-Production finishes with a smoke test that curls `/readyz` through the
-service endpoint. Secrets come from `DEV_DATABASE_URL` /
-`PROD_DATABASE_URL` plus the app secret keys; domains follow the
-storage matrix in `.env.example`.
+The overlay starts 3 API replicas (`WATCH_ENABLED=false`) plus 1
+watcher replica (`WATCH_ENABLED=true`) behind an Envoy Gateway
+`Gateway` + `HTTPRoute` (TLS via cert-manager). After rollout, smoke
+test through a port-forward: `/readyz` must be ready and an
+unauthenticated `GET /api/v1/watch` must return 401. Secrets come from
+a `dyvine-secrets` Secret (`DATABASE_URL` plus the app secret keys);
+domains follow the storage matrix in `.env.example`.
 
 ## Project Structure
 
@@ -238,7 +249,7 @@ storage matrix in `.env.example`.
 | `tests/` | Pytest suite mirroring the source tree |
 | `docs/` | Static HTML project documentation and Mermaid architecture diagrams |
 | `k8s/` | Base, production overlay, and migration-Job manifests |
-| `.github/` | CI, image build, deployment, release, and security workflows |
+| `.github/` | CI (tests, gates, scans) and security workflows — no releases, no CD |
 
 ## Development Notes
 

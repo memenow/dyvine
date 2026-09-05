@@ -2,10 +2,11 @@
 # Ingress policy for the dyvine-api Pods.
 #
 # Allows traffic on the container's HTTP port (8000) from:
-#   * Pods in the ``ingress-nginx`` namespace so the ingress controller can
-#     proxy external requests to the API. Selection is based on the
-#     ``kubernetes.io/metadata.name`` label that the kubelet sets
-#     automatically on every namespace from Kubernetes 1.22 onward.
+#   * Pods in the ``envoy-gateway-system`` namespace so the Envoy
+#     data-plane proxies can forward external requests to the API.
+#     Selection is based on the ``kubernetes.io/metadata.name`` label
+#     that the kubelet sets automatically on every namespace from
+#     Kubernetes 1.22 onward.
 #   * Pods in the ``kube-system`` namespace so kubelet/apiserver-side
 #     probes (liveness, readiness, startup) keep working on clusters that
 #     route probes through a namespace-scoped identity rather than the
@@ -36,7 +37,7 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: envoy-gateway-system
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system

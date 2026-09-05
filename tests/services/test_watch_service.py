@@ -367,6 +367,48 @@ async def test_reconcile_parks_flapping_loops_with_alert(
         await service.stop_all()
 
 
+async def test_crashed_loop_stays_registered_with_root_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A real crash is reaped by reconcile with its cause, not None."""
+    import logging
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+    )
+    real_get = service.watch_store.get_subscription
+    calls = 0
+
+    async def flaky_get(subscription_id: str):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom-cause")
+        return await real_get(subscription_id)
+
+    service.watch_store.get_subscription = flaky_get  # type: ignore[method-assign]
+    try:
+        await service.reconcile_loops()
+        task = service._loops[record.subscription_id]
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        assert isinstance(result, RuntimeError)
+        assert "boom-cause" in str(result)
+        # Crashed task stays registered for reconcile to reap.
+        assert record.subscription_id in service._loops
+        with caplog.at_level(logging.WARNING, logger="dyvine.services.watch"):
+            await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] == 1
+        assert any(
+            getattr(entry, "last_error", "") == "RuntimeError('boom-cause')"
+            for entry in caplog.records
+        )
+    finally:
+        await service.stop_all()
+
+
 async def test_reconcile_resets_budget_after_healthy_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -494,6 +536,29 @@ async def test_run_reconcile_forever_loops_until_cancelled(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_run_reconcile_forever_survives_failed_pass(
+    tmp_path: Path,
+) -> None:
+    """One transient failure is logged and skipped, not fatal."""
+    service, _, _ = _make_service(tmp_path)
+    calls = 0
+
+    async def flaky() -> tuple[int, int]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient db error")
+        return (0, 0)
+
+    service.reconcile_loops = flaky  # type: ignore[method-assign]
+    task = asyncio.create_task(service.run_reconcile_forever(interval_seconds=0.01))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2
 
 
 async def test_watch_loop_runs_first_cycle_then_cancellable(

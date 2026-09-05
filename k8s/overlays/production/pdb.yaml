@@ -1,25 +1,21 @@
 # PodDisruptionBudget for the dyvine-api Pods.
 #
-# ``maxUnavailable: 0`` blocks every voluntary disruption (node drain
-# during cluster autoscale, ``kubectl drain``, drain-on-upgrade, etc.)
-# until the operator reschedules the Pod manually. This is the only
-# safe configuration today because the Deployment uses the ``Recreate``
-# strategy backed by a ReadWriteOnce PVC: a rolling-update surge Pod
-# would not be able to attach the volume, and an involuntary drain
-# without a PDB would leave the API offline for the duration of the
-# detach/attach cycle.
+# ``maxUnavailable: 1`` lets node drains and cluster-autoscaler
+# scale-down proceed: at 2+ replicas one stays up throughout, while at
+# the single-replica floor (HPA ``minReplicas: 1``) a drain means a
+# brief API outage until the replacement Pod passes ``/readyz``. That
+# trade-off is deliberate: the retired alternative (``minAvailable: 1``
+# with ``minReplicas: 1``) blocks EVERY voluntary node drain at steady
+# state and hangs node maintenance. The Deployment itself rolls with
+# ``RollingUpdate`` (``maxUnavailable: 1, maxSurge: 1``) over
+# ``emptyDir`` scratch, so no volume attach blocks rescheduling.
 #
 # IMPORTANT: a PDB protects against *voluntary* disruptions only.
 # Involuntary disruptions — node failure, OOMKill, kernel panic,
 # ``preemption`` of a spot instance — bypass this budget entirely.
-# Operators should pair this PDB with monitoring on the underlying
-# node and a runbook for manual cluster maintenance (drain the PDB
-# selector, reschedule, restore the budget).
 #
-# The API Deployment rolls (RollingUpdate + HPA), so voluntary
-# disruptions are safe as long as one replica stays up. The singleton
-# watcher intentionally has no PDB: it takes no traffic, and a
-# disruption just delays polling until Kubernetes restarts it.
+# The singleton watcher intentionally has no PDB: it takes no traffic,
+# and a disruption just delays polling until Kubernetes restarts it.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -30,7 +26,7 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/part-of: dyvine
 spec:
-  minAvailable: 1
+  maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dyvine

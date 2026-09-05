@@ -3,9 +3,11 @@
 # API replicas scale horizontally with ``WATCH_ENABLED=false`` (CRUD-only
 # against shared Postgres); this Deployment is the exactly-one process
 # with ``WATCH_ENABLED=true``. It boots the same image (so probes and the
-# container contract stay identical) but has no Service/Ingress, and its
-# ``dyvine-watch`` label keeps the API NetworkPolicy selectors — and the
-# HPA — from touching it.
+# container contract stay identical) but has no Service or route: the
+# HPA targets the ``dyvine-api`` Deployment by name, so it never touches
+# this one. The ``part-of: dyvine`` NetworkPolicies DO select the watcher
+# pod too — that is intended, since it needs the same Postgres/R2/DNS
+# egress and the same Envoy/kube-system ingress allowlist.
 #
 # Scheduling is a singleton by construction: ``replicas: 1`` with the
 # ``Recreate`` strategy. If the Pod dies, Kubernetes restarts it and
@@ -82,6 +84,13 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 3
           failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /startupz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
         volumeMounts:
         - name: runtime-data
           mountPath: /app/data

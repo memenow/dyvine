@@ -8,6 +8,7 @@ arguments), so importing this module never touches the filesystem.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -88,16 +89,23 @@ def resolve_settings(
         url = f"http://{host}:{port}" if host else DEFAULT_API_URL
     url = url.rstrip("/")
 
-    prefix = api_prefix or env.get("DYVINE_API_PREFIX") or DEFAULT_API_PREFIX
+    prefix = (
+        api_prefix
+        or env.get("DYVINE_API_PREFIX")
+        or dotenv.get("API_PREFIX")
+        or DEFAULT_API_PREFIX
+    )
     if not prefix.startswith("/"):
         raise SettingsError(f"API prefix must start with '/': {prefix!r}")
 
     if max_concurrent < 1:
         raise SettingsError("--max-concurrent must be at least 1")
-    if poll_interval <= 0:
-        raise SettingsError("--poll-interval must be positive")
-    if timeout <= 0:
-        raise SettingsError("--timeout must be positive")
+    # ``float("nan")`` defeats ``<=`` comparisons (always False), so
+    # reject non-finite values explicitly instead of crashing later.
+    if not math.isfinite(poll_interval) or poll_interval <= 0:
+        raise SettingsError("--poll-interval must be a positive number")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise SettingsError("--timeout must be a positive number")
 
     return BatchSettings(
         api_url=url,

@@ -1,12 +1,19 @@
 """Per-replica token-bucket rate limiting (pure ASGI middleware).
 
 Each caller key gets a bucket holding ``burst_size`` tokens refilled at
-``requests_per_second``. The key is the ``X-API-Key`` header when
-present, else the client IP. Buckets live in process memory, so limits
-are enforced per replica: N replicas behind a load balancer admit
-roughly N times the configured rate. That is acceptable for abuse
-backpressure (a shared Redis limiter is the follow-up if exact global
-accounting is ever needed).
+``requests_per_second``. The key is the ``X-API-Key`` header only when
+it matches the configured key (an unvalidated header would let callers
+rotate keys to evade limits); anything else buckets by client IP, taken
+from the rightmost ``X-Forwarded-For`` entry when present (the address
+our ingress observed) else the direct peer. Buckets live in process
+memory, so limits are enforced per replica: N replicas behind a load
+balancer admit roughly N times the configured rate. That is acceptable
+for abuse backpressure (a shared Redis limiter is the follow-up if
+exact global accounting is ever needed). There is currently no edge
+rate limit: the cluster fronts traffic with Envoy Gateway, whose
+global limiting needs a dedicated ratelimit backend this cluster does
+not run yet — adding it plus a ``BackendTrafficPolicy`` is the
+follow-up when a global edge cap is needed.
 
 The allow/deny decision performs no awaits, so it is atomic on the
 event loop and needs no locks. Denials return the standard error
@@ -15,6 +22,7 @@ envelope with HTTP 429 and a ``Retry-After`` header.
 
 from __future__ import annotations
 
+import hmac
 import math
 import time
 from dataclasses import dataclass
@@ -24,11 +32,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from ..core.error_handlers import ErrorResponse
 from ..core.exceptions import RateLimitError
 from ..core.logging import ContextLogger
+from ..core.settings import settings
 
 logger = ContextLogger(__name__)
 
 #: Paths that never consume budget: probes, metrics, and the index.
-EXEMPT_PATHS = frozenset({"/", "/livez", "/readyz", "/startupz", "/health", "/metrics"})
+#: ``/metrics/`` is the redirect target of the mounted metrics app, so
+#: both spellings must be exempt.
+EXEMPT_PATHS = frozenset(
+    {"/", "/livez", "/readyz", "/startupz", "/health", "/metrics", "/metrics/"}
+)
 
 #: Idle seconds after which a bucket is eligible for eviction.
 _BUCKET_IDLE_EVICT_SECONDS = 600.0
@@ -80,6 +93,10 @@ class TokenBucketLimiter:
 
         Caller keys are unbounded (one per source IP), so without
         eviction a scanner sweeping IPs would grow this dict forever.
+        When idle eviction alone cannot get back under the cap (a
+        rotating-key flood keeps every bucket fresh), the stalest
+        buckets are dropped regardless of idle age so memory stays
+        bounded; that only resets an attacker's burst allowance.
         """
         horizon = now - _BUCKET_IDLE_EVICT_SECONDS
         stale = [
@@ -89,6 +106,12 @@ class TokenBucketLimiter:
         ]
         for key in stale:
             del self._buckets[key]
+        while len(self._buckets) > _MAX_TRACKED_KEYS:
+            oldest = min(
+                self._buckets,
+                key=lambda key: self._buckets[key].last_refill_monotonic,
+            )
+            del self._buckets[oldest]
 
     def allow(self, key: str, *, now: float | None = None) -> float:
         """Consume one token for ``key``; return seconds to wait.
@@ -115,9 +138,11 @@ class TokenBucketLimiter:
 class RateLimitMiddleware:
     """Pure ASGI middleware enforcing :class:`TokenBucketLimiter`.
 
-    Must be added after the correlation middleware so denials carry a
-    correlation ID. Exempt paths (probes, ``/metrics``, ``/``) pass
-    through untouched.
+    Must be added *before* the correlation middleware: Starlette's
+    ``add_middleware`` prepends, so the earlier-added middleware runs
+    closer to the router and denials still pass back through
+    correlation (ID header), request logging, and metrics. Exempt
+    paths (probes, ``/metrics``, ``/``) pass through untouched.
     """
 
     def __init__(
@@ -137,11 +162,30 @@ class RateLimitMiddleware:
 
     @staticmethod
     def _caller_key(scope: Scope) -> str:
-        """Return the bucket key: API key header, else client IP."""
+        """Return the bucket key: validated API key, else client IP.
+
+        Only a header matching the configured key earns its own
+        bucket; anything else (missing, wrong, or rotated) falls back
+        to the client IP so key rotation cannot evade limits. The IP
+        is the rightmost ``X-Forwarded-For`` entry when present (the
+        address our ingress observed; attacker-spoofed prefixes sit to
+        its left and are ignored), else the direct peer.
+        """
         headers = dict(scope.get("headers") or [])
-        api_key = headers.get(b"x-api-key")
-        if api_key:
-            return f"key:{api_key.decode('latin-1')}"
+        raw_key = headers.get(b"x-api-key")
+        if raw_key:
+            presented = raw_key.decode("latin-1")
+            expected = settings.security.api_key
+            if expected and hmac.compare_digest(presented, expected):
+                return f"key:{presented}"
+        forwarded = headers.get(b"x-forwarded-for")
+        if forwarded:
+            entries = [
+                entry.strip() for entry in forwarded.decode("latin-1").split(",")
+            ]
+            entries = [entry for entry in entries if entry]
+            if entries:
+                return f"ip:{entries[-1]}"
         client = scope.get("client")
         if client is not None:
             return f"ip:{client[0]}"

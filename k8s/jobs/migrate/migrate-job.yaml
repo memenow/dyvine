@@ -1,16 +1,23 @@
-# One-shot schema migration, run by the deploy workflows BEFORE the new
-# Deployment revision rolls out.
+# One-shot schema migration, applied manually BEFORE the new
+# Deployment revision rolls out (this project has no CD pipeline).
 #
 # Sequencing matters: the Job upgrades the database to the revision the
 # new image expects, so applying it after (or concurrently with) the
-# Deployment would boot new code against an old schema. The workflows
-# therefore ``kubectl apply -k`` this directory first, wait for
-# ``condition=complete``, and only then apply the environment overlay.
+# Deployment would boot new code against an old schema. Apply this
+# directory first, wait for ``condition=complete`` (the wait must cover
+# the 600s ``activeDeadlineSeconds`` below), and only then apply the
+# production overlay::
+#
+#   kubectl apply -k k8s/jobs/migrate
+#   kubectl wait --for=condition=complete job/dyvine-migrate \
+#     -n dyvine --timeout=660s
 #
 # The Job is intentionally NOT part of the base kustomization: Job specs
 # are largely immutable, so re-applying a completed Job with a new image
-# tag fails. The workflows delete any previous run
-# (``kubectl delete job --ignore-not-found``) before applying.
+# tag fails. Delete any previous run first (``kubectl delete job
+# dyvine-migrate -n dyvine --ignore-not-found``) and wait for the
+# deletion to complete, or two alembic upgrades can overlap and fight
+# over the migration lock.
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -63,6 +63,19 @@ def test_limiter_evicts_idle_buckets_past_cap(
     assert limiter.tracked_keys == 2
 
 
+def test_limiter_bounds_memory_under_fresh_flood(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rotating-key flood cannot grow the bucket map past the cap."""
+    import dyvine.middleware.rate_limit as module
+
+    monkeypatch.setattr(module, "_MAX_TRACKED_KEYS", 3)
+    limiter = TokenBucketLimiter(requests_per_second=1.0, burst_size=1)
+    for index in range(10):
+        limiter.allow(f"key-{index}", now=1000.0)
+    assert limiter.tracked_keys <= 3
+
+
 async def _stub_app(scope: Scope, receive: Receive, send: Send) -> None:
     """Downstream app recording that it was reached."""
     response = JSONResponse({"ok": True})
@@ -132,23 +145,57 @@ async def test_middleware_denies_with_envelope_and_retry_after() -> None:
     assert payload["details"]["retry_after_seconds"] == 1
 
 
-async def test_middleware_keys_on_api_key_header() -> None:
-    """Present API keys bucket per key; absent keys bucket per IP."""
+async def test_middleware_keys_on_validated_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the configured key earns its own bucket; rest share IP."""
+    from dyvine.core.settings import settings
+
+    monkeypatch.setattr(settings.security, "api_key", "alice")
     app = RateLimitMiddleware(_stub_app, requests_per_second=1.0, burst_size=1)
     alice = _scope(headers=[(b"x-api-key", b"alice")])
-    bob = _scope(headers=[(b"x-api-key", b"bob")])
     assert (await _drain(app, alice))[0] == 200
     assert (await _drain(app, alice))[0] == 429
+    # A wrong key falls back to the client-IP bucket, untouched so far.
+    bob = _scope(headers=[(b"x-api-key", b"bob")])
     assert (await _drain(app, bob))[0] == 200
-    # No header: the shared client IP has its own untouched bucket.
-    assert (await _drain(app, _scope()))[0] == 200
+    assert (await _drain(app, bob))[0] == 429
+    # No header shares that same IP bucket, now exhausted.
     assert (await _drain(app, _scope()))[0] == 429
+
+
+async def test_middleware_key_rotation_does_not_reset_budget() -> None:
+    """Rotating invalid keys shares one IP bucket (no evasion)."""
+    app = RateLimitMiddleware(_stub_app, requests_per_second=1.0, burst_size=1)
+    first = _scope(headers=[(b"x-api-key", b"rotated-1")])
+    second = _scope(headers=[(b"x-api-key", b"rotated-2")])
+    assert (await _drain(app, first))[0] == 200
+    assert (await _drain(app, second))[0] == 429
+
+
+async def test_middleware_prefers_forwarded_client_ip() -> None:
+    """The rightmost X-Forwarded-For entry keys the IP bucket."""
+    app = RateLimitMiddleware(_stub_app, requests_per_second=1.0, burst_size=1)
+    spoofed = _scope(headers=[(b"x-forwarded-for", b"spoofed, 192.0.2.7")])
+    direct = _scope(headers=[(b"x-forwarded-for", b"192.0.2.7")])
+    assert (await _drain(app, spoofed))[0] == 200
+    assert (await _drain(app, direct))[0] == 429
+    # The direct peer has its own untouched bucket.
+    assert (await _drain(app, _scope()))[0] == 200
 
 
 async def test_middleware_exempts_probes_metrics_and_index() -> None:
     """Exempt paths never consume budget, however often they are hit."""
     app = RateLimitMiddleware(_stub_app, requests_per_second=1.0, burst_size=1)
-    for path in ("/", "/livez", "/readyz", "/startupz", "/health", "/metrics"):
+    for path in (
+        "/",
+        "/livez",
+        "/readyz",
+        "/startupz",
+        "/health",
+        "/metrics",
+        "/metrics/",
+    ):
         for _ in range(3):
             status, _, _ = await _drain(app, _scope(path))
             assert status == 200
@@ -198,21 +245,36 @@ async def test_middleware_admits_exactly_burst_under_concurrency() -> None:
 
 
 def test_rate_limit_end_to_end_envelope() -> None:
-    """A tight app returns the envelope, header, and correlation ID."""
-    import uuid
+    """A tight app returns the envelope, header, and correlation ID.
+
+    The limiter is registered before the correlation middleware (the
+    production order in ``main.py``), so denials still pass back out
+    through correlation and carry ``X-Correlation-ID``.
+    """
+    from fastapi import Request
 
     inner = FastAPI()
+    inner.add_middleware(RateLimitMiddleware, requests_per_second=1.0, burst_size=1)
+
+    @inner.middleware("http")
+    async def _correlation(request: Request, call_next):  # type: ignore[no-untyped-def]
+        request.state.correlation_id = "corr-e2e"
+        response = await call_next(request)
+        response.headers["X-Correlation-ID"] = "corr-e2e"
+        return response
 
     @inner.get("/items")
     async def _items() -> dict[str, bool]:
         return {"ok": True}
 
-    inner.add_middleware(RateLimitMiddleware, requests_per_second=1.0, burst_size=1)
     client = TestClient(inner)
-    assert client.get("/items").status_code == 200
-    denied = client.get("/items", headers={"X-Request-ID": str(uuid.uuid4())})
+    admitted = client.get("/items")
+    assert admitted.status_code == 200
+    assert admitted.headers["X-Correlation-ID"] == "corr-e2e"
+    denied = client.get("/items")
     assert denied.status_code == 429
     assert denied.headers["Retry-After"] == "1"
+    assert denied.headers["X-Correlation-ID"] == "corr-e2e"
     payload = denied.json()
     assert payload["error"] is True
     assert payload["error_code"] == "RateLimitError"

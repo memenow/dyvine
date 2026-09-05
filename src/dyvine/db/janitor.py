@@ -18,7 +18,10 @@ import asyncio
 import time
 from datetime import UTC, datetime, timedelta
 
+from ..core.logging import ContextLogger
 from .protocols import OperationRepository
+
+logger = ContextLogger(__name__)
 
 #: Seconds between heartbeat/sweep passes.
 HEARTBEAT_INTERVAL_SECONDS = 30.0
@@ -79,10 +82,21 @@ class RepositoryJanitor:
     async def run_forever(self) -> None:
         """Loop :meth:`run_once` until cancelled.
 
+        A failed pass is logged and skipped so one transient database
+        error does not kill heartbeats permanently (siblings would
+        otherwise sweep this replica's live rows as orphans).
         Cancellation (including during the sleep) propagates to the
         caller, so the container stops the loop with a plain
         ``task.cancel()`` during shutdown.
         """
         while True:
-            await self.run_once()
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "janitor pass failed; continuing on next interval",
+                    extra={"interval_seconds": self._heartbeat_interval},
+                )
             await asyncio.sleep(self._heartbeat_interval)

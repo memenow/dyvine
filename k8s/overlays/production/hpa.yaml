@@ -44,7 +44,9 @@ spec:
       - type: Percent
         value: 100
         periodSeconds: 60
+      # Capped at 2 so the step can actually apply under
+      # ``maxReplicas: 3`` (a step of 4 could never fire).
       - type: Pods
-        value: 4
+        value: 2
         periodSeconds: 60
       selectPolicy: Max

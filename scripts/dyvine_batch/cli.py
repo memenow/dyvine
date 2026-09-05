@@ -94,8 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns the process exit code.
 
     Exit codes: 0 on success (even when individual downloads fail —
-    those are reported, not errors), 1 on configuration/input errors,
-    2 on unexpected crashes.
+    those are reported, not errors), 1 on configuration/input errors
+    (including unreadable input files), 2 on CLI usage errors
+    (``argparse`` exits before this function runs) or unexpected
+    crashes, 130 on keyboard interrupt.
     """
     args = build_parser().parse_args(argv)
     try:
@@ -109,7 +111,11 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
         )
         user_ids = read_user_ids(args.input_file)
-    except FileNotFoundError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # ``FileNotFoundError`` (an ``OSError``) plus siblings such as
+        # ``IsADirectoryError``/``PermissionError``, and undecodable
+        # bytes: all input-file problems, all exit 1, never a
+        # traceback.
         print(f"错误: {exc}", file=sys.stderr)
         return 1
     except SettingsError as exc:

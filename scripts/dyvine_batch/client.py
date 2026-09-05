@@ -133,7 +133,13 @@ async def poll_job(
     if response.status_code != 200:
         job.message = f"轮询 HTTP {response.status_code}"
         return job
-    data = response.json()
+    try:
+        data = response.json()
+    except Exception as exc:
+        # Malformed payload: annotate and let the next poll round
+        # retry instead of killing the whole batch run.
+        job.message = f"轮询响应解析失败: {exc}"
+        return job
     job.status = data.get("status", "unknown")
     job.message = data.get("message", "")
     if client.settings.include_likes:

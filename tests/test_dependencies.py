@@ -171,6 +171,58 @@ async def test_service_container_sweeps_orphans_at_boot(
 
 
 @pytest.mark.asyncio
+async def test_service_container_purges_terminal_rows_at_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boot enforces retention; disabled retention purges nothing."""
+    from dyvine.core.exceptions import OperationNotFoundError
+
+    _stub_douyin_handler(monkeypatch)
+    state = FakeOperationState()
+    store = FakeOperationRepository(owner_id="boot-owner", state=state)
+    old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    monkeypatch.setattr(fake_repos, "_now_iso", lambda: old)
+    stale = await store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="completed",
+        message="done",
+    )
+    monkeypatch.undo()
+
+    monkeypatch.setattr(dependencies.settings.database, "operation_retention_days", 30)
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=store, watch_store=FakeWatchRepository())
+    try:
+        with pytest.raises(OperationNotFoundError):
+            await container.operation_store.get_operation(stale.operation_id)
+    finally:
+        await container.shutdown()
+
+    fresh_state = FakeOperationState()
+    fresh_store = FakeOperationRepository(owner_id="boot-owner", state=fresh_state)
+    monkeypatch.setattr(fake_repos, "_now_iso", lambda: old)
+    kept = await fresh_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="user-1",
+        status="completed",
+        message="done",
+    )
+    monkeypatch.undo()
+    monkeypatch.setattr(dependencies.settings.database, "operation_retention_days", 0)
+    container = dependencies.ServiceContainer()
+    await container.initialize(
+        operation_store=fresh_store, watch_store=FakeWatchRepository()
+    )
+    try:
+        assert (
+            await container.operation_store.get_operation(kept.operation_id)
+        ).status == "completed"
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_service_container_rejects_mixed_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

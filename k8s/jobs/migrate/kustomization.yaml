@@ -6,9 +6,12 @@ namespace: dyvine
 resources:
   - migrate-job.yaml
 
-# Pinned by the deploy workflows with the release tag before apply
-# (see the ``sed`` step that mirrors the INGRESS_HOST precedent), so
-# the migration always runs from the image being deployed.
+# Pin ``newTag`` to the image being deployed before applying (no CD
+# pipeline does it for you), e.g.::
+#
+#   kubectl kustomize k8s/jobs/migrate \
+#     | sed 's/newTag: main-latest/newTag: <tag>/' \
+#     | kubectl apply -f -
 images:
   - name: ghcr.io/memenow/dyvine
     newTag: main-latest

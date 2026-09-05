@@ -1,0 +1,36 @@
+---
+# Postgres allowlist for VPC-private databases (production overlay).
+#
+# The base ``dyvine-api-egress`` policy deliberately excludes the
+# RFC1918/CG-NAT ranges on 5432 so a compromised pod cannot probe
+# in-cluster Postgres instances — but that also blocks a LEGITIMATE
+# database living on a private VPC address (Cloud SQL private IP, RDS
+# in a VPC, ...). This additive policy opens 5432 to exactly the
+# database's CIDR. ``DB_CIDR`` is a literal placeholder; substitute the
+# CIDR covering the production Postgres when rendering (see the
+# pipeline in ``kustomization.yaml``). Do NOT apply this file with the
+# placeholder intact (``DB_CIDR`` is not a valid CIDR and the apply
+# will fail). NetworkPolicies are additive, so this never widens the
+# base rule beyond the one CIDR.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dyvine-db-egress
+  namespace: dyvine
+  labels:
+    app.kubernetes.io/name: dyvine
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: dyvine
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: dyvine
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: DB_CIDR
+      ports:
+        - protocol: TCP
+          port: 5432

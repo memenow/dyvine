@@ -74,6 +74,65 @@ jobs:
     - name: Type check with MyPy
       run: uv run mypy src/dyvine
 
+  migrations:
+    name: Migration drift check
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dyvine
+          POSTGRES_PASSWORD: dyvine
+          POSTGRES_DB: dyvine
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "0.11.6"
+        enable-cache: true
+
+    - name: Set up Python
+      run: uv python install 3.12
+
+    - name: Install dependencies
+      run: uv sync --all-extras --frozen
+
+    - name: Upgrade to head, then check for drift
+      # ``alembic check`` fails when ``models.py`` and the migration
+      # scripts disagree, so the baseline docstring's drift claim holds.
+      # API_DEBUG=true skips the production-secret validator; the
+      # default DATABASE_URL already points at this service.
+      env:
+        API_DEBUG: "true"
+      run: |
+        uv run alembic upgrade head
+        uv run alembic check
+
+  manifests:
+    name: Kustomize render check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Render production overlay
+      # Placeholders (INGRESS_HOST, DB_CIDR) render as literal strings;
+      # this gate catches YAML errors and drifting JSON6902 paths, not
+      # placeholder values (the deploy workflows substitute those).
+      # ``kubectl`` ships on the runner image; no extra setup needed.
+      run: kubectl kustomize k8s/overlays/production > /dev/null
+
+    - name: Render migration job
+      run: kubectl kustomize k8s/jobs/migrate > /dev/null
+
   container-scan:
     name: Container Vulnerability Scan
     needs: [quality]
@@ -137,16 +196,3 @@ jobs:
       with:
         sarif_file: 'trivy-results.sarif'
         category: 'trivy-container'
-
-  docker-build:
-    name: Build and Push Docker Image
-    needs: [test, quality]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    uses: ./.github/workflows/docker-build.yml
-    with:
-      push: true
-      registry: ghcr.io
-      image-name: ${{ github.repository }}
-    permissions:
-      contents: read
-      packages: write

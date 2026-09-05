@@ -519,14 +519,24 @@ docker run -d \
         <li><code>DATABASE_URL</code> in <code>.env</code> must point at a reachable Postgres; migrate legacy stores first with <code>uv run python -m scripts.migrate_watch_to_pg</code>.</li>
       </ul>
       <h3>Kubernetes</h3>
-      <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay.</p>
-      <pre><code>kubectl apply -k k8s/overlays/production</code></pre>
+      <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay. There is no CD pipeline and no releases: migrate first, then render the overlay with the image tag, public host, and Postgres CIDR substituted.</p>
+      <pre><code>kubectl apply -k k8s/jobs/migrate
+kubectl wait --for=condition=complete job/dyvine-migrate \
+  -n dyvine --timeout=660s
+
+kubectl kustomize k8s/overlays/production \
+  | sed -e 's/newTag: main-latest/newTag: &lt;tag&gt;/' \
+        -e "s/INGRESS_HOST/&lt;public host&gt;/g" \
+        -e "s|DB_CIDR|&lt;postgres CIDR&gt;|g" \
+  | kubectl apply -f -</code></pre>
       <p>
-        The deploy workflows run the schema migration as a Job first, wait for
-        <code>condition=complete</code>, then apply the overlay: 3 API replicas
+        The overlay starts 3 API replicas
         (<code>WATCH_ENABLED=false</code>) plus 1 watcher replica
-        (<code>WATCH_ENABLED=true</code>). Production finishes with a smoke test
-        that curls <code>/readyz</code> through the service endpoint.
+        (<code>WATCH_ENABLED=true</code>) behind an Envoy Gateway
+        <code>Gateway</code> + <code>HTTPRoute</code> (TLS via
+        cert-manager). After rollout, smoke test through a
+        port-forward: <code>/readyz</code> must be ready and an
+        unauthenticated <code>GET /api/v1/watch</code> must return 401.
       </p>
       <div class="note">
         <strong>Scaling note:</strong> The API scales horizontally when R2 archival is
@@ -556,11 +566,7 @@ make test          # pytest</code></pre>
           <tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, quality gates, container scan, Docker build and push.</td></tr>
-          <tr><td><code>docker-build.yml</code></td><td>Reusable workflow</td><td>Multi-platform image build and registry push.</td></tr>
-          <tr><td><code>deploy-dev.yml</code></td><td>Push to <code>main</code></td><td>Apply the production overlay against the development cluster.</td></tr>
-          <tr><td><code>deploy-prod.yml</code></td><td>Tag push</td><td>Apply against the production cluster.</td></tr>
-          <tr><td><code>release.yml</code></td><td>Tag push</td><td>GitHub release creation.</td></tr>
+          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, lint/type gates, migration drift check, manifest render check, container scan. No image push, no releases: this project ships by manual <code>kubectl</code> rollout.</td></tr>
           <tr><td><code>security.yml</code></td><td>Weekly schedule and manual</td><td>Dependency and container security audit.</td></tr>
         </tbody>
       </table>

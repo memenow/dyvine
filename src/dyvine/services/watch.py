@@ -347,13 +347,20 @@ class WatchService:
 
         Returns 0 when the loop stays eligible for restart (possibly
         after a backoff delay enforced by :meth:`_restart_allowed`).
-        Only called for done, non-cancelled tasks, so ``exception()``
-        cannot raise here.
+        Only called for done, non-cancelled tasks. The loop swallows
+        its own exceptions and returns the root cause, so the task
+        result carries it; a task that raised instead (never in
+        production, but possible in tests) surfaces it via re-raise.
         """
         count = self._crash_counts.get(subscription_id, 0) + 1
         self._crash_counts[subscription_id] = count
         self._last_crash_monotonic[subscription_id] = now
-        failure = task.exception()
+        try:
+            result = task.result()
+        except BaseException as raised:
+            failure: BaseException | None = raised
+        else:
+            failure = result if isinstance(result, BaseException) else None
         if count > _MAX_CONSECUTIVE_CRASHES:
             logger.error(
                 "watch loop parked after repeated crashes; "
@@ -390,11 +397,22 @@ class WatchService:
     async def run_reconcile_forever(self, *, interval_seconds: float = 30.0) -> None:
         """Loop :meth:`reconcile_loops` until cancelled.
 
-        Cancellation propagates to the caller, so the container stops
-        the loop with a plain ``task.cancel()`` during shutdown.
+        A failed pass is logged and skipped so one transient database
+        error does not stop subscription adoption and crash
+        supervision permanently. Cancellation propagates to the
+        caller, so the container stops the loop with a plain
+        ``task.cancel()`` during shutdown.
         """
         while True:
-            await self.reconcile_loops()
+            try:
+                await self.reconcile_loops()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "watch reconcile pass failed; continuing on next interval",
+                    extra={"interval_seconds": interval_seconds},
+                )
             await asyncio.sleep(interval_seconds)
 
     async def stop_all(self) -> None:
@@ -480,7 +498,7 @@ class WatchService:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _watch_loop(self, subscription_id: str) -> None:
+    async def _watch_loop(self, subscription_id: str) -> BaseException | None:
         """Drive one subscription's live + post cadences until cancelled.
 
         Each cadence has its own monotonic due-time recomputed from the
@@ -495,17 +513,22 @@ class WatchService:
         single-loop design: livestreams are long enough that a few minutes'
         detection delay is tolerable, and every subscription has its own loop,
         so one user's backfill never stalls another user's live detection.
+
+        Returns the root-cause exception when the loop crashes (the task
+        stays registered so reconcile reaps it via ``_note_crash``), and
+        ``None`` on a clean exit (deleted/disabled subscription).
         """
         next_live = time.monotonic()
         next_post = time.monotonic()
+        crashed: BaseException | None = None
         try:
             while True:
                 try:
                     record = await self.watch_store.get_subscription(subscription_id)
                 except WatchSubscriptionNotFoundError:
-                    return  # deleted out from under us
+                    return None  # deleted out from under us
                 if not record.enabled:
-                    return
+                    return None
 
                 now = time.monotonic()
                 sleep_for = min(next_live - now, next_post - now)
@@ -524,16 +547,28 @@ class WatchService:
             # download triggered this cycle is its own registry-tracked task
             # and drains independently.
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception(
-                "watch loop crashed; it will be resumed on next restart",
+                "watch loop crashed; the reconcile supervisor will retry "
+                "it with backoff, or park it after repeated crashes",
                 extra={"subscription_id": subscription_id},
             )
+            crashed = exc
         finally:
-            # Self-evict only if the registry slot is still us, mirroring the
-            # livestream downloader's successor-safe cleanup.
-            if self._loops.get(subscription_id) is asyncio.current_task():
+            # Evict on clean exit (deleted/disabled/cancelled) only when
+            # the registry slot is still us, mirroring the livestream
+            # downloader's successor-safe cleanup. A crashed loop stays
+            # registered so the next reconcile pass reaps it through
+            # ``_note_crash`` (backoff/park policy) instead of
+            # restarting it immediately with no alert.
+            if (
+                crashed is None
+                and self._loops.get(subscription_id) is asyncio.current_task()
+            ):
                 self._loops.pop(subscription_id, None)
+        if crashed is not None:
+            return crashed
+        return None
 
     async def _do_live_check(self, record: WatchSubscriptionRecord) -> None:
         """Check whether the user is live and, if so, start a recording.

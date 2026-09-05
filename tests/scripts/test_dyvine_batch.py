@@ -390,3 +390,130 @@ def test_cli_missing_input_is_exit_1(
     monkeypatch.setenv("DYVINE_API_KEY", "key")
     monkeypatch.chdir(tmp_path)
     assert cli.main(["serial", str(tmp_path / "nope.txt")]) == 1
+
+
+def test_cli_directory_input_is_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory passed as input exits 1 without a traceback."""
+    monkeypatch.setenv("DYVINE_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["serial", str(tmp_path)]) == 1
+
+
+def test_cli_undecodable_input_is_exit_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-UTF-8 input file exits 1 without a traceback."""
+    monkeypatch.setenv("DYVINE_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    users = tmp_path / "users.txt"
+    users.write_bytes("u1\n\xff\xfe\n".encode("latin-1"))
+    assert cli.main(["serial", str(users)]) == 1
+
+
+def _stub_runner(return_value: Any = None, error: Any = None) -> Any:
+    """Build an async runner double returning or raising on demand."""
+
+    async def _run(*args: Any, **kwargs: Any) -> Any:
+        if error is not None:
+            raise error
+        return return_value if return_value is not None else []
+
+    return _run
+
+
+def test_cli_success_is_exit_0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A clean run exits 0."""
+    monkeypatch.setenv("DYVINE_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runners, "run_serial", _stub_runner())
+    users = tmp_path / "users.txt"
+    users.write_text("u1\n", encoding="utf-8")
+    assert cli.main(["serial", str(users)]) == 0
+
+
+def test_cli_unexpected_crash_is_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A runner blow-up exits 2 with a message, not a traceback."""
+    monkeypatch.setenv("DYVINE_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runners, "run_serial", _stub_runner(error=RuntimeError("x")))
+    users = tmp_path / "users.txt"
+    users.write_text("u1\n", encoding="utf-8")
+    assert cli.main(["serial", str(users)]) == 2
+    _, err = capsys.readouterr()
+    assert "运行失败" in err
+
+
+def test_cli_keyboard_interrupt_is_exit_130(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C exits 130."""
+    monkeypatch.setenv("DYVINE_API_KEY", "key")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runners, "run_serial", _stub_runner(error=KeyboardInterrupt()))
+    users = tmp_path / "users.txt"
+    users.write_text("u1\n", encoding="utf-8")
+    assert cli.main(["serial", str(users)]) == 130
+
+
+async def test_poll_job_malformed_json_retries() -> None:
+    """A 200 with garbage bytes annotates the job instead of crashing."""
+    job = client.DownloadJob(user_id="u1", operation_id="op-1", status="submitted")
+    settings = _settings()
+
+    def _garbage(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json{{{")
+
+    async with httpx.AsyncClient(transport=_transport(_garbage)) as http:
+        await client.poll_job(http, client.DyvineClient(settings), job)
+    assert job.status == "submitted"  # retried next round
+    assert "解析失败" in job.message
+
+
+def test_resolve_settings_rejects_non_finite() -> None:
+    """NaN/inf timeouts fail fast instead of crashing later."""
+    kwargs: dict[str, Any] = {
+        "api_url": None,
+        "api_key": "k",
+        "api_prefix": None,
+        "include_likes": False,
+        "max_concurrent": 3,
+        "poll_interval": 5.0,
+        "timeout": 30.0,
+        "environ": {},
+    }
+    with pytest.raises(config.SettingsError, match="poll-interval"):
+        config.resolve_settings(**{**kwargs, "poll_interval": float("nan")})
+    with pytest.raises(config.SettingsError, match="timeout"):
+        config.resolve_settings(**{**kwargs, "timeout": float("inf")})
+
+
+def test_resolve_settings_prefix_from_dotenv(tmp_path: Path) -> None:
+    """``API_PREFIX`` in .env is honoured (env still wins)."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("SECURITY_API_KEY=k\nAPI_PREFIX=/v2\n", encoding="utf-8")
+    base: dict[str, Any] = {
+        "api_url": None,
+        "api_key": None,
+        "api_prefix": None,
+        "include_likes": False,
+        "max_concurrent": 3,
+        "poll_interval": 5.0,
+        "timeout": 30.0,
+        "environ": {},
+        "dotenv_path": dotenv,
+    }
+    assert config.resolve_settings(**base).api_prefix == "/v2"
+    resolved = config.resolve_settings(
+        **{**base, "environ": {"DYVINE_API_PREFIX": "/v3"}}
+    )
+    assert resolved.api_prefix == "/v3"

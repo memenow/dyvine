@@ -98,3 +98,26 @@ async def test_run_forever_loops_until_cancelled() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_run_forever_survives_failed_pass() -> None:
+    """One transient failure is logged and skipped, not fatal."""
+    repo = FakeOperationRepository(owner_id="a")
+    janitor = RepositoryJanitor(repo, retention_days=0, heartbeat_interval=0.01)
+    calls = 0
+    real_run_once = janitor.run_once
+
+    async def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient db error")
+        await real_run_once()
+
+    janitor.run_once = flaky  # type: ignore[method-assign]
+    task = asyncio.create_task(janitor.run_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2

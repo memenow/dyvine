@@ -24,10 +24,12 @@ Middleware:
     2. `request_middleware` assigns a UUID4 correlation ID per request
        (or accepts a UUID provided via `X-Request-ID`), measures
        duration, and exposes the ID via `X-Correlation-ID`.
-    3. `RateLimitMiddleware` enforces a per-replica token bucket keyed
-       on `X-API-Key` (else client IP); over-limit callers get the
-       standard 429 envelope with `Retry-After`. Probes, `/metrics`,
-       and `/` are exempt.
+    3. `RateLimitMiddleware` (registered first, so it runs closest to
+       the router) enforces a per-replica token bucket keyed on the
+       validated `X-API-Key` (else client IP, preferring the rightmost
+       `X-Forwarded-For` entry); over-limit callers get the standard
+       429 envelope with `Retry-After`. Probes, `/metrics` (both
+       spellings), and `/` are exempt.
     Exception handlers registered through `register_error_handlers`
     translate `DyvineError` subclasses and `HTTPException` into a
     single error envelope; they are not middleware.
@@ -252,8 +254,12 @@ app = FastAPI(
     Notes:
     - Asynchronous downloads return a persisted operation record;
       poll the matching `/operations/{id}` endpoint for progress.
-    - Application-level rate limiting is not enforced; rely on the
-      gateway / ingress fronting the deployment.
+    - Application-level rate limiting is enforced per replica by a
+      token bucket (`API_RATE_LIMIT_PER_SECOND` sustained,
+      `API_RATE_LIMIT_BURST` burst; 429 envelope with `Retry-After`);
+      N replicas admit roughly N times the configured rate, and no
+      edge rate limit exists yet (Envoy Gateway global limiting needs
+      a ratelimit backend).
     - Prometheus metrics are exposed at `/metrics`.
     """,
     version=settings.version,
@@ -274,6 +280,18 @@ app = FastAPI(
         "url": "https://www.apache.org/licenses/LICENSE-2.0.html",
     },
     terms_of_service="https://github.com/memenow/dyvine/blob/main/LICENSE",
+)
+
+
+# Per-replica token-bucket limiting, registered FIRST so it runs
+# closest to the router: Starlette's ``add_middleware`` prepends, so
+# the earlier-added middleware is the innermost, and 429 denials still
+# pass back out through correlation (ID header), request logging,
+# metrics, and CORS below.
+app.add_middleware(
+    RateLimitMiddleware,
+    requests_per_second=settings.api.rate_limit_per_second,
+    burst_size=settings.api.rate_limit_burst,
 )
 
 
@@ -430,16 +448,6 @@ async def request_middleware(request: Request, call_next: Any) -> Any:
     logger.clear_context()
 
     return response
-
-
-# Per-replica token-bucket limiting, nested INSIDE the correlation
-# middleware (Starlette runs later-added middleware closer to the
-# router) so 429 denials still carry a correlation ID.
-app.add_middleware(
-    RateLimitMiddleware,
-    requests_per_second=settings.api.rate_limit_per_second,
-    burst_size=settings.api.rate_limit_burst,
-)
 
 
 # Register error handlers
