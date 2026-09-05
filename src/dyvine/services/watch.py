@@ -468,12 +468,18 @@ class WatchService:
         """Spawn the watcher loop for a subscription if not already running.
 
         A no-op on CRUD-only replicas (``run_loops=False``): the row
-        persists, and the watcher replica adopts it on reconcile.
+        persists, and the watcher replica adopts it on reconcile. Also
+        a no-op while the supervisor budget forbids a restart (backoff
+        window or parked after repeated crashes): an idempotent create
+        retry must not silently re-arm a parked loop — only
+        delete-and-recreate resumes it.
         """
         if not self._run_loops:
             return
         existing = self._loops.get(record.subscription_id)
         if existing is not None and not existing.done():
+            return
+        if not self._restart_allowed(record.subscription_id, now=time.monotonic()):
             return
         task = spawn_or_fallback(
             self._task_registry,

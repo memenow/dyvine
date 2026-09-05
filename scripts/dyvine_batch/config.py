@@ -16,6 +16,9 @@ from pathlib import Path
 
 DEFAULT_API_URL = "http://localhost:8000"
 DEFAULT_API_PREFIX = "/api/v1"
+#: Default cap on poll rounds per job (serial) or per run (concurrent).
+#: At the default 5s interval this is about an hour.
+DEFAULT_MAX_POLL_ROUNDS = 720
 
 
 class SettingsError(ValueError):
@@ -33,6 +36,7 @@ class BatchSettings:
     max_concurrent: int
     poll_interval: float
     timeout: float
+    max_poll_rounds: int = DEFAULT_MAX_POLL_ROUNDS
 
 
 def load_dotenv(path: str | os.PathLike[str]) -> dict[str, str]:
@@ -63,6 +67,7 @@ def resolve_settings(
     max_concurrent: int,
     poll_interval: float,
     timeout: float,
+    max_poll_rounds: int | None = None,
     environ: Mapping[str, str] | None = None,
     dotenv_path: str | os.PathLike[str] = ".env",
 ) -> BatchSettings:
@@ -107,6 +112,20 @@ def resolve_settings(
     if not math.isfinite(timeout) or timeout <= 0:
         raise SettingsError("--timeout must be a positive number")
 
+    raw_rounds = (
+        max_poll_rounds
+        if max_poll_rounds is not None
+        else env.get("DYVINE_MAX_POLL_ROUNDS")
+    )
+    try:
+        rounds = DEFAULT_MAX_POLL_ROUNDS if raw_rounds is None else int(raw_rounds)
+    except (TypeError, ValueError):
+        raise SettingsError(
+            f"--max-poll-rounds must be an integer: {raw_rounds!r}"
+        ) from None
+    if rounds < 1:
+        raise SettingsError("--max-poll-rounds must be at least 1")
+
     return BatchSettings(
         api_url=url,
         api_key=key,
@@ -115,6 +134,7 @@ def resolve_settings(
         max_concurrent=max_concurrent,
         poll_interval=poll_interval,
         timeout=timeout,
+        max_poll_rounds=rounds,
     )
 
 

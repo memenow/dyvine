@@ -199,7 +199,12 @@ async def test_submit_download_maps_rejection_and_timeout() -> None:
 
 
 async def test_poll_job_maps_bulk_counters() -> None:
-    """Bulk status payloads map onto the job's counters."""
+    """Bulk status payloads map onto the job's counters.
+
+    The payload mirrors the real ``BulkDownloadResponse`` shape, which
+    carries no ``progress`` field: the fraction is derived from the
+    counters (9/10 here).
+    """
 
     def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -207,7 +212,6 @@ async def test_poll_job_maps_bulk_counters() -> None:
             json={
                 "status": "completed",
                 "message": "done",
-                "progress": 1.0,
                 "total_posts": 10,
                 "total_downloaded": 9,
                 "failed_count": 1,
@@ -220,7 +224,144 @@ async def test_poll_job_maps_bulk_counters() -> None:
         await client.poll_job(http, client.DyvineClient(_settings()), job)
     assert job.status == "completed"
     assert (job.total_downloaded, job.total_posts, job.failed_count) == (9, 10, 1)
+    assert job.progress == pytest.approx(0.9)
     assert job.completed_at is not None
+
+
+async def test_poll_job_zero_total_posts_progress() -> None:
+    """Zero totals never divide by zero; progress stays 0."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "status": "running",
+                "message": "working",
+                "total_posts": 0,
+                "total_downloaded": 0,
+                "failed_count": 0,
+            },
+        )
+
+    job = client.DownloadJob(user_id="u1", operation_id="op-1", status="submitted")
+    async with httpx.AsyncClient(transport=_transport(_handler)) as http:
+        await client.poll_job(http, client.DyvineClient(_settings()), job)
+    assert job.progress == 0.0
+
+
+async def test_submit_download_non_dict_payload_fails() -> None:
+    """A 202 with a non-object payload becomes a failed job, not a crash."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json=["op-1"])
+
+    async with httpx.AsyncClient(transport=_transport(_handler)) as http:
+        job = await client.submit_download(http, client.DyvineClient(_settings()), "u1")
+    assert job.status == "failed"
+    assert "operation_id" in job.message or "payload" in job.message
+
+
+async def test_submit_download_missing_operation_id_fails() -> None:
+    """A 202 without an operation id is un-pollable, so it fails fast."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"message": "scheduled"})
+
+    async with httpx.AsyncClient(transport=_transport(_handler)) as http:
+        job = await client.submit_download(http, client.DyvineClient(_settings()), "u1")
+    assert job.status == "failed"
+    assert "operation_id" in job.message
+
+
+async def test_run_serial_times_out_unfinished_job(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A job that never turns terminal fails after the round cap."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json={"operation_id": "op-u1"})
+        return httpx.Response(
+            200,
+            json={
+                "status": "running",
+                "message": "working",
+                "total_posts": 2,
+                "total_downloaded": 1,
+                "failed_count": 0,
+            },
+        )
+
+    def _factory() -> Any:
+        return httpx.AsyncClient(transport=_transport(_handler))
+
+    jobs = await runners.run_serial(
+        _settings(max_poll_rounds=2), ["u1"], client_factory=_factory
+    )
+    assert [job.status for job in jobs] == ["failed"]
+    assert "轮询超时" in jobs[0].message
+
+
+async def test_run_concurrent_times_out_unfinished_jobs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Concurrent leftovers fail after the round cap instead of looping."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            user = request.url.path.split("/")[-2]
+            return httpx.Response(202, json={"operation_id": f"op-{user}"})
+        return httpx.Response(
+            200,
+            json={
+                "status": "running",
+                "message": "working",
+                "total_posts": 2,
+                "total_downloaded": 1,
+                "failed_count": 0,
+            },
+        )
+
+    def _factory() -> Any:
+        return httpx.AsyncClient(transport=_transport(_handler))
+
+    jobs = await runners.run_concurrent(
+        _settings(max_poll_rounds=2), ["u1", "u2"], client_factory=_factory
+    )
+    assert [job.status for job in jobs] == ["failed", "failed"]
+    out, _ = capsys.readouterr()
+    assert "TIMEOUT" in out
+
+
+def test_resolve_settings_max_poll_rounds() -> None:
+    """Flag beats env, env beats the 720 default; garbage fails fast."""
+    kwargs: dict[str, Any] = {
+        "api_url": None,
+        "api_key": "k",
+        "api_prefix": None,
+        "include_likes": False,
+        "max_concurrent": 3,
+        "poll_interval": 5.0,
+        "timeout": 30.0,
+        "environ": {},
+    }
+    assert (
+        config.resolve_settings(**kwargs).max_poll_rounds
+        == config.DEFAULT_MAX_POLL_ROUNDS
+    )
+    env_kwargs = {**kwargs, "environ": {"DYVINE_MAX_POLL_ROUNDS": "10"}}
+    assert config.resolve_settings(**env_kwargs).max_poll_rounds == 10
+    flag_kwargs = {
+        **kwargs,
+        "max_poll_rounds": 3,
+        "environ": {"DYVINE_MAX_POLL_ROUNDS": "10"},
+    }
+    assert config.resolve_settings(**flag_kwargs).max_poll_rounds == 3
+    with pytest.raises(config.SettingsError, match="max-poll-rounds"):
+        config.resolve_settings(**{**kwargs, "max_poll_rounds": 0})
+    bad_kwargs = {**kwargs, "environ": {"DYVINE_MAX_POLL_ROUNDS": "lots"}}
+    with pytest.raises(config.SettingsError, match="max-poll-rounds"):
+        config.resolve_settings(**bad_kwargs)
 
 
 async def test_poll_job_maps_likes_counters() -> None:

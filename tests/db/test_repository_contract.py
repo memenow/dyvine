@@ -241,6 +241,22 @@ async def test_update_operation_merges_fields(
     assert updated.created_at == created.created_at
 
 
+async def test_update_operation_none_metadata_clears(
+    backend: BackendContext,
+) -> None:
+    """An explicit ``metadata=None`` clears to ``{}``, not ``TypeError``."""
+    repo = backend.make_ops("owner-a")
+    created = await repo.create_operation(
+        operation_type="t",
+        subject_id="user-4b",
+        status="pending",
+        message="queued",
+        metadata={"cursor": "a"},
+    )
+    updated = await repo.update_operation(created.operation_id, metadata=None)
+    assert updated.metadata == {}
+
+
 async def test_update_operation_ignores_unknown_fields(
     backend: BackendContext,
 ) -> None:
@@ -313,6 +329,73 @@ async def test_sweep_skips_fresh_and_terminal_rows(
     assert swept == 0
     assert (await owner_a.get_operation(fresh.operation_id)).status == "running"
     assert (await owner_a.get_operation(terminal.operation_id)).status == "completed"
+
+
+async def _null_heartbeat(
+    backend: BackendContext,
+    request: pytest.FixtureRequest,
+    operation_id: str,
+) -> None:
+    """Wipe a row's heartbeat the way legacy pre-liveness rows look.
+
+    Fake leg drops the sidecar entry; Postgres leg NULLs the column
+    over its own short-lived session.
+    """
+    if backend.name == "fake":
+        owner = backend.make_ops("owner-a")
+        owner._heartbeats.pop(operation_id, None)  # type: ignore[attr-defined]
+        return
+    url: str = request.getfixturevalue("postgres_url")
+    factory = DatabaseSessionFactory(url, pool_size=1)
+    try:
+        async with factory.session() as session:
+            async with session.begin():
+                await session.execute(
+                    text(
+                        "UPDATE operations SET heartbeat_at = NULL "
+                        "WHERE operation_id = :id"
+                    ),
+                    {"id": operation_id},
+                )
+    finally:
+        await factory.aclose()
+
+
+async def test_sweep_fails_null_heartbeat_with_old_creation(
+    backend: BackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """NULL-heartbeat rows fall back to ``created_at`` and stay sweepable."""
+    owner_a = backend.make_ops("owner-a")
+    owner_b = backend.make_ops("owner-b")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        created = await owner_a.create_operation(
+            operation_type="t",
+            subject_id="null-beat",
+            status="running",
+            message="live",
+        )
+    await _null_heartbeat(backend, request, created.operation_id)
+    assert await owner_b.sweep_orphans(stale_after_seconds=60.0) == 1
+    assert (await owner_a.get_operation(created.operation_id)).status == "failed"
+
+
+async def test_sweep_spares_null_heartbeat_with_fresh_creation(
+    backend: BackendContext, request: pytest.FixtureRequest
+) -> None:
+    """A freshly created NULL-heartbeat row is not an orphan yet."""
+    owner_a = backend.make_ops("owner-a")
+    owner_b = backend.make_ops("owner-b")
+    created = await owner_a.create_operation(
+        operation_type="t",
+        subject_id="null-beat-fresh",
+        status="running",
+        message="live",
+    )
+    await _null_heartbeat(backend, request, created.operation_id)
+    assert await owner_b.sweep_orphans(stale_after_seconds=60.0) == 0
+    assert (await owner_a.get_operation(created.operation_id)).status == "running"
 
 
 async def test_sweep_never_touches_own_rows(
@@ -552,6 +635,19 @@ async def test_update_subscription_merges_fields(
     assert updated.user_id == "user-7"
     assert updated.live_poll_seconds == 60
     assert updated.created_at == created.created_at
+
+
+async def test_update_subscription_none_checkpoint_clears(
+    backend: BackendContext,
+) -> None:
+    """An explicit ``checkpoint=None`` clears to ``{}``, not ``TypeError``."""
+    repo = backend.make_watch()
+    created = await repo.create_subscription(**_subscription_kwargs("user-7b"))
+    await repo.update_subscription(
+        created.subscription_id, checkpoint={"newest_aweme_id": "9"}
+    )
+    updated = await repo.update_subscription(created.subscription_id, checkpoint=None)
+    assert updated.checkpoint == {}
 
 
 async def test_update_subscription_ignores_unknown_fields(

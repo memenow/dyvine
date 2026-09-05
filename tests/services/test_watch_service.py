@@ -409,6 +409,43 @@ async def test_crashed_loop_stays_registered_with_root_cause(
         await service.stop_all()
 
 
+async def test_idempotent_create_does_not_rearm_parked_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry POST for a parked subscription stays down (200, no loop)."""
+    import time
+
+    from dyvine.services import watch as watch_module
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cap = watch_module._MAX_CONSECUTIVE_CRASHES
+    try:
+        record, created = await service.create_subscription(
+            user_id="user01", backfill_on_create=True
+        )
+        assert created is True
+        await service.reconcile_loops()
+        for _ in range(cap + 1):
+            await _plant_crash(service, record.subscription_id)
+            await service.reconcile_loops()
+            clock[0] += 400.0
+            await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] > cap
+        assert service.active_count == 0
+        # Idempotent retry returns the row but must not re-arm the loop.
+        same, created = await service.create_subscription(user_id="user01")
+        assert created is False
+        assert same.subscription_id == record.subscription_id
+        assert service.active_count == 0
+        assert record.subscription_id not in service._loops
+    finally:
+        await service.stop_all()
+
+
 async def test_reconcile_resets_budget_after_healthy_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

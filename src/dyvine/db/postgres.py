@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, desc, func, select, text, update
+from sqlalchemy import and_, delete, desc, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from ..core.exceptions import (
@@ -189,7 +189,8 @@ class PostgresOperationRepository:
         """Update allowed fields, refresh liveness, return the new state.
 
         Stored metadata is preserved when the caller passes no explicit
-        ``metadata`` value; unknown-only field sets verify existence and
+        ``metadata`` value (an explicit ``None`` clears it to ``{}``
+        instead of raising); unknown-only field sets verify existence and
         return the row unchanged. Every update refreshes ``heartbeat_at``
         (but not ``updated_at`` semantics beyond the write itself) so
         active tasks are never mistaken for orphans.
@@ -209,7 +210,7 @@ class PostgresOperationRepository:
                         setattr(
                             row,
                             "metadata_" if key == "metadata" else key,
-                            dict(value) if key == "metadata" else value,
+                            dict(value or {}) if key == "metadata" else value,
                         )
                     stamp = _now_iso()
                     row.updated_at = stamp
@@ -221,7 +222,10 @@ class PostgresOperationRepository:
 
         A row is orphaned when it is still ``pending``/``running``, its
         heartbeat predates the cutoff, and its owner is either unknown
-        or a different replica. Returns the number of rows failed.
+        or a different replica. Rows with a NULL heartbeat (legacy rows
+        predating the liveness columns) fall back to ``created_at`` so
+        they stay sweepable instead of lingering forever. Returns the
+        number of rows failed.
         """
         cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
         cutoff_iso = cutoff.isoformat()
@@ -229,7 +233,15 @@ class PostgresOperationRepository:
         statement = (
             update(OperationRow)
             .where(OperationRow.status.in_(ACTIVE_STATUSES))
-            .where(OperationRow.heartbeat_at < cutoff_iso)
+            .where(
+                or_(
+                    OperationRow.heartbeat_at < cutoff_iso,
+                    and_(
+                        OperationRow.heartbeat_at.is_(None),
+                        OperationRow.created_at < cutoff_iso,
+                    ),
+                )
+            )
             .where(
                 (OperationRow.owner_id.is_(None))
                 | (OperationRow.owner_id != self._owner_id)
@@ -386,7 +398,7 @@ class PostgresWatchRepository:
                         setattr(
                             row,
                             key,
-                            dict(value) if key == "checkpoint" else value,
+                            dict(value or {}) if key == "checkpoint" else value,
                         )
                     row.updated_at = _now_iso()
         return _watch_to_record(row)

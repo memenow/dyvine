@@ -202,7 +202,7 @@ class FakeOperationRepository:
             "updated_at": current.updated_at,
         }
         for key, value in requested.items():
-            values[key] = dict(value) if key == "metadata" else value
+            values[key] = dict(value or {}) if key == "metadata" else value
         stamp = _now_iso()
         values["updated_at"] = stamp
         updated = OperationRecord(**values)
@@ -211,18 +211,22 @@ class FakeOperationRepository:
         return updated
 
     async def sweep_orphans(self, *, stale_after_seconds: float) -> int:
-        """Fail active rows whose owner stopped heartbeating."""
+        """Fail active rows whose owner stopped heartbeating.
+
+        Mirrors the SQL NULL semantics: a missing heartbeat falls back
+        to ``created_at`` so legacy rows stay sweepable.
+        """
         cutoff = (
             datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
         ).isoformat()
         swept = 0
         for key, row in list(self._rows.items()):
             heartbeat = self._heartbeats.get(key)
+            alive = heartbeat if heartbeat is not None else row.created_at
             owner = self._owners.get(key)
             if (
                 row.status in ACTIVE_STATUSES
-                and heartbeat is not None
-                and heartbeat < cutoff
+                and alive < cutoff
                 and owner != self._owner_id
             ):
                 await self.update_operation(
@@ -359,7 +363,7 @@ class FakeWatchRepository:
             "updated_at": current.updated_at,
         }
         for key, value in requested.items():
-            values[key] = dict(value) if key == "checkpoint" else value
+            values[key] = dict(value or {}) if key == "checkpoint" else value
         values["updated_at"] = _now_iso()
         updated = WatchSubscriptionRecord(**values)
         self._rows[subscription_id] = updated

@@ -78,7 +78,7 @@ async def run_concurrent(
         print(f"\n[阶段 2/2] 轮询任务进度 (每 {settings.poll_interval:.0f}s)...")
         pending = {job.operation_id: job for job in submitted if job.operation_id}
         poll_round = 0
-        while pending:
+        while pending and poll_round < settings.max_poll_rounds:
             poll_round += 1
             await asyncio.sleep(settings.poll_interval)
             results = await asyncio.gather(
@@ -110,6 +110,10 @@ async def run_concurrent(
                         f"({job.progress * 100:.1f}%) {job.message}"
                     )
                 print("  ----------------------\n")
+        for job in pending.values():
+            job.status = "failed"
+            job.message = f"轮询超时: {settings.max_poll_rounds} 轮内未完成"
+            print(f"  [TIMEOUT] 用户 {job.user_id} {job.message}")
 
     _print_summary(list(jobs))
     return list(jobs)
@@ -138,7 +142,7 @@ async def run_serial(
                     jobs.append(job)
                     continue
                 print(f"  已提交, operation_id: {job.operation_id}")
-                while True:
+                for _ in range(settings.max_poll_rounds):
                     await asyncio.sleep(settings.poll_interval)
                     await poll_job(http, client, job)
                     print(
@@ -149,6 +153,10 @@ async def run_serial(
                     )
                     if job.status in TERMINAL_STATUSES:
                         break
+                else:
+                    job.status = "failed"
+                    job.message = f"轮询超时: {settings.max_poll_rounds} 轮内未完成"
+                    print(f"  超时: {job.message}")
                 jobs.append(job)
             except Exception as exc:
                 print(f"  异常: {exc}")

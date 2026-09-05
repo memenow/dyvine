@@ -75,6 +75,8 @@ async def submit_download(
             timeout=client.settings.timeout,
         )
         data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected payload: {type(data).__name__}")
     except (httpx.TimeoutException, TimeoutError):
         return DownloadJob(
             user_id=user_id,
@@ -90,9 +92,17 @@ async def submit_download(
             error_details=str(exc),
         )
     if response.status_code == 202:
+        operation_id = data.get("operation_id")
+        if not operation_id:
+            return DownloadJob(
+                user_id=user_id,
+                status="failed",
+                message="提交响应缺少 operation_id",
+                error_details=str(data),
+            )
         return DownloadJob(
             user_id=user_id,
-            operation_id=data.get("operation_id"),
+            operation_id=operation_id,
             status="submitted",
             message=data.get("message", "Download scheduled"),
         )
@@ -135,6 +145,8 @@ async def poll_job(
         return job
     try:
         data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected payload: {type(data).__name__}")
     except Exception as exc:
         # Malformed payload: annotate and let the next poll round
         # retry instead of killing the whole batch run.
@@ -153,9 +165,13 @@ async def poll_job(
         job.failed_count = 0
         job.error_details = data.get("error")
     else:
-        job.progress = data.get("progress", 0.0)
-        job.total_posts = data.get("total_posts", 0)
-        job.total_downloaded = data.get("total_downloaded", 0)
+        # ``BulkDownloadResponse`` carries no ``progress`` field, so the
+        # fraction is derived from the counters it does emit.
+        total = data.get("total_posts", 0) or 0
+        done = data.get("total_downloaded", 0) or 0
+        job.progress = (done / total) if total > 0 else 0.0
+        job.total_posts = total
+        job.total_downloaded = done
         job.failed_count = data.get("failed_count", 0)
         job.error_details = data.get("error_details")
     if job.status in TERMINAL_STATUSES:

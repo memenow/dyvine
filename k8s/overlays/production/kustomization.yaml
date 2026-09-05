@@ -24,7 +24,7 @@ patchesJson6902:
 # result to ``kubectl apply`` (nothing in the checkout is edited)::
 #
 #   kubectl kustomize k8s/overlays/production \
-#     | sed -e 's/newTag: main-latest/newTag: <tag>/' \
+#     | sed -e 's|/dyvine:main-latest|/dyvine:<tag>|g' \
 #           -e "s/INGRESS_HOST/<public host>/g" \
 #           -e "s|DB_CIDR|<postgres CIDR>|g" \
 #     | kubectl apply -f -

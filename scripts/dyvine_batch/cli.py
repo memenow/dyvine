@@ -87,6 +87,15 @@ def build_parser() -> argparse.ArgumentParser:
             default=30.0,
             help="单次请求超时秒数 (默认: 30)",
         )
+        sub.add_argument(
+            "--max-poll-rounds",
+            type=int,
+            default=None,
+            help=(
+                "轮询上限轮数，超出后该任务记为失败 "
+                "(默认: DYVINE_MAX_POLL_ROUNDS 或 720)"
+            ),
+        )
     return parser
 
 
@@ -109,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             max_concurrent=args.max_concurrent,
             poll_interval=args.poll_interval,
             timeout=args.timeout,
+            max_poll_rounds=args.max_poll_rounds,
         )
         user_ids = read_user_ids(args.input_file)
     except (OSError, UnicodeDecodeError) as exc:

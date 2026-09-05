@@ -185,12 +185,17 @@ uv run python -m scripts.dyvine_batch serial users.txt --api-key KEY
 ```
 
 Configuration precedence per knob is CLI flag, then `DYVINE_*`
-environment (`DYVINE_API_KEY`, `DYVINE_API_URL`, `DYVINE_API_PREFIX`),
-then the repo `.env` file (`SECURITY_API_KEY`, `API_HOST`/`API_PORT`),
-then the default (`http://localhost:8000`, prefix `/api/v1`). Useful
-flags: `--include-likes` (download liked posts too),
-`--max-concurrent`, `--poll-interval`, `--timeout`. Exit code is `0`
-unless configuration, input, or the run itself fails.
+environment (`DYVINE_API_KEY`, `DYVINE_API_URL`, `DYVINE_API_PREFIX`,
+`DYVINE_MAX_POLL_ROUNDS`), then the repo `.env` file
+(`SECURITY_API_KEY`, `API_HOST`/`API_PORT`, `API_PREFIX`), then the
+default (`http://localhost:8000`, prefix `/api/v1`, 720 poll rounds).
+Useful flags: `--include-likes` (download liked posts too),
+`--max-concurrent`, `--poll-interval`, `--timeout`,
+`--max-poll-rounds` (a job that never turns terminal fails after this
+many polls instead of looping forever). Exit codes: `0` on success
+(individual download failures are reported, not errors), `1` on
+configuration/input errors, `2` on CLI usage errors or unexpected
+crashes, `130` on keyboard interrupt.
 
 ## Deployment
 
@@ -218,7 +223,7 @@ kubectl wait --for=condition=complete job/dyvine-migrate \
   -n dyvine --timeout=660s
 
 kubectl kustomize k8s/overlays/production \
-  | sed -e 's/newTag: main-latest/newTag: <tag>/' \
+  | sed -e 's|/dyvine:main-latest|/dyvine:<tag>|g' \
         -e "s/INGRESS_HOST/<public host>/g" \
         -e "s|DB_CIDR|<postgres CIDR>|g" \
   | kubectl apply -f -

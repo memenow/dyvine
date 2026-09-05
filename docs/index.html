@@ -109,6 +109,7 @@
         <li><a href="#api-reference">API Reference</a></li>
         <li><a href="#watch-mode">Watch Mode</a></li>
         <li><a href="#operations">Operations</a></li>
+        <li><a href="#batch-cli">Batch CLI</a></li>
         <li><a href="#deployment">Deployment</a></li>
         <li><a href="#development">Development</a></li>
         <li><a href="#security-notes">Security Notes</a></li>
@@ -499,6 +500,38 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
       </table>
     </section>
 
+    <section id="batch-cli">
+      <h2>Batch CLI</h2>
+      <p>
+        <code>scripts/dyvine_batch/</code> submits downloads for many users from a
+        text file (one user ID per line, <code>#</code> comments and blanks skipped)
+        and polls them to a summary report:
+      </p>
+      <pre><code># Concurrent: submit all users, then poll together (recommended)
+uv run python -m scripts.dyvine_batch concurrent users.txt --api-key KEY
+
+# Serial: one user at a time
+uv run python -m scripts.dyvine_batch serial users.txt --api-key KEY</code></pre>
+      <p>
+        Configuration precedence per knob is CLI flag, then <code>DYVINE_*</code>
+        environment (<code>DYVINE_API_KEY</code>, <code>DYVINE_API_URL</code>,
+        <code>DYVINE_API_PREFIX</code>, <code>DYVINE_MAX_POLL_ROUNDS</code>), then the
+        repo <code>.env</code> file (<code>SECURITY_API_KEY</code>,
+        <code>API_HOST</code>/<code>API_PORT</code>, <code>API_PREFIX</code>), then the
+        default (<code>http://localhost:8000</code>, prefix <code>/api/v1</code>, 720
+        poll rounds). Useful flags: <code>--include-likes</code>,
+        <code>--max-concurrent</code>, <code>--poll-interval</code>,
+        <code>--timeout</code>, <code>--max-poll-rounds</code> (a job that never turns
+        terminal fails after this many polls instead of looping forever).
+      </p>
+      <p>
+        Exit codes: <code>0</code> on success (individual download failures are
+        reported, not errors), <code>1</code> on configuration/input errors,
+        <code>2</code> on CLI usage errors or unexpected crashes, <code>130</code> on
+        keyboard interrupt.
+      </p>
+    </section>
+
     <section id="deployment">
       <h2>Deployment</h2>
       <h3>Docker</h3>
@@ -525,7 +558,7 @@ kubectl wait --for=condition=complete job/dyvine-migrate \
   -n dyvine --timeout=660s
 
 kubectl kustomize k8s/overlays/production \
-  | sed -e 's/newTag: main-latest/newTag: &lt;tag&gt;/' \
+  | sed -e 's|/dyvine:main-latest|/dyvine:&lt;tag&gt;|g' \
         -e "s/INGRESS_HOST/&lt;public host&gt;/g" \
         -e "s|DB_CIDR|&lt;postgres CIDR&gt;|g" \
   | kubectl apply -f -</code></pre>
