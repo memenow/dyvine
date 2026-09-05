@@ -16,6 +16,7 @@ import sys
 import threading as _threading
 import traceback as _traceback
 import warnings as _warnings
+import weakref as _weakref
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -43,12 +44,37 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-# TEMPORARY CI DIAGNOSTIC (revert before merge): record every event-loop
-# creation stack; at session finish, print the stacks of loops that were
-# never closed. Hunts the intermittent teardown-time "unclosed event loop
-# + socketpair" PytestUnraisableExceptionWarning that fails CI legs after
-# all tests pass. Prints nothing when there is no leak.
-_probe_stacks: dict[int, tuple[str, str]] = {}
+# TEMPORARY CI DIAGNOSTIC (revert before merge): identify the event loop
+# that survives the session unclosed (with its self-pipe sockets) and fails
+# CI legs at teardown with PytestUnraisableExceptionWarning after all tests
+# pass. Records per-loop creation/run/ping stacks in memory and prints only
+# loops still alive and unclosed at session finish. Prints nothing locally.
+_probe_loops: dict[int, dict] = {}
+
+
+def _probe_record(loop, kind: str) -> None:  # type: ignore[no-untyped-def]
+    entry = _probe_loops.get(id(loop))
+    if entry is None or entry["ref"]() is not loop:
+        return
+    slot = entry[kind]
+    if len(slot) < 2:
+        slot.append("".join(_traceback.format_stack()))
+
+
+def _probe_wrap(loop, name: str) -> None:  # type: ignore[no-untyped-def]
+    orig = getattr(loop, name)
+    kind = "runs" if name in ("run_forever", "run_until_complete") else "pings"
+
+    def _wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
+        _probe_record(loop, kind)
+        return orig(*args, **kwargs)
+
+    try:
+        setattr(loop, name, _wrapped)
+    except (AttributeError, TypeError):
+        pass
+
+
 with _warnings.catch_warnings():
     _warnings.simplefilter("ignore", DeprecationWarning)
     _real_policy = _asyncio.get_event_loop_policy()
@@ -57,10 +83,20 @@ with _warnings.catch_warnings():
 class _ProbePolicy(_real_policy.__class__):  # type: ignore[misc]
     def new_event_loop(self):  # type: ignore[no-untyped-def]
         loop = super().new_event_loop()
-        _probe_stacks[id(loop)] = (
-            _threading.current_thread().name,
-            "".join(_traceback.format_stack()),
-        )
+        _probe_loops[id(loop)] = {
+            "thread": _threading.current_thread().name,
+            "created": "".join(_traceback.format_stack()),
+            "ref": _weakref.ref(loop),
+            "runs": [],
+            "pings": [],
+        }
+        for name in (
+            "run_forever",
+            "run_until_complete",
+            "call_soon_threadsafe",
+            "add_signal_handler",
+        ):
+            _probe_wrap(loop, name)
         return loop
 
 
@@ -72,35 +108,39 @@ with _warnings.catch_warnings():
 def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untyped-def]
     """TEMPORARY CI DIAGNOSTIC (revert before merge)."""
     _gc.collect()
-    for lid, (thread, stack) in _probe_stacks.items():
-        loop = next(
-            (
-                o
-                for o in _gc.get_objects()
-                if id(o) == lid and isinstance(o, _asyncio.AbstractEventLoop)
-            ),
+    live = [
+        o
+        for o in _gc.get_objects()
+        if isinstance(o, _asyncio.AbstractEventLoop) and not o.is_closed()
+    ]
+    print(f"\nPROBE-UNCLOSED-COUNT={len(live)}")
+    for loop in live:
+        owners: list[str] = []
+        for ref in _gc.get_referrers(loop):
+            if isinstance(ref, dict):
+                keys = [k for k, v in list(ref.items())[:50] if v is loop]
+                owners.append(f"dict{keys}")
+            else:
+                owners.append(type(ref).__name__)
+        ready = [repr(getattr(h, "_callback", None)) for h in list(loop._ready)][:6]
+        print(
+            f"\nPROBE-LEAKED-LOOP loop={loop!r} "
+            f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
+        )
+        print(f"PROBE-READY={ready}")
+        match = next(
+            (e for e in _probe_loops.values() if e["ref"]() is loop),
             None,
         )
-        if loop is not None and not loop.is_closed():
-            owners: list[str] = []
-            for ref in _gc.get_referrers(loop):
-                if isinstance(ref, dict):
-                    keys = [k for k, v in list(ref.items())[:50] if v is loop]
-                    owners.append(f"dict{keys}")
-                else:
-                    owners.append(type(ref).__name__)
-            ready = [repr(getattr(h, "_callback", None)) for h in list(loop._ready)][:6]
-            scheduled = [
-                repr(getattr(h, "_callback", None)) for h in list(loop._scheduled)
-            ][:6]
-            print(
-                f"\nPROBE-LEAKED-LOOP thread={thread} loop={loop!r} "
-                f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
-            )
-            print(f"PROBE-READY={ready}")
-            print(f"PROBE-SCHEDULED={scheduled}")
-            print("PROBE-STACK-HEAD:" + stack[:6500])
-            print("PROBE-STACK-TAIL:" + stack[-1500:])
+        if match is None:
+            print("PROBE-ORIGIN=unknown (created before conftest import?)")
+            continue
+        print(f"PROBE-CREATED-THREAD={match['thread']}")
+        print("PROBE-CREATED:" + match["created"][:6500])
+        for i, stack in enumerate(match["runs"]):
+            print(f"PROBE-RUN-{i}:" + stack[-2500:])
+        for i, stack in enumerate(match["pings"]):
+            print(f"PROBE-PING-{i}:" + stack[-2500:])
 
 
 # ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
