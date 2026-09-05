@@ -171,9 +171,16 @@ async def run_serial(
                 jobs.append(job)
             except Exception as exc:
                 print(f"  异常: {exc}")
-                jobs.append(
-                    DownloadJob(user_id=user_id, status="failed", message=str(exc))
-                )
+                if job.operation_id:
+                    # Already submitted server-side: keep the ID so the
+                    # operation stays trackable, like concurrent mode.
+                    job.status = "failed"
+                    job.message = str(exc)
+                    jobs.append(job)
+                else:
+                    jobs.append(
+                        DownloadJob(user_id=user_id, status="failed", message=str(exc))
+                    )
 
     print(f"\n{'=' * 50}")
     print("汇总报告")

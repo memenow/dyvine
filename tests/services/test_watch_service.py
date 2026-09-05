@@ -446,6 +446,48 @@ async def test_idempotent_create_does_not_rearm_parked_loop(
         await service.stop_all()
 
 
+async def test_disable_clears_parked_budget_for_reenable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disable→re-enable revives a parked loop from a clean slate."""
+    import time
+
+    from dyvine.services import watch as watch_module
+
+    service, _, _ = _make_service(tmp_path)
+    service._do_live_check = AsyncMock()  # type: ignore[method-assign]
+    service._do_post_check = AsyncMock()  # type: ignore[method-assign]
+    clock = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    cap = watch_module._MAX_CONSECUTIVE_CRASHES
+    try:
+        record = await service.watch_store.create_subscription(
+            user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
+        )
+        await service.reconcile_loops()
+        for _ in range(cap + 1):
+            await _plant_crash(service, record.subscription_id)
+            await service.reconcile_loops()
+            clock[0] += 400.0
+            await service.reconcile_loops()
+        assert service._crash_counts[record.subscription_id] > cap
+        # Disable while parked (no live task to cancel).
+        await service.watch_store.update_subscription(
+            record.subscription_id, enabled=False
+        )
+        await service.reconcile_loops()
+        assert record.subscription_id not in service._crash_counts
+        # Re-enable restarts the loop instead of inheriting the park.
+        await service.watch_store.update_subscription(
+            record.subscription_id, enabled=True
+        )
+        started, _ = await service.reconcile_loops()
+        assert started == 1
+        assert service.active_count == 1
+    finally:
+        await service.stop_all()
+
+
 async def test_reconcile_resets_budget_after_healthy_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

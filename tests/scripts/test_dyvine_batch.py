@@ -57,6 +57,63 @@ def test_load_dotenv_parses_pairs(tmp_path: Path) -> None:
     }
 
 
+def test_load_dotenv_strips_export_prefix(tmp_path: Path) -> None:
+    """``export KEY=val`` resolves like server-side python-dotenv."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "export SECURITY_API_KEY=secret\n  export API_HOST = example.com\n",
+        encoding="utf-8",
+    )
+    assert config.load_dotenv(dotenv) == {
+        "SECURITY_API_KEY": "secret",
+        "API_HOST": "example.com",
+    }
+
+
+def test_resolve_settings_empty_port_falls_back(tmp_path: Path) -> None:
+    """An empty ``API_PORT=`` behaves like a missing one, not ``host:``."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "SECURITY_API_KEY=k\nAPI_HOST=example.com\nAPI_PORT=\n",
+        encoding="utf-8",
+    )
+    resolved = config.resolve_settings(
+        api_url=None,
+        api_key=None,
+        api_prefix=None,
+        include_likes=False,
+        max_concurrent=3,
+        poll_interval=5.0,
+        timeout=30.0,
+        environ={},
+        dotenv_path=dotenv,
+    )
+    assert resolved.api_url == "http://example.com:8000"
+
+
+async def test_run_serial_keeps_operation_id_on_poll_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mid-poll blow-up fails the in-flight job, keeping its ID."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(202, json={"operation_id": "op-u9"})
+
+    async def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("poll blew up")
+
+    def _factory() -> Any:
+        return httpx.AsyncClient(transport=_transport(_handler))
+
+    monkeypatch.setattr(runners, "poll_job", _boom)
+    jobs = await runners.run_serial(
+        _settings(max_poll_rounds=2), ["u9"], client_factory=_factory
+    )
+    assert [job.status for job in jobs] == ["failed"]
+    assert jobs[0].operation_id == "op-u9"
+    assert "poll blew up" in jobs[0].message
+
+
 def test_resolve_settings_precedence(tmp_path: Path) -> None:
     """Flags beat env, env beats .env, .env beats defaults."""
     dotenv = tmp_path / ".env"

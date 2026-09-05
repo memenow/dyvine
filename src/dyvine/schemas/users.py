@@ -22,14 +22,29 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
 from .operations import OperationResponse
 
+_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]{6,128}$"
+
 
 class UserDownloadRequest(BaseModel):
-    """Schema for user download request."""
+    """Schema for user download request.
 
-    user_id: str = Field(..., description="Douyin user ID")
+    Mirrors the ``download_user_content`` Query contract (user-ID
+    alphabet, positive ``max_items``) so SDK-side validation agrees
+    with what the router enforces.
+    """
+
+    user_id: str = Field(
+        ...,
+        pattern=_USER_ID_PATTERN,
+        description=(
+            "Douyin user ID (sec_user_id). Restricted to the alphabet "
+            "Douyin actually emits to prevent injection into generated "
+            "upstream URLs."
+        ),
+    )
     include_posts: bool = Field(True, description="Whether to include user posts")
     include_likes: bool = Field(False, description="Whether to include liked posts")
-    max_items: int | None = Field(None, description="Maximum items to download")
+    max_items: int | None = Field(None, gt=0, description="Maximum items to download")
     model_config = ConfigDict()
 
 

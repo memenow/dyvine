@@ -321,6 +321,20 @@ class WatchService:
                 # Survived a full reconcile interval: healthy again.
                 self._crash_counts.pop(subscription_id, None)
                 self._last_crash_monotonic.pop(subscription_id, None)
+        for subscription_id, record in records.items():
+            if record.enabled or subscription_id in self._loops:
+                continue
+            # Disabled with no live task: a parked/backing-off loop was
+            # already reaped, so the loop above never visits it — yet
+            # its crash budget survives. Clear unconditionally so
+            # disable→re-enable starts from a clean slate instead of
+            # silently inheriting a stale park.
+            if self._crash_counts.pop(subscription_id, None) is not None:
+                self._last_crash_monotonic.pop(subscription_id, None)
+                logger.info(
+                    "watch crash budget cleared on disable",
+                    extra={"subscription_id": subscription_id},
+                )
         started = 0
         for subscription_id, record in records.items():
             if not record.enabled:

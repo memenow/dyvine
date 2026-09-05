@@ -14,16 +14,30 @@ from dyvine.schemas.users import (
 
 def test_user_download_request_required_user_id() -> None:
     """Verify user download request required user ID."""
-    req = UserDownloadRequest(user_id="u123")
-    assert req.user_id == "u123"
+    req = UserDownloadRequest(user_id="user_01")
+    assert req.user_id == "user_01"
 
 
 def test_user_download_request_defaults() -> None:
     """Verify user download request defaults."""
-    req = UserDownloadRequest(user_id="u")
+    req = UserDownloadRequest(user_id="user_01")
     assert req.include_posts is True
     assert req.include_likes is False
     assert req.max_items is None
+
+
+def test_user_download_request_rejects_short_user_id() -> None:
+    """The ID alphabet mirrors the router Query contract (6-128)."""
+    with pytest.raises(ValidationError):
+        UserDownloadRequest(user_id="u")
+
+
+def test_user_download_request_rejects_non_positive_max_items() -> None:
+    """``max_items`` mirrors the router's ``gt=0`` Query contract."""
+    with pytest.raises(ValidationError):
+        UserDownloadRequest(user_id="user_01", max_items=0)
+    with pytest.raises(ValidationError):
+        UserDownloadRequest(user_id="user_01", max_items=-3)
 
 
 def test_user_download_request_missing_user_id_raises() -> None:

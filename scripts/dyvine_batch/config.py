@@ -43,7 +43,9 @@ def load_dotenv(path: str | os.PathLike[str]) -> dict[str, str]:
     """Parse a ``.env`` file into a dict; missing files yield ``{}``.
 
     Only ``KEY=value`` lines are honoured; blanks, comments, and
-    valueless lines are skipped. Surrounding quotes are stripped.
+    valueless lines are skipped. Surrounding quotes are stripped, and
+    a leading ``export`` token is dropped so the same file resolves
+    identically to server-side python-dotenv (which accepts it).
     """
     env: dict[str, str] = {}
     dotenv_path = Path(path)
@@ -54,7 +56,11 @@ def load_dotenv(path: str | os.PathLike[str]) -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        env[key.strip()] = value.strip().strip("\"'")
+        key = key.strip()
+        if key == "export" or key.startswith("export ") or key.startswith("export\t"):
+            key = key[len("export") :].strip()
+        if key:
+            env[key] = value.strip().strip("\"'")
     return env
 
 
@@ -89,8 +95,10 @@ def resolve_settings(
 
     url = api_url or env.get("DYVINE_API_URL") or ""
     if not url:
-        host = dotenv.get("API_HOST")
-        port = dotenv.get("API_PORT", "8000")
+        host = (dotenv.get("API_HOST") or "").strip()
+        # An empty ``API_PORT=`` must fall back like a missing one,
+        # not build ``http://host:`` and fail whole runs late.
+        port = (dotenv.get("API_PORT") or "").strip() or "8000"
         url = f"http://{host}:{port}" if host else DEFAULT_API_URL
     url = url.rstrip("/")
 
