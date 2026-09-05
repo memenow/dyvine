@@ -89,11 +89,17 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untype
                     owners.append(f"dict{keys}")
                 else:
                     owners.append(type(ref).__name__)
+            ready = [repr(getattr(h, "_callback", None)) for h in list(loop._ready)][:6]
+            scheduled = [
+                repr(getattr(h, "_callback", None)) for h in list(loop._scheduled)
+            ][:6]
             print(
                 f"\nPROBE-LEAKED-LOOP thread={thread} loop={loop!r} "
-                f"self_pipe={loop._ssock is not None} owners={owners[:8]}"
+                f"self_pipe={loop._ssock is not None} owners={owners[:12]}"
             )
-            print("PROBE-STACK-HEAD:" + stack[:3000])
+            print(f"PROBE-READY={ready}")
+            print(f"PROBE-SCHEDULED={scheduled}")
+            print("PROBE-STACK-HEAD:" + stack[:6500])
             print("PROBE-STACK-TAIL:" + stack[-1500:])
 
 
