@@ -85,8 +85,12 @@ def _validated_row(raw: dict[str, Any]) -> dict[str, Any] | str:
         return f"enabled must be 0 or 1, got {enabled!r}"
     for column in ("live_poll_seconds", "post_poll_seconds"):
         value = raw.get(column)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            return f"{column} must be a non-negative int, got {value!r}"
+        # Zero/negative intervals are rejected, not clamped: a 0 would
+        # make the watcher loop busy-spin with no sleep floor. Other
+        # positive values pass through untouched (legacy rows predate
+        # the API floors, and a fast-but-positive cadence is harmless).
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return f"{column} must be a positive int, got {value!r}"
     try:
         checkpoint = json.loads(str(raw.get("checkpoint") or "{}"))
     except json.JSONDecodeError as exc:

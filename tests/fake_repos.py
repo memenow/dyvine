@@ -159,7 +159,11 @@ class FakeOperationRepository:
     async def get_latest_operation_for_subject(
         self, subject_id: str, *, operation_type: str | None = None
     ) -> OperationRecord:
-        """Fetch the most recently updated operation for a subject."""
+        """Fetch the most recently updated operation for a subject.
+
+        Ties break on ``operation_id`` descending, mirroring the SQL
+        backend, so frozen-clock writes resolve identically.
+        """
         candidates = [
             row
             for row in self._rows.values()
@@ -168,7 +172,14 @@ class FakeOperationRepository:
         ]
         if not candidates:
             raise OperationNotFoundError(f"Operation {subject_id} not found")
-        return max(candidates, key=lambda row: (row.updated_at, row.created_at))
+        return max(
+            candidates,
+            key=lambda row: (
+                row.updated_at,
+                row.created_at,
+                row.operation_id,
+            ),
+        )
 
     async def update_operation(
         self, operation_id: str, **fields: Any
@@ -283,7 +294,12 @@ class FakeWatchRepository:
         checkpoint: dict[str, Any] | None = None,
         subscription_id: str | None = None,
     ) -> WatchSubscriptionRecord:
-        """Insert a subscription; duplicate users raise."""
+        """Insert a subscription; duplicate users or IDs raise."""
+        if subscription_id is not None and subscription_id in self._rows:
+            raise WatchDuplicateError(
+                "Watch subscription " f"{subscription_id} already exists",
+                details={"subscription_id": subscription_id},
+            )
         if user_id in self._by_user:
             raise WatchDuplicateError(
                 f"Watch subscription for user {user_id} already exists",

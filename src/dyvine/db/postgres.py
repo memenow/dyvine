@@ -175,12 +175,19 @@ class PostgresOperationRepository:
     async def get_latest_operation_for_subject(
         self, subject_id: str, *, operation_type: str | None = None
     ) -> OperationRecord:
-        """Fetch the most recently updated operation for a subject."""
+        """Fetch the most recently updated operation for a subject.
+
+        Ties on both timestamps break on ``operation_id`` descending,
+        mirroring the ``list_subscriptions`` id-tiebreak convention, so
+        frozen-clock writes resolve identically on every backend.
+        """
         statement = select(OperationRow).where(OperationRow.subject_id == subject_id)
         if operation_type is not None:
             statement = statement.where(OperationRow.operation_type == operation_type)
         statement = statement.order_by(
-            desc(OperationRow.updated_at), desc(OperationRow.created_at)
+            desc(OperationRow.updated_at),
+            desc(OperationRow.created_at),
+            desc(OperationRow.operation_id),
         ).limit(1)
         async with self._sessions.session() as session:
             row = (await session.execute(statement)).scalars().first()

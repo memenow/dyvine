@@ -399,6 +399,35 @@ async def test_sweep_spares_null_heartbeat_with_fresh_creation(
     assert (await owner_a.get_operation(created.operation_id)).status == "running"
 
 
+async def test_latest_breaks_full_timestamp_ties_by_id(
+    backend: BackendContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Frozen-clock ties resolve identically on both backends."""
+    repo = backend.make_ops("owner-a")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        first = await repo.create_operation(
+            operation_type="t",
+            subject_id="tied",
+            status="pending",
+            message="one",
+        )
+        second = await repo.create_operation(
+            operation_type="t",
+            subject_id="tied",
+            status="pending",
+            message="two",
+        )
+    expected = max(
+        (first, second),
+        key=lambda row: (row.updated_at, row.created_at, row.operation_id),
+    )
+    latest = await repo.get_latest_operation_for_subject("tied")
+    assert latest.operation_id == expected.operation_id
+    # Deterministic across calls, not an arbitrary row per query.
+    again = await repo.get_latest_operation_for_subject("tied")
+    assert again.operation_id == expected.operation_id
+
+
 async def test_sweep_never_touches_own_rows(
     backend: BackendContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -701,6 +730,23 @@ async def test_capped_create_prefers_duplicate_over_cap(
     with pytest.raises(WatchDuplicateError):
         await repo.create_subscription_capped(
             **_subscription_kwargs("dup-1"), max_subscriptions=1
+        )
+    assert await repo.count_subscriptions() == 1
+
+
+async def test_create_subscription_duplicate_id_raises(
+    backend: BackendContext,
+) -> None:
+    """An explicit ID collision raises on both backends, never merges."""
+    repo = backend.make_watch()
+    await repo.create_subscription(
+        **_subscription_kwargs("user-a"),
+        subscription_id="fixed-id",
+    )
+    with pytest.raises(WatchDuplicateError):
+        await repo.create_subscription(
+            **_subscription_kwargs("user-b"),
+            subscription_id="fixed-id",
         )
     assert await repo.count_subscriptions() == 1
 

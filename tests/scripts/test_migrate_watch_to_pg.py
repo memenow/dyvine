@@ -124,6 +124,26 @@ async def test_migrate_imports_valid_rows(
     assert fetched.last_post_check is None
 
 
+def test_validated_row_rejects_non_positive_intervals() -> None:
+    """Zero/negative cadences are skipped: 0 would busy-spin the loop."""
+    script = _load_script()
+    base: dict[str, Any] = {
+        "subscription_id": "sub-1",
+        "user_id": "user-1",
+        "enabled": 1,
+        "live_poll_seconds": 60,
+        "post_poll_seconds": 300,
+        "checkpoint": "{}",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-02T00:00:00+00:00",
+        "last_live_check": None,
+        "last_post_check": None,
+    }
+    assert isinstance(script._validated_row({**base, "live_poll_seconds": 0}), str)
+    assert isinstance(script._validated_row({**base, "post_poll_seconds": -5}), str)
+    assert isinstance(script._validated_row(dict(base)), dict)
+
+
 async def test_migrate_is_idempotent_on_rerun(
     tmp_path: Path, postgres_url: str, clean_watch_table: Any
 ) -> None:
