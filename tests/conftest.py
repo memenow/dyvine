@@ -9,8 +9,13 @@ modules with side effects at import time (e.g. Prometheus metrics in storage.py)
 
 from __future__ import annotations
 
+import asyncio as _asyncio
+import gc as _gc
 import os
 import sys
+import threading as _threading
+import traceback as _traceback
+import warnings as _warnings
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,6 +42,49 @@ os.environ.setdefault("API_RATE_LIMIT_BURST", "1000000")
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+
+# TEMPORARY CI DIAGNOSTIC (revert before merge): record every event-loop
+# creation stack; at session finish, print the stacks of loops that were
+# never closed. Hunts the intermittent teardown-time "unclosed event loop
+# + socketpair" PytestUnraisableExceptionWarning that fails CI legs after
+# all tests pass. Prints nothing when there is no leak.
+_probe_stacks: dict[int, tuple[str, str]] = {}
+with _warnings.catch_warnings():
+    _warnings.simplefilter("ignore", DeprecationWarning)
+    _real_policy = _asyncio.get_event_loop_policy()
+
+
+class _ProbePolicy(_real_policy.__class__):  # type: ignore[misc]
+    def new_event_loop(self):  # type: ignore[no-untyped-def]
+        loop = super().new_event_loop()
+        _probe_stacks[id(loop)] = (
+            _threading.current_thread().name,
+            "".join(_traceback.format_stack()),
+        )
+        return loop
+
+
+with _warnings.catch_warnings():
+    _warnings.simplefilter("ignore", DeprecationWarning)
+    _asyncio.set_event_loop_policy(_ProbePolicy())
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:  # type: ignore[no-untyped-def]
+    """TEMPORARY CI DIAGNOSTIC (revert before merge)."""
+    _gc.collect()
+    for lid, (thread, stack) in _probe_stacks.items():
+        loop = next(
+            (
+                o
+                for o in _gc.get_objects()
+                if id(o) == lid and isinstance(o, _asyncio.AbstractEventLoop)
+            ),
+            None,
+        )
+        if loop is not None and not loop.is_closed():
+            print(f"\nPROBE-LEAKED-LOOP thread={thread} loop={loop!r}")
+            print(stack[-4000:])
+
 
 # ``tests/`` holds shared (non-``test_*``) helpers such as ``fake_repos``.
 # pytest only puts each test file's own directory on ``sys.path``, so
