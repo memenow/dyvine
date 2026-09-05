@@ -143,10 +143,10 @@ def postgres_url():
     cannot rebuild it), so the singleton's URL is patched narrowly
     around the upgrade and restored before any test runs.
     """
-    from alembic.config import Config
     from testcontainers.community.postgres import PostgresContainer
 
     import dyvine.core.settings as settings_module
+    from alembic.config import Config
 
     root_dir = Path(__file__).resolve().parents[1]
     with PostgresContainer("postgres:16") as container:

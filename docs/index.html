@@ -154,6 +154,7 @@
       <ul>
         <li><a href="https://docs.astral.sh/uv/">uv</a> or Python 3.12+</li>
         <li>Git</li>
+        <li>Postgres 16+ (operation and watch state live in Postgres)</li>
         <li>A valid Douyin session cookie</li>
         <li>Optional Cloudflare R2 credentials and bucket for archival uploads</li>
       </ul>
@@ -162,9 +163,14 @@
 cd dyvine
 uv sync --all-extras</code></pre>
       <h3>Run</h3>
-      <pre><code>uv run uvicorn src.dyvine.main:app --reload</code></pre>
+      <pre><code>docker run -d --name dyvine-pg \
+  -e POSTGRES_USER=dyvine -e POSTGRES_PASSWORD=dyvine \
+  -e POSTGRES_DB=dyvine -p 5432:5432 postgres:16
+cp .env.example .env   # set SECURITY_API_KEY, DOUYIN_COOKIE, DATABASE_URL
+uv run alembic upgrade head
+uv run uvicorn dyvine.main:app --reload</code></pre>
       <p>For a production-style process, run:</p>
-      <pre><code>uv run uvicorn src.dyvine.main:app --host 0.0.0.0 --port 8000 \
+      <pre><code>uv run uvicorn dyvine.main:app --host 0.0.0.0 --port 8000 \
     --timeout-graceful-shutdown 25</code></pre>
       <table>
         <thead>
@@ -187,7 +193,8 @@ uv sync --all-extras</code></pre>
       <p>Minimum required settings for a non-debug deployment:</p>
       <pre><code>API_DEBUG=false
 SECURITY_API_KEY=&lt;48+ bytes of entropy&gt;
-DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
+DOUYIN_COOKIE=&lt;browser session cookie&gt;
+DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pre>
       <p>Generate strong local secrets with:</p>
       <pre><code>python -c "import secrets; print(secrets.token_urlsafe(48))"</code></pre>
       <p>
@@ -243,6 +250,17 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
         the <code>X-API-Key</code> header. Mismatches return <code>401 Unauthorized</code>.
       </p>
       <pre><code>X-API-Key: &lt;SECURITY_API_KEY&gt;</code></pre>
+
+      <h3>Rate Limiting</h3>
+      <p>
+        A per-replica token bucket caps each caller (keyed on
+        <code>X-API-Key</code>, else client IP): sustained
+        <code>API_RATE_LIMIT_PER_SECOND</code>, burst
+        <code>API_RATE_LIMIT_BURST</code>. Over-limit callers receive the
+        standard 429 envelope with a <code>Retry-After</code> header. Probes,
+        <code>/metrics</code>, <code>/health</code>, and <code>/</code> are
+        exempt.
+      </p>
 
       <h3>System Endpoints</h3>
       <pre><code>GET /                       # Service metadata and feature list
@@ -413,9 +431,9 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
         <li>A live check delegates to the existing livestream downloader; a live-status miss or an already-in-progress recording is silently skipped.</li>
         <li>Each triggered download creates a regular operation row (<code>livestream_download</code> or <code>user_posts_incremental_download</code>) that can be polled through the existing operation endpoints.</li>
         <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> Postgres table (same database as the operations table) and all enabled subscriptions are re-armed automatically on startup.</li>
-        <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop is logged and resumed on next restart without pulling the pod out of rotation.</li>
+        <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop restarts under exponential backoff and parks after 5 consecutive crashes; a parked subscription resumes only after delete-and-recreate.</li>
         <li><code>/health</code> reports an informational <code>watch_subscriptions</code> field showing the count of currently active watcher loops.</li>
-        <li>Watch Mode shares the single-replica constraint of the rest of the service: per-task download workspaces live on a ReadWriteOnce volume, so the Deployment cannot scale beyond one Pod.</li>
+        <li>Watch scheduling splits across replicas with <code>WATCH_ENABLED</code>: API replicas run with <code>false</code> (subscription CRUD keeps working against shared Postgres, no loops run locally) while exactly one watcher replica runs the loops and adopts new rows through a periodic reconcile pass. See <code>k8s/overlays/production/</code> for the reference split deployment.</li>
       </ul>
 
       <h3>Example</h3>
@@ -498,15 +516,23 @@ docker run -d \
         <li>The image is multi-stage and runs as non-root user <code>1000</code>.</li>
         <li>The runtime layer uses <code>python -m uvicorn</code> with <code>--timeout-graceful-shutdown 25</code>.</li>
         <li>The build removes the <code>f2</code>-injected <code>black</code> binary from the production layer.</li>
+        <li><code>DATABASE_URL</code> in <code>.env</code> must point at a reachable Postgres; migrate legacy stores first with <code>uv run python -m scripts.migrate_watch_to_pg</code>.</li>
       </ul>
       <h3>Kubernetes</h3>
       <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay.</p>
-      <pre><code>kubectl apply -k k8s/base
-kubectl apply -k k8s/overlays/production</code></pre>
+      <pre><code>kubectl apply -k k8s/overlays/production</code></pre>
+      <p>
+        The deploy workflows run the schema migration as a Job first, wait for
+        <code>condition=complete</code>, then apply the overlay: 3 API replicas
+        (<code>WATCH_ENABLED=false</code>) plus 1 watcher replica
+        (<code>WATCH_ENABLED=true</code>). Production finishes with a smoke test
+        that curls <code>/readyz</code> through the service endpoint.
+      </p>
       <div class="note">
-        <strong>Scaling note:</strong> Operation/watch state is multi-replica safe in Postgres, but
-        per-task download workspaces live on a <code>ReadWriteOnce</code> PVC. Move the workspaces
-        to shared storage before scaling beyond one replica.
+        <strong>Scaling note:</strong> The API scales horizontally when R2 archival is
+        configured (<code>API_MULTI_REPLICA=true</code>, enforced at boot) or download
+        workspaces sit on shared storage; without either, stay on one replica. Watch
+        loops run on exactly one watcher replica.
       </div>
     </section>
 
@@ -562,7 +588,6 @@ make test          # pytest</code></pre>
       <h2>Maintenance Notes</h2>
       <ul>
         <li><code>README.md</code> is the concise maintainer entry point; keep it in sync with this page.</li>
-        <li><code>AGENTS.md</code> and <code>CLAUDE.md</code> contain repository-local agent guidance and GitNexus workflow reminders.</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
         <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
         <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
