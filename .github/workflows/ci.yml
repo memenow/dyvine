@@ -19,7 +19,7 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v3
@@ -48,7 +48,7 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v3
@@ -92,7 +92,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up uv
       uses: astral-sh/setup-uv@v3
@@ -121,7 +121,7 @@ jobs:
     name: Kustomize render check
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Render production overlay
       # Placeholders (INGRESS_HOST, DB_CIDR) render as literal strings;
@@ -146,7 +146,7 @@ jobs:
       security-events: write
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Build Docker image for scanning
       run: |
