@@ -170,12 +170,13 @@ jobs:
           -c '! test -x /app/.venv/bin/black'
 
     - name: Scan image and enforce vulnerability budget
-      # Table output is the pass/fail gate because ``aquasecurity/trivy-action``
-      # v0.35.0 drops ``.trivyignore`` when the format is SARIF, which
-      # would otherwise re-include already-accepted findings and break
-      # the build. Keep the table format here (with ``exit-code: 1``)
-      # and treat the subsequent SARIF pass as observability only.
-      uses: aquasecurity/trivy-action@v0.35.0
+      # Table output is the pass/fail gate: SARIF is lossy for ignore
+      # handling in trivy-action (observed on v0.35.0, which dropped
+      # ``.trivyignore`` for SARIF output), so a SARIF gate could
+      # re-include accepted findings and break the build. Keep the table
+      # format here (with ``exit-code: 1``) and treat the subsequent
+      # SARIF pass as observability only.
+      uses: aquasecurity/trivy-action@v0.36.0
       with:
         image-ref: 'scan-target:${{ github.sha }}'
         format: 'table'
@@ -186,7 +187,7 @@ jobs:
 
     - name: Produce SARIF for Code Scanning
       if: always()
-      uses: aquasecurity/trivy-action@v0.35.0
+      uses: aquasecurity/trivy-action@v0.36.0
       with:
         image-ref: 'scan-target:${{ github.sha }}'
         format: 'sarif'
@@ -197,7 +198,7 @@ jobs:
         trivyignores: '.trivyignore'
 
     - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
