@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "black>=26.3.1",
-    "isort>=8.0.1",
-    "mypy>=1.20.2",
-    "types-psutil>=7.2.2.20260408",
-    "boto3-stubs[s3]>=1.42.96",
-    "ruff>=0.15.12",
-    "pre-commit>=4.6.0",
-    "pytest>=9.0.3",
-    "pytest-asyncio>=1.1.0",
+    "black>=26.5.1",
+    "isort>=9.0.1",
+    "mypy>=2.3.1",
+    "types-psutil>=7.2.2.20260827",
+    "boto3-stubs[s3]>=1.43.89",
+    "ruff>=0.16.6",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
-    "testcontainers[postgres]>=4.0.0,<5.0.0",
+    "testcontainers[postgres]>=4.15.0,<5.0.0",
 ]
 
 [project]
@@ -32,29 +32,29 @@ dependencies = [
     # versions for reproducible installs in CI and the Dockerfile; the
     # bounds below add a second guard for tools that read pep-621
     # metadata without consulting the lockfile (pip, poetry, etc.).
-    "fastapi>=0.136.1,<1.0.0",
-    "uvicorn[standard]>=0.46.0,<1.0.0",
-    "pydantic>=2.13.3,<3.0.0",
-    "pydantic-settings>=2.14.0,<3.0.0",
-    "python-dotenv>=1.2.2,<2.0.0",
+    "fastapi>=0.141.1,<1.0.0",
+    "uvicorn[standard]>=0.52.4,<1.0.0",
+    "pydantic>=2.13.5,<3.0.0",
+    "pydantic-settings>=2.15.0,<3.0.0",
+    "python-dotenv>=1.2.3,<2.0.0",
 
     # External integrations. ``f2`` is an especially low-maintenance
     # upstream and pins many of its own deps with ``==``, so we tightly
     # constrain it; widen the bound only after a deliberate test pass.
-    "boto3>=1.42.96,<2.0.0",
+    "boto3>=1.43.89,<2.0.0",
     "f2>=0.0.1.7,<0.0.2",
     "httpx>=0.28.1,<1.0.0",
 
     # Utilities
-    "prometheus-client>=0.25.0,<1.0.0",
+    "prometheus-client>=0.26.0,<1.0.0",
     "psutil>=7.2.2,<8.0.0",
-    "python-multipart>=0.0.30,<0.1.0",
+    "python-multipart>=0.0.32,<0.1.0",
 
     # Persistence. Async SQLAlchemy over asyncpg is the only production
     # backend; Alembic versions the schema (see ``alembic/``).
-    "sqlalchemy[asyncio]>=2.0.0,<3.0.0",
-    "asyncpg>=0.30.0,<1.0.0",
-    "alembic>=1.14.0,<2.0.0",
+    "sqlalchemy[asyncio]>=2.0.52,<3.0.0",
+    "asyncpg>=0.31.0,<1.0.0",
+    "alembic>=1.19.2,<2.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -81,6 +81,11 @@ filterwarnings = [
     # a not-yet-available ``httpx2``; the suite stays on httpx until that
     # migration path exists. Drop this once tests move off TestClient.
     "ignore::starlette.exceptions.StarletteDeprecationWarning",
+    # anyio >= 4.15 deprecates the ``anyio.abc.BlockingPortal`` alias in
+    # favour of ``anyio.from_thread.BlockingPortal``; starlette's
+    # TestClient still imports the old path at module scope. Drop this
+    # once starlette migrates to the new import.
+    "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated:DeprecationWarning",
     # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
     # cleanup) to a warning. Older test environments did not surface
     # these; the underlying socket is closed by the OS regardless.
@@ -106,15 +111,15 @@ packages = ["src/dyvine"]
 # from this list once f2 ships looser metadata upstream.
 override-dependencies = [
     "httpx>=0.28.1",
-    "pydantic>=2.13.3",
-    "pytest>=9.0.3",
-    "pytest-asyncio>=1.1.0",
-    "websockets>=16.0",
-    "cryptography>=50.0.0",
-    "black>=26.3.1",
-    "aiofiles>=24.1.0",
-    "pyyaml>=6.0.2",
-    "protobuf>=5.28.3",
+    "pydantic>=2.13.5",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "websockets>=17.1",
+    "cryptography>=50.0.1",
+    "black>=26.5.1",
+    "aiofiles>=25.1.0",
+    "pyyaml>=6.0.3",
+    "protobuf>=7.36.1",
 ]
 
 [tool.black]
