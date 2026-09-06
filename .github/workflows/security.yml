@@ -46,7 +46,7 @@ jobs:
       run: uv run --with pip-audit pip-audit --local --strict --format=json --output pip-audit-report.json
 
     - name: Upload safety results
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: pip-audit-report
         path: pip-audit-report.json

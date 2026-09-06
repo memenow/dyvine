@@ -40,9 +40,12 @@ jobs:
       run: uv run pytest --cov=src/dyvine --cov-report=xml --cov-fail-under=80
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v7
       with:
-        file: coverage.xml
+        # ``file`` was removed in v5+; ``files`` adds to auto-discovered
+        # reports, so ``disable_search`` keeps the upload to coverage.xml.
+        files: coverage.xml
+        disable_search: true
         fail_ci_if_error: false
 
   quality:
