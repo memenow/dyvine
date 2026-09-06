@@ -13,7 +13,7 @@ runs:
   using: 'composite'
   steps:
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
+      uses: aquasecurity/trivy-action@v0.36.0
       with:
         image-ref: ${{ inputs.image }}
         format: 'sarif'
@@ -21,7 +21,7 @@ runs:
         severity: ${{ inputs.severity-threshold }}
     
     - name: Upload Trivy scan results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v4
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
