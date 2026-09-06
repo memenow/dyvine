@@ -2,15 +2,9 @@
 # Each entry explains the constraint source and removal criteria. Delete
 # entries as soon as the upstream pin is relaxed and the dependency is
 # picked up through uv.lock.
-
-# cryptography is pinned by f2 (Douyin SDK) at 44.0.0. Fixed in 46.0.5.
-# Remove once f2 publishes a release that allows cryptography >= 46.0.5
-# or we replace the transitive dependency.
-CVE-2026-26007
-
-# protobuf is pinned by f2 at 5.28.3. Fixed in 5.29.5 / 5.29.6 / 6.31.1.
-# Remove once f2 relaxes the constraint or a compatible release lands in
-# uv.lock.
-CVE-2025-4565
-CVE-2026-0994
+#
+# Currently empty: CVE-2026-26007 (cryptography, fixed in 46.0.5),
+# CVE-2025-4565 and CVE-2026-0994 (protobuf, fixed in 5.29.5+ / 6.31.1+)
+# were removed after verifying the locked versions (cryptography 50.0.1,
+# protobuf 7.36.1 via override-dependencies) scan clean without them.
 

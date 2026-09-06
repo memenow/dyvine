@@ -16,7 +16,7 @@ COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir uv==0.11.6 && \
+    pip install --no-cache-dir uv==0.12.10 && \
     uv sync --frozen --no-dev && \
     # ``f2`` (the upstream Douyin SDK) lists ``black`` as a runtime
     # dependency even though it never imports the formatter. ``uv sync
