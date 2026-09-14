@@ -14,7 +14,10 @@ Architecture diagrams are available in
 - Async download endpoints return an operation record immediately and continue
   work on tracked background tasks.
 - Postgres operation state uses an asyncpg pool, per-replica heartbeats, and an
-  orphan sweep, with the schema versioned by Alembic.
+  orphan sweep, with the schema versioned by Alembic. Database access is
+  idle-quiet: the default pool holds zero idle connections, read-only
+  lookups and probes never touch the stores, and `/readyz` reports the
+  last-known database state instead of probing it.
 - API-key authentication is enabled by default on feature routers through the
   `X-API-Key` header.
 - User-supplied output paths are jailed inside `DOUYIN_DOWNLOAD_ROOT`, including
@@ -83,7 +86,7 @@ Configuration is environment-driven through `dyvine.core.settings`:
 | --- | --- |
 | `API_` | Server bind, CORS, prefix, rate limiting, multi-replica flags |
 | `SECURITY_` | API key (`SECURITY_API_KEY`) and router auth gate (`SECURITY_REQUIRE_API_KEY`) |
-| `DATABASE_` | Postgres URL, pool sizing, operation retention |
+| `DATABASE_` | Postgres URL, pool strategy (`null`/`queue`) and sizing, janitor cadence, operation retention |
 | `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode |
 | `DOUYIN_WATCH_` | Watch Mode polling cadences, subscription cap, dedupe window, backfill flag |
 | `R2_` | Cloudflare R2 account, key, bucket, and endpoint |
@@ -98,6 +101,22 @@ reports it as `disabled`. When R2 is left unconfigured the service retains
 downloads implicitly rather than discarding them. `/readyz` also verifies that
 the retained workspace can be created and written. `/health` remains
 informational and returns `200 OK` even when dependencies are missing.
+
+Database connections stay idle-quiet. `DATABASE_POOL_CLASS=null`
+(default) opens a fresh connection per use and holds none while idle;
+`queue` keeps a capped pool (`DATABASE_POOL_SIZE`,
+`DATABASE_POOL_MAX_OVERFLOW`, `DATABASE_POOL_TIMEOUT`,
+`DATABASE_POOL_RECYCLE_SECONDS`, `DATABASE_POOL_PRE_PING`) for
+deployments that prefer bounded concurrency — the `k8s/` cluster uses
+`queue` because HPA-scaled replicas share one database. The janitor
+heartbeat/sweep loop runs on multi-replica deployments (or an explicit
+`DATABASE_JANITOR_INTERVAL_SECONDS`); single replicas keep boot
+recovery plus a daily retention purge and otherwise never touch the
+database while idle. `/readyz` reports the last-known database state
+(`operation_store`: `unknown`/`available`/`unavailable`, plus
+`operation_store_checked_at`) observed from real repository calls, so
+probes never open a connection; `unknown` counts as ready because boot
+recovery fails loudly on a genuinely unreachable database.
 
 Rate limiting is enforced per replica by a token bucket keyed on
 `X-API-Key` (else client IP): `API_RATE_LIMIT_PER_SECOND` sustained,
@@ -243,7 +262,7 @@ domains follow the storage matrix in `.env.example`.
 | --- | --- |
 | `src/dyvine/main.py` | FastAPI app, middleware, routers, probes, metrics |
 | `src/dyvine/core/` | Settings, logging, dependency container, path safety |
-| `src/dyvine/db/` | Postgres repositories, session factory, janitor (Alembic-versioned) |
+| `src/dyvine/db/` | Postgres repositories, session factory, janitor, passive health tracker (Alembic-versioned) |
 | `src/dyvine/middleware/` | Token-bucket rate limiting |
 | `src/dyvine/routers/` | User, post, livestream, and watch HTTP endpoints |
 | `src/dyvine/services/` | Douyin SDK orchestration, background work, R2 storage, watch scheduling |
@@ -260,8 +279,9 @@ domains follow the storage matrix in `.env.example`.
 
 - Keep public documentation in static HTML under `docs/` and use
   `docs/index.html` as the entry point.
-- Keep `README.md`, `.env.example`, and `docs/index.html` synchronized
-  when configuration, commands, probes, or deployment behavior changes.
+- Keep `README.md`, `.env.example`, `docs/index.html`, and `AGENTS.md`
+  synchronized when configuration, commands, probes, or deployment
+  behavior changes. Automated contributors follow `AGENTS.md`.
 - Runtime downloads, logs, and local credentials are intentionally ignored.
 - The API scales horizontally when R2 archival is configured
   (`API_MULTI_REPLICA=true`, enforced at boot) or download workspaces sit

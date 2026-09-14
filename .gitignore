@@ -181,11 +181,13 @@ docs/build/
 # ==============================================================================
 # Development Utilities
 # ==============================================================================
-# AI assistants
+# AI assistants (local-only notes; the canonical contributor guide
+# AGENTS.md at the repo root IS tracked - keep it in sync with README)
 .claude/settings.local.json
 .serena/
 CLAUDE.local.md
-AGENTS.md
+AGENTS.local.md
+.agents/plans/
 
 # Profiling
 *.prof

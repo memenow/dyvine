@@ -215,11 +215,18 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
       </p>
       <p>
         Persistence targets Postgres: set <code>DATABASE_URL</code> to a
-        <code>postgresql+asyncpg://</code> connection string and tune the pool with
-        <code>DATABASE_POOL_SIZE</code> / <code>DATABASE_POOL_TIMEOUT</code>.
-        <code>DATABASE_OPERATION_RETENTION_DAYS</code> bounds how long terminal
-        operation rows are kept (<code>0</code> disables purging). Apply schema
-        changes with <code>alembic upgrade head</code>.
+        <code>postgresql+asyncpg://</code> connection string and pick a pool
+        strategy with <code>DATABASE_POOL_CLASS</code>: <code>null</code> (default)
+        opens a fresh connection per use and holds none while idle, while
+        <code>queue</code> keeps a capped pool tuned by <code>DATABASE_POOL_SIZE</code>,
+        <code>DATABASE_POOL_MAX_OVERFLOW</code>, <code>DATABASE_POOL_TIMEOUT</code>,
+        <code>DATABASE_POOL_RECYCLE_SECONDS</code>, and <code>DATABASE_POOL_PRE_PING</code>.
+        The <code>k8s/</code> cluster uses <code>queue</code> because HPA-scaled replicas
+        share one database. <code>DATABASE_OPERATION_RETENTION_DAYS</code> bounds how long
+        terminal operation rows are kept (<code>0</code> disables purging), and
+        <code>DATABASE_JANITOR_INTERVAL_SECONDS</code> (<code>0</code> = automatic) controls
+        the janitor heartbeat/sweep cadence. Apply schema changes with
+        <code>alembic upgrade head</code>.
       </p>
       <h3>Watch Mode configuration (<code>DOUYIN_WATCH_</code> prefix)</h3>
       <p>
@@ -465,8 +472,9 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
       </p>
       <ul>
         <li>Every operation row carries an <code>owner_id</code> and a heartbeat timestamp.</li>
-        <li>A per-replica janitor heartbeats owned rows and fails rows whose owner went quiet; only genuinely orphaned rows are touched.</li>
+        <li>On multi-replica deployments (or an explicit <code>DATABASE_JANITOR_INTERVAL_SECONDS</code>), a per-replica janitor heartbeats owned rows and fails rows whose owner went quiet; only genuinely orphaned rows are touched. Single replicas run boot recovery plus a daily retention purge only, and never touch the database while idle.</li>
         <li>Terminal rows older than <code>DATABASE_OPERATION_RETENTION_DAYS</code> are purged at boot and daily.</li>
+        <li>Read-only lookups and probes never touch the stores; only real task execution opens database connections (pinned by <code>tests/test_stateless_contract.py</code>).</li>
         <li>Unit tests inject in-memory fakes; the contract suite in <code>tests/db/</code> runs identical assertions against both backends.</li>
       </ul>
       <h3>Background Task Lifecycle</h3>
@@ -481,7 +489,7 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
         </thead>
         <tbody>
           <tr><td><code>/livez</code></td><td>Process liveness; returns 200 when the event loop is responsive.</td></tr>
-          <tr><td><code>/readyz</code></td><td>Dependency-aware readiness; returns 503 when a required dependency is missing.</td></tr>
+          <tr><td><code>/readyz</code></td><td>Dependency-aware readiness; returns 503 when a required dependency is missing. The database entry reports the last-known state (<code>operation_store</code>: <code>unknown</code>/<code>available</code>/<code>unavailable</code>, plus <code>operation_store_checked_at</code>) observed from real repository calls — the probe itself never opens a connection, and <code>unknown</code> counts as ready.</td></tr>
           <tr><td><code>/startupz</code></td><td>Startup completion state.</td></tr>
           <tr><td><code>/health</code></td><td>Informational runtime metrics and dependency snapshot; always returns 200.</td></tr>
           <tr><td><code>/metrics</code></td><td>Prometheus exposition format.</td></tr>
@@ -495,7 +503,7 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
         <tbody>
           <tr><td><code>dyvine-r2</code></td><td>16</td><td>R2 PUT, HEAD, DELETE, and list operations.</td></tr>
           <tr><td><code>dyvine-r2-head</code></td><td>16</td><td>Per-key <code>head_object</code> fan-out during listing hydration.</td></tr>
-          <tr><td><code>asyncpg pool</code></td><td>5</td><td>Operation/watch reads and writes (<code>DATABASE_POOL_SIZE</code>).</td></tr>
+          <tr><td><code>asyncpg pool</code></td><td>0–7</td><td>Operation/watch reads and writes. <code>null</code> pool class (default) holds zero idle connections; <code>queue</code> caps at <code>DATABASE_POOL_SIZE</code> + <code>DATABASE_POOL_MAX_OVERFLOW</code> (5 + 2 by default).</td></tr>
         </tbody>
       </table>
     </section>
@@ -626,7 +634,7 @@ make test          # pytest</code></pre>
     <section id="maintenance-notes">
       <h2>Maintenance Notes</h2>
       <ul>
-        <li><code>README.md</code> is the concise maintainer entry point; keep it in sync with this page.</li>
+        <li><code>README.md</code> is the concise maintainer entry point; keep it, <code>.env.example</code>, this page, and <code>AGENTS.md</code> in sync when configuration, commands, probes, or deployment behavior changes. Automated contributors follow <code>AGENTS.md</code>.</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
         <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
         <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
