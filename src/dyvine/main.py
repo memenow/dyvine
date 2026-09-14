@@ -572,17 +572,21 @@ async def readiness_probe(request: Request) -> JSONResponse:
 
     # The operation repository backs asynchronous workflows; an
     # unreachable database makes content downloads fail at the first
-    # write.
+    # write. The status is the last-known outcome of real repository
+    # calls — the probe itself never opens a connection. ``"unknown"``
+    # (no call observed yet) counts as ready: production boots always
+    # run a recovery pass first, so a genuinely unreachable database
+    # fails startup loudly instead of lingering here.
     operation_store_ok = False
     operation_store_status = "missing"
+    operation_store_checked_at: str | None = None
     if container is not None:
-        try:
-            await container.operation_store.healthcheck()
-            operation_store_ok = True
-            operation_store_status = "available"
-        except Exception:
-            operation_store_ok = False
-            operation_store_status = "unavailable"
+        tracker = getattr(container, "db_health", None)
+        if tracker is not None:
+            operation_store_status, operation_store_checked_at = tracker.snapshot
+        else:  # pragma: no cover - every real container carries a tracker
+            operation_store_status = "unknown"
+        operation_store_ok = operation_store_status != "unavailable"
 
     # R2 storage credentials, bucket, and endpoint are all required to
     # persist downloaded content. Delegate to ``R2Settings.is_configured``
@@ -621,6 +625,7 @@ async def readiness_probe(request: Request) -> JSONResponse:
                 "douyin_api": douyin_status,
                 "service_container": container_status,
                 "operation_store": operation_store_status,
+                "operation_store_checked_at": operation_store_checked_at,
                 "r2_storage": r2_status,
                 "local_retention_storage": local_retention_status,
             },

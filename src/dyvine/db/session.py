@@ -8,12 +8,15 @@ transactional state across awaits.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import NullPool
 
 
 class DatabaseSessionFactory:
@@ -21,33 +24,62 @@ class DatabaseSessionFactory:
 
     Args:
         database_url: SQLAlchemy URL (``postgresql+asyncpg://...``).
+        pool_class: ``"null"`` opens a fresh connection per checkout and
+            holds none while idle (the serverless default); ``"queue"``
+            keeps a capped pool. The remaining knobs apply to
+            ``"queue"`` only and are ignored by ``"null"``.
         pool_size: Steady-state pooled connections per process.
+        max_overflow: Burst connections beyond ``pool_size``.
         pool_timeout: Seconds to wait for a pooled connection.
+        pool_recycle: Discard pooled connections older than this many
+            seconds on next checkout; ``-1`` disables.
+        pool_pre_ping: Probe a pooled connection before each checkout.
     """
 
     def __init__(
-        self, database_url: str, *, pool_size: int = 5, pool_timeout: float = 30.0
+        self,
+        database_url: str,
+        *,
+        pool_class: Literal["queue", "null"] = "null",
+        pool_size: int = 5,
+        max_overflow: int = 2,
+        pool_timeout: float = 30.0,
+        pool_recycle: float = 300.0,
+        pool_pre_ping: bool = True,
     ) -> None:
         """Create the engine and session maker without connecting.
 
         Engine creation performs no I/O; the first checkout opens the
-        pool. ``pool_pre_ping`` keeps long-lived pods safe across
-        database restarts at the cost of one cheap probe per checkout.
+        first connection. ``"null"`` never holds idle connections, so a
+        quiet process keeps zero database connections open; ``"queue"``
+        holds ``pool_size`` idle connections and uses ``pool_pre_ping``
+        to stay safe across database restarts at the cost of one cheap
+        probe per checkout.
 
         Raises:
-            ValueError: If ``database_url`` is not an asyncpg URL. Failing
-                fast here turns a misconfigured ``DATABASE_URL`` (e.g. a
-                leftover ``sqlite://`` path) into a loud boot error
-                instead of a confusing connect-time failure.
+            ValueError: If ``database_url`` is not an asyncpg URL, or
+                ``pool_class`` is unknown. Failing fast here turns a
+                misconfigured ``DATABASE_URL`` (e.g. a leftover
+                ``sqlite://`` path) into a loud boot error instead of a
+                confusing connect-time failure.
         """
         if not database_url.startswith("postgresql+asyncpg://"):
             raise ValueError("database_url must use the postgresql+asyncpg:// scheme")
-        self._engine: AsyncEngine = create_async_engine(
-            database_url,
-            pool_size=pool_size,
-            pool_timeout=pool_timeout,
-            pool_pre_ping=True,
-        )
+        if pool_class == "null":
+            self._engine: AsyncEngine = create_async_engine(
+                database_url, poolclass=NullPool
+            )
+        elif pool_class == "queue":
+            self._engine = create_async_engine(
+                database_url,
+                pool_size=pool_size,
+                max_overflow=max_overflow,
+                pool_timeout=pool_timeout,
+                pool_recycle=pool_recycle,
+                pool_pre_ping=pool_pre_ping,
+            )
+        else:
+            raise ValueError("pool_class must be 'queue' or 'null'")
         self._sessions: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self._engine,
             class_=AsyncSession,

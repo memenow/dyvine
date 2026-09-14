@@ -38,8 +38,10 @@ def _inject_fake_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
     """Boot the lifespan's container against in-memory repositories.
 
     Probe/router tests exercise HTTP behavior, not persistence, so the
-    container gets fresh fakes instead of a Postgres pool. Tests that
-    break the store patch ``healthcheck`` on the injected fake.
+    container gets fresh fakes instead of a Postgres pool. Injected
+    fakes never record on the health tracker, so ``/readyz`` reports
+    the ``"unknown"`` last-known state unless a test drives the
+    tracker's ``note_success``/``note_failure`` explicitly.
     """
     original = dependencies.ServiceContainer.initialize
 
@@ -51,16 +53,6 @@ def _inject_fake_repositories(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         dependencies.ServiceContainer, "initialize", _initialize_with_fakes
     )
-
-
-async def _async_noop() -> None:
-    """Stand-in for ``OperationRepository.healthcheck`` in readiness tests.
-
-    ``/readyz`` now awaits the healthcheck, so the stub must also be a
-    coroutine function; a plain ``lambda: None`` would raise ``TypeError:
-    object NoneType can't be used in 'await' expression``.
-    """
-    return None
 
 
 def _configure_r2(
@@ -98,8 +90,6 @@ def prime_ready_dependencies(
     _configure_r2(monkeypatch)
 
     with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         yield client
 
 
@@ -130,10 +120,41 @@ def test_readiness_probe_returns_ready_when_all_dependencies_ok(
     assert data["dependencies"] == {
         "douyin_api": "configured",
         "service_container": "initialized",
-        "operation_store": "available",
+        "operation_store": "unknown",
+        "operation_store_checked_at": None,
         "r2_storage": "configured",
         "local_retention_storage": "not_required",
     }
+
+
+def test_readiness_probe_reports_last_known_available(
+    prime_ready_dependencies: TestClient,
+) -> None:
+    """A recorded success surfaces as ``available`` with a timestamp."""
+    app.state.container.db_health.note_success()
+    response = prime_ready_dependencies.get("/readyz")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ready"
+    assert data["dependencies"]["operation_store"] == "available"
+    assert data["dependencies"]["operation_store_checked_at"] is not None
+
+
+def test_readiness_probe_never_calls_the_store(
+    prime_ready_dependencies: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe reads the tracker only: no store call may happen."""
+    container = app.state.container
+
+    async def _boom() -> None:
+        raise AssertionError("/readyz must not call the store")
+
+    monkeypatch.setattr(container.operation_store, "healthcheck", _boom)
+    response = prime_ready_dependencies.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
 
 
 def test_readiness_probe_returns_ready_with_request_id(
@@ -167,27 +188,25 @@ def test_readiness_probe_returns_not_ready_when_douyin_cookie_missing(
 
 
 def test_readiness_probe_returns_not_ready_when_operation_store_broken(
-    monkeypatch: pytest.MonkeyPatch,
+    prime_ready_dependencies: TestClient,
 ) -> None:
-    """Verify readiness probe returns not ready when operation store broken."""
-    monkeypatch.setattr(settings.douyin, "cookie", "dummy-cookie")
-    _configure_r2(monkeypatch)
+    """A recorded failure takes the Pod out of rotation until recovery."""
+    container = app.state.container
+    container.db_health.note_failure()
+    response = prime_ready_dependencies.get("/readyz")
 
-    async def _raise() -> None:
-        """Test helper for
-        test_readiness_probe_returns_not_ready_when_operation_store_broken.
-        """
-        raise ConnectionError("database unreachable")
+    assert response.status_code == 503
+    data = response.json()
+    assert data["status"] == "not_ready"
+    assert data["dependencies"]["operation_store"] == "unavailable"
 
-    with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _raise)
-        response = client.get("/readyz")
+    container.db_health.note_success()
+    response = prime_ready_dependencies.get("/readyz")
 
-        assert response.status_code == 503
-        data = response.json()
-        assert data["status"] == "not_ready"
-        assert data["dependencies"]["operation_store"] == "unavailable"
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ready"
+    assert data["dependencies"]["operation_store"] == "available"
 
 
 def test_readiness_probe_ready_when_r2_missing_uses_implicit_retention(
@@ -207,8 +226,6 @@ def test_readiness_probe_ready_when_r2_missing_uses_implicit_retention(
     )
 
     with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         response = client.get("/readyz")
 
         assert response.status_code == 200
@@ -242,8 +259,6 @@ def test_readiness_probe_ready_in_local_retention_mode_without_r2(
     )
 
     with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         response = client.get("/readyz")
 
         assert response.status_code == 200
@@ -263,8 +278,6 @@ def test_readiness_probe_ready_when_r2_endpoint_missing_uses_implicit_retention(
     _configure_r2(monkeypatch, endpoint="")
 
     with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         response = client.get("/readyz")
 
         assert response.status_code == 200
@@ -293,8 +306,6 @@ def test_readiness_probe_not_ready_when_local_retention_root_unwritable(
     )
 
     with TestClient(app) as client:
-        container = app.state.container
-        monkeypatch.setattr(container.operation_store, "healthcheck", _async_noop)
         response = client.get("/readyz")
 
         assert response.status_code == 503

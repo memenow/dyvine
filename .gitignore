@@ -197,3 +197,4 @@ AGENTS.md
 
 # Pre-commit hooks
 .pre-commit-config.yaml.backup
+.claude/*.local.md

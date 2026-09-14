@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -460,3 +461,107 @@ async def test_service_container_survives_watch_build_failure(
         assert "watch_service" not in container._services
     finally:
         await container.shutdown()  # clean teardown even without watch
+
+
+def _janitor_loop_name(container: dependencies.ServiceContainer) -> str | None:
+    """Return the running janitor coroutine's qualified name, if any."""
+    task = container._janitor_task
+    if task is None:
+        return None
+    coro = task.get_coro()
+    return coro.__qualname__ if coro is not None else None
+
+
+@pytest.mark.asyncio
+async def test_single_replica_runs_purge_loop_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single replicas never heartbeat/sweep while idle."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", False)
+    monkeypatch.setattr(dependencies.settings.database, "janitor_interval_seconds", 0.0)
+    operation_store, watch_store = _fake_stores()
+    calls: list[str] = []
+
+    async def _record(name: str) -> int:
+        calls.append(name)
+        return 0
+
+    monkeypatch.setattr(
+        operation_store,
+        "heartbeat_owned",
+        lambda: _record("heartbeat_owned"),
+    )
+    monkeypatch.setattr(
+        operation_store,
+        "sweep_orphans",
+        lambda **kwargs: _record("sweep_orphans"),
+    )
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert _janitor_loop_name(container) == "RepositoryJanitor.run_purge_forever"
+        # Boot recovery above is the last expected store traffic.
+        calls.clear()
+        await asyncio.sleep(0.05)
+        assert calls == []
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_single_replica_skips_janitor_without_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Single replicas with retention disabled spawn no janitor task."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", False)
+    monkeypatch.setattr(dependencies.settings.database, "janitor_interval_seconds", 0.0)
+    monkeypatch.setattr(dependencies.settings.database, "operation_retention_days", 0)
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert container._janitor_task is None
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_multi_replica_runs_heartbeat_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-replica keeps the heartbeat/sweep liveness loop."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", True)
+    monkeypatch.setattr(dependencies.settings.r2, "account_id", "acc")
+    monkeypatch.setattr(dependencies.settings.r2, "access_key_id", "key")
+    monkeypatch.setattr(dependencies.settings.r2, "secret_access_key", "secret")
+    monkeypatch.setattr(dependencies.settings.r2, "bucket_name", "bucket")
+    monkeypatch.setattr(dependencies.settings.r2, "endpoint", "https://example.test")
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert _janitor_loop_name(container) == "RepositoryJanitor.run_forever"
+    finally:
+        await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_explicit_janitor_interval_forces_heartbeat_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit interval runs the loop even on a single replica."""
+    _stub_douyin_handler(monkeypatch)
+    monkeypatch.setattr(dependencies.settings.api, "multi_replica", False)
+    monkeypatch.setattr(
+        dependencies.settings.database, "janitor_interval_seconds", 60.0
+    )
+    operation_store, watch_store = _fake_stores()
+    container = dependencies.ServiceContainer()
+    await container.initialize(operation_store=operation_store, watch_store=watch_store)
+    try:
+        assert _janitor_loop_name(container) == "RepositoryJanitor.run_forever"
+    finally:
+        await container.shutdown()

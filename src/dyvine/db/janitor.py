@@ -10,6 +10,11 @@ slow event loop while still failing genuinely dead work within a few
 minutes. Rolling updates are safe: the draining replica keeps
 heartbeating until its tasks finish, so a freshly booted sibling never
 sweeps rows that are still being worked.
+
+Single replicas skip the heartbeat/sweep loop entirely (every row is
+owned by the only process, and boot already sweeps leftovers from a
+previous run) and run :meth:`RepositoryJanitor.run_purge_forever`
+instead, so an idle process never touches the database.
 """
 
 from __future__ import annotations
@@ -100,3 +105,34 @@ class RepositoryJanitor:
                     extra={"interval_seconds": self._heartbeat_interval},
                 )
             await asyncio.sleep(self._heartbeat_interval)
+
+    async def run_purge_only(self) -> None:
+        """Run one retention purge; a no-op when retention is disabled."""
+        if self._retention_days <= 0:
+            return
+        cutoff = (datetime.now(UTC) - timedelta(days=self._retention_days)).isoformat()
+        await self._operations.purge_terminal_before(cutoff)
+
+    async def run_purge_forever(self) -> None:
+        """Loop retention purges until cancelled (single-replica mode).
+
+        The first purge waits a full interval because boot already
+        purged; afterwards the cadence matches :meth:`run_forever`'s
+        purge leg. Heartbeats and orphan sweeps never run here: with a
+        single writer there is no sibling to coordinate with. A failed
+        pass is logged and skipped, and cancellation propagates, both
+        mirroring :meth:`run_forever`.
+        """
+        if self._retention_days <= 0:
+            return
+        while True:
+            await asyncio.sleep(self._purge_interval_seconds)
+            try:
+                await self.run_purge_only()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "janitor purge failed; continuing on next interval",
+                    extra={"interval_seconds": self._purge_interval_seconds},
+                )

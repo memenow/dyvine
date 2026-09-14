@@ -9,12 +9,14 @@ the service layer free of ORM types.
 
 from __future__ import annotations
 
+import functools
 import uuid
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Concatenate, Protocol
 
 from sqlalchemy import and_, delete, desc, func, or_, select, text, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from ..core.exceptions import (
     OperationNotFoundError,
@@ -23,6 +25,7 @@ from ..core.exceptions import (
     WatchDuplicateError,
     WatchSubscriptionNotFoundError,
 )
+from .health import DatabaseHealthTracker
 from .models import OperationRow, WatchSubscriptionRow
 from .protocols import ACTIVE_STATUSES, TERMINAL_STATUSES
 from .records import OperationRecord, WatchSubscriptionRecord
@@ -57,6 +60,45 @@ _ORPHAN_MESSAGE = "Operation interrupted: owning replica stopped heartbeating"
 #: Advisory-lock key serialising capped watch-subscription creates
 #: across replicas (see ``create_subscription_capped``).
 _WATCH_CAP_LOCK_KEY = "dyvine_watch_subscription_cap"
+
+
+class _HealthTrackable(Protocol):
+    """Structural hook for repositories carrying a health tracker."""
+
+    _health: DatabaseHealthTracker | None
+
+
+def _tracked[SelfT: _HealthTrackable, **P, R](
+    fn: Callable[Concatenate[SelfT, P], Coroutine[Any, Any, R]],
+) -> Callable[Concatenate[SelfT, P], Coroutine[Any, Any, R]]:
+    """Record the repository call's outcome on its health tracker.
+
+    Only database-layer failures (``SQLAlchemyError``/``OSError``)
+    count as unreachable; any other outcome — including a domain error
+    such as "not found" — proves the database answered. Repositories
+    built without a tracker skip recording.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(self: SelfT, *args: P.args, **kwargs: P.kwargs) -> R:
+        health = self._health
+        try:
+            result = await fn(self, *args, **kwargs)
+        except (SQLAlchemyError, OSError):
+            if health is not None:
+                health.note_failure()
+            raise
+        except Exception:
+            # A domain error (not found, duplicate, over cap) still
+            # proves the database answered the call.
+            if health is not None:
+                health.note_success()
+            raise
+        if health is not None:
+            health.note_success()
+        return result
+
+    return wrapper
 
 
 def _now_iso() -> str:
@@ -107,18 +149,29 @@ class PostgresOperationRepository:
             disposes it; the repository never closes shared state).
         owner_id: Replica identity stamped onto created rows so the
             orphan sweep can tell live owners from dead ones.
+        health: Tracker recording each call's outcome for passive
+            ``/readyz`` reporting; ``None`` disables recording.
     """
 
-    def __init__(self, sessions: DatabaseSessionFactory, *, owner_id: str) -> None:
+    def __init__(
+        self,
+        sessions: DatabaseSessionFactory,
+        *,
+        owner_id: str,
+        health: DatabaseHealthTracker | None = None,
+    ) -> None:
         """Bind the repository to a session factory and an owner identity."""
         self._sessions = sessions
         self._owner_id = owner_id
+        self._health = health
 
+    @_tracked
     async def healthcheck(self) -> None:
         """Verify the database answers; propagate any failure."""
         async with self._sessions.session() as session:
             await session.execute(text("SELECT 1"))
 
+    @_tracked
     async def create_operation(
         self,
         *,
@@ -164,6 +217,7 @@ class PostgresOperationRepository:
             ) from exc
         return _operation_to_record(row)
 
+    @_tracked
     async def get_operation(self, operation_id: str) -> OperationRecord:
         """Fetch one operation or raise ``OperationNotFoundError``."""
         async with self._sessions.session() as session:
@@ -172,6 +226,7 @@ class PostgresOperationRepository:
             raise OperationNotFoundError(f"Operation {operation_id} not found")
         return _operation_to_record(row)
 
+    @_tracked
     async def get_latest_operation_for_subject(
         self, subject_id: str, *, operation_type: str | None = None
     ) -> OperationRecord:
@@ -195,6 +250,7 @@ class PostgresOperationRepository:
             raise OperationNotFoundError(f"Operation {subject_id} not found")
         return _operation_to_record(row)
 
+    @_tracked
     async def update_operation(
         self, operation_id: str, **fields: Any
     ) -> OperationRecord:
@@ -229,6 +285,7 @@ class PostgresOperationRepository:
                     row.heartbeat_at = stamp
         return _operation_to_record(row)
 
+    @_tracked
     async def sweep_orphans(self, *, stale_after_seconds: float) -> int:
         """Fail active rows whose owner stopped heartbeating.
 
@@ -271,6 +328,7 @@ class PostgresOperationRepository:
                 result = await connection.execute(statement)
                 return int(result.rowcount or 0)
 
+    @_tracked
     async def heartbeat_owned(self) -> int:
         """Refresh the heartbeat of every active row this owner holds.
 
@@ -290,6 +348,7 @@ class PostgresOperationRepository:
                 result = await connection.execute(statement)
                 return int(result.rowcount or 0)
 
+    @_tracked
     async def purge_terminal_before(self, cutoff_iso: str) -> int:
         """Delete terminal rows last updated before ``cutoff_iso``."""
         statement = (
@@ -307,10 +366,22 @@ class PostgresOperationRepository:
 class PostgresWatchRepository:
     """Watch-subscription persistence over Postgres + asyncpg."""
 
-    def __init__(self, sessions: DatabaseSessionFactory) -> None:
-        """Bind the repository to a caller-owned session factory."""
-        self._sessions = sessions
+    def __init__(
+        self,
+        sessions: DatabaseSessionFactory,
+        *,
+        health: DatabaseHealthTracker | None = None,
+    ) -> None:
+        """Bind the repository to a caller-owned session factory.
 
+        Args:
+            health: Tracker recording each call's outcome for passive
+                ``/readyz`` reporting; ``None`` disables recording.
+        """
+        self._sessions = sessions
+        self._health = health
+
+    @_tracked
     async def create_subscription(
         self,
         *,
@@ -346,6 +417,7 @@ class PostgresWatchRepository:
             ) from exc
         return _watch_to_record(row)
 
+    @_tracked
     async def create_subscription_capped(
         self,
         *,
@@ -422,6 +494,7 @@ class PostgresWatchRepository:
             ) from exc
         return _watch_to_record(row)
 
+    @_tracked
     async def get_subscription(self, subscription_id: str) -> WatchSubscriptionRecord:
         """Fetch by ID or raise ``WatchSubscriptionNotFoundError``."""
         async with self._sessions.session() as session:
@@ -432,6 +505,7 @@ class PostgresWatchRepository:
             )
         return _watch_to_record(row)
 
+    @_tracked
     async def get_subscription_by_user(
         self, user_id: str
     ) -> WatchSubscriptionRecord | None:
@@ -443,6 +517,7 @@ class PostgresWatchRepository:
             row = (await session.execute(statement)).scalars().first()
         return _watch_to_record(row) if row is not None else None
 
+    @_tracked
     async def list_subscriptions(
         self, *, enabled_only: bool = False
     ) -> list[WatchSubscriptionRecord]:
@@ -458,6 +533,7 @@ class PostgresWatchRepository:
             rows = (await session.execute(statement)).scalars().all()
         return [_watch_to_record(row) for row in rows]
 
+    @_tracked
     async def count_subscriptions(self) -> int:
         """Return the total number of persisted subscriptions."""
         statement = select(func.count()).select_from(WatchSubscriptionRow)
@@ -465,6 +541,7 @@ class PostgresWatchRepository:
             total = (await session.execute(statement)).scalar()
         return int(total or 0)
 
+    @_tracked
     async def update_subscription(
         self, subscription_id: str, **fields: Any
     ) -> WatchSubscriptionRecord:
@@ -491,6 +568,7 @@ class PostgresWatchRepository:
                     row.updated_at = _now_iso()
         return _watch_to_record(row)
 
+    @_tracked
     async def delete_subscription(self, subscription_id: str) -> bool:
         """Delete a subscription; ``True`` when a row was removed."""
         statement = delete(WatchSubscriptionRow).where(

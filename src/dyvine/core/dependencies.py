@@ -6,7 +6,9 @@
 - A Postgres-backed `OperationRepository` / `WatchRepository` pair
   sharing one `DatabaseSessionFactory` (asyncpg pool), plus a
   `RepositoryJanitor` task that heartbeats owned rows, sweeps
-  orphans, and purges terminal rows.
+  orphans, and purges terminal rows on multi-replica deployments
+  (single replicas run a daily retention purge only, so an idle
+  process never touches the database).
 - A `UserService`, `PostService`, and `LivestreamService` that all
   share the same operation repository and `BackgroundTaskRegistry`.
 - An `R2StorageService` (under `UserService`) attached to two
@@ -48,7 +50,12 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Header, HTTPException, status
 
-from ..db.janitor import ORPHAN_STALE_AFTER_SECONDS, RepositoryJanitor
+from ..db.health import DatabaseHealthTracker
+from ..db.janitor import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    ORPHAN_STALE_AFTER_SECONDS,
+    RepositoryJanitor,
+)
 from ..db.postgres import (
     PostgresOperationRepository,
     PostgresWatchRepository,
@@ -131,8 +138,12 @@ class ServiceContainer:
         self._background_tasks = BackgroundTaskRegistry()
         # Database state. The session factory owns the asyncpg pool; the
         # janitor task heartbeats owned rows and sweeps orphans until
-        # shutdown stops it after the background registry drains.
+        # shutdown stops it after the background registry drains. The
+        # health tracker records the outcome of real repository calls
+        # so ``/readyz`` can report database reachability without
+        # opening a connection of its own.
         self._db: DatabaseSessionFactory | None = None
+        self._db_health = DatabaseHealthTracker()
         self._janitor_task: asyncio.Task[None] | None = None
         # Watch reconcile loop (watcher replicas only). Cancelled before
         # the watcher loops themselves so it cannot restart a loop
@@ -166,7 +177,8 @@ class ServiceContainer:
             - LivestreamService: Livestream download orchestration
             - PostService: Bulk post download orchestration
             - WatchService: Subscription-driven auto-download scheduler
-            - RepositoryJanitor: Liveness loop (heartbeat/sweep/purge)
+            - RepositoryJanitor: Liveness loop (heartbeat/sweep/purge
+              on multi-replica; retention purge only on single-replica)
 
         Executors created:
             - ``r2_executor`` (16 workers): R2 upload/head/delete/list
@@ -244,12 +256,18 @@ class ServiceContainer:
         if operation_store is None or watch_store is None:
             self._db = DatabaseSessionFactory(
                 settings.database.url,
+                pool_class=settings.database.pool_class,
                 pool_size=settings.database.pool_size,
+                max_overflow=settings.database.pool_max_overflow,
                 pool_timeout=settings.database.pool_timeout,
+                pool_recycle=settings.database.pool_recycle_seconds,
+                pool_pre_ping=settings.database.pool_pre_ping,
             )
             owner_id = uuid.uuid4().hex
-            operation_store = PostgresOperationRepository(self._db, owner_id=owner_id)
-            watch_store = PostgresWatchRepository(self._db)
+            operation_store = PostgresOperationRepository(
+                self._db, owner_id=owner_id, health=self._db_health
+            )
+            watch_store = PostgresWatchRepository(self._db, health=self._db_health)
             logger.info(
                 "database backend ready",
                 extra={"owner_id": owner_id},
@@ -308,13 +326,30 @@ class ServiceContainer:
             task_registry=self._background_tasks,
         )
 
-        # Start the liveness loop before any service schedules work so
-        # rows created during startup are heartbeat-covered from birth.
-        janitor = RepositoryJanitor(
-            operation_store,
-            retention_days=settings.database.operation_retention_days,
-        )
-        self._janitor_task = asyncio.create_task(janitor.run_forever())
+        # Liveness coverage before any service schedules work. An
+        # explicit ``DATABASE_JANITOR_INTERVAL_SECONDS`` always runs the
+        # heartbeat/sweep loop; otherwise it runs on multi-replica
+        # deployments only. Single replicas keep boot recovery (above)
+        # plus a daily retention purge, and never touch the database
+        # while idle.
+        janitor_interval = settings.database.janitor_interval_seconds
+        if janitor_interval > 0 or settings.api.multi_replica:
+            janitor = RepositoryJanitor(
+                operation_store,
+                retention_days=settings.database.operation_retention_days,
+                heartbeat_interval=(
+                    janitor_interval
+                    if janitor_interval > 0
+                    else HEARTBEAT_INTERVAL_SECONDS
+                ),
+            )
+            self._janitor_task = asyncio.create_task(janitor.run_forever())
+        elif settings.database.operation_retention_days > 0:
+            janitor = RepositoryJanitor(
+                operation_store,
+                retention_days=settings.database.operation_retention_days,
+            )
+            self._janitor_task = asyncio.create_task(janitor.run_purge_forever())
 
         # Initialize the watch scheduler. It shares the background-task
         # registry so its watcher loops drain on shutdown like every
@@ -561,6 +596,16 @@ class ServiceContainer:
         if not isinstance(service, OperationRepository):
             raise TypeError("operation_store is not an OperationRepository instance")
         return service
+
+    @property
+    def db_health(self) -> DatabaseHealthTracker:
+        """Get the last-known database reachability tracker.
+
+        Unlike the services above this needs no initialization: the
+        tracker exists from construction so ``/readyz`` can report
+        ``"unknown"`` instead of failing before the container boots.
+        """
+        return self._db_health
 
     @property
     def livestream_service(self) -> LivestreamService:

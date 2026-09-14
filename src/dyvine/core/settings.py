@@ -29,7 +29,7 @@ addresses.
 """
 
 from functools import lru_cache
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -132,13 +132,36 @@ class DatabaseSettings(BaseSettings):
 
     Attributes:
         url: SQLAlchemy database URL (``postgresql+asyncpg://...``).
-        pool_size: Steady-state pooled connections per process.
-        pool_timeout: Seconds to wait for a pooled connection.
+        pool_class: Connection-pool strategy. ``"null"`` opens a fresh
+            connection per use and holds none while idle (the serverless
+            default: zero idle connections); ``"queue"`` keeps a capped
+            ``pool_size`` + ``pool_max_overflow`` pool for deployments
+            that prefer bounded concurrency over zero idle state.
+        pool_size: Steady-state pooled connections per process
+            (``"queue"`` only; ignored by ``"null"``).
+        pool_max_overflow: Extra connections beyond ``pool_size`` under
+            burst (``"queue"`` only; ignored by ``"null"``).
+        pool_timeout: Seconds to wait for a pooled connection
+            (``"queue"`` only; ignored by ``"null"``).
+        pool_recycle_seconds: Pooled connections older than this are
+            discarded on next checkout (``"queue"`` only; ``-1``
+            disables); ``"null"`` ignores it.
+        pool_pre_ping: Probe a pooled connection before each checkout
+            (``"queue"`` only; ``"null"`` always skips the probe because
+            every checkout already opens a fresh connection).
+        janitor_interval_seconds: Seconds between janitor
+            heartbeat/sweep passes. ``0`` (default) is automatic: the
+            loop runs only when ``API_MULTI_REPLICA=true``; single
+            replicas keep boot recovery plus a daily retention purge
+            and otherwise never touch the database while idle.
         operation_retention_days: Terminal operation rows older than
             this are purged at boot and daily; ``0`` disables purging.
 
     Environment Variables:
-        DATABASE_URL, DATABASE_POOL_SIZE, DATABASE_POOL_TIMEOUT,
+        DATABASE_URL, DATABASE_POOL_CLASS, DATABASE_POOL_SIZE,
+        DATABASE_POOL_MAX_OVERFLOW, DATABASE_POOL_TIMEOUT,
+        DATABASE_POOL_RECYCLE_SECONDS, DATABASE_POOL_PRE_PING,
+        DATABASE_JANITOR_INTERVAL_SECONDS,
         DATABASE_OPERATION_RETENTION_DAYS.
     """
 
@@ -146,11 +169,31 @@ class DatabaseSettings(BaseSettings):
         default=_DEFAULT_DATABASE_URL,
         description="SQLAlchemy database URL for operation/watch state",
     )
+    pool_class: Literal["queue", "null"] = Field(
+        default="null",
+        description="Connection-pool strategy: per-use connects or a capped pool",
+    )
     pool_size: int = Field(
         default=5, ge=1, description="Steady-state pooled DB connections"
     )
+    pool_max_overflow: int = Field(
+        default=2, ge=0, description="Burst connections beyond pool_size"
+    )
     pool_timeout: float = Field(
         default=30.0, ge=1.0, description="Seconds to wait for a DB connection"
+    )
+    pool_recycle_seconds: float = Field(
+        default=300.0,
+        ge=-1.0,
+        description="Discard pooled connections older than this (-1 disables)",
+    )
+    pool_pre_ping: bool = Field(
+        default=True, description="Probe pooled connections before checkout"
+    )
+    janitor_interval_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Janitor heartbeat/sweep cadence (0 runs it on multi-replica only)",
     )
     operation_retention_days: int = Field(
         default=30,

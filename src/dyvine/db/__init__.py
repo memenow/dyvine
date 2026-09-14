@@ -10,6 +10,7 @@ suite against a real database.
 
 from __future__ import annotations
 
+from .health import DatabaseHealthTracker, HealthStatus
 from .janitor import (
     HEARTBEAT_INTERVAL_SECONDS,
     ORPHAN_STALE_AFTER_SECONDS,
@@ -34,7 +35,9 @@ __all__ = [
     "ORPHAN_STALE_AFTER_SECONDS",
     "PURGE_INTERVAL_SECONDS",
     "Base",
+    "DatabaseHealthTracker",
     "DatabaseSessionFactory",
+    "HealthStatus",
     "OperationRecord",
     "OperationRepository",
     "OperationRow",

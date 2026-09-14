@@ -201,9 +201,35 @@ def test_database_settings_defaults() -> None:
     """Localhost Postgres default for development."""
     s = DatabaseSettings()
     assert s.url == "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine"
+    assert s.pool_class == "null"
     assert s.pool_size == 5
+    assert s.pool_max_overflow == 2
     assert s.pool_timeout == 30.0
+    assert s.pool_recycle_seconds == 300.0
+    assert s.pool_pre_ping is True
+    assert s.janitor_interval_seconds == 0.0
     assert s.operation_retention_days == 30
+
+
+def test_database_settings_read_pool_and_janitor_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pool strategy and janitor cadence come from ``DATABASE_*`` env."""
+    monkeypatch.setenv("DATABASE_POOL_CLASS", "queue")
+    monkeypatch.setenv("DATABASE_POOL_SIZE", "3")
+    monkeypatch.setenv("DATABASE_POOL_MAX_OVERFLOW", "4")
+    monkeypatch.setenv("DATABASE_POOL_TIMEOUT", "7")
+    monkeypatch.setenv("DATABASE_POOL_RECYCLE_SECONDS", "60")
+    monkeypatch.setenv("DATABASE_POOL_PRE_PING", "false")
+    monkeypatch.setenv("DATABASE_JANITOR_INTERVAL_SECONDS", "120")
+    s = DatabaseSettings()
+    assert s.pool_class == "queue"
+    assert s.pool_size == 3
+    assert s.pool_max_overflow == 4
+    assert s.pool_timeout == 7.0
+    assert s.pool_recycle_seconds == 60.0
+    assert s.pool_pre_ping is False
+    assert s.janitor_interval_seconds == 120.0
 
 
 def test_multi_replica_settings_defaults() -> None:

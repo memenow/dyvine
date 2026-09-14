@@ -121,3 +121,87 @@ async def test_run_forever_survives_failed_pass() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls >= 2
+
+
+async def test_run_purge_only_purges_old_terminal_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The purge-only pass deletes terminal rows past retention."""
+    repo = FakeOperationRepository(owner_id="a")
+    monkeypatch.setattr(fake_repos, "_now_iso", lambda: "2020-01-01T00:00:00+00:00")
+    old_id = (
+        await repo.create_operation(
+            operation_type="t",
+            subject_id="old",
+            status="completed",
+            message="done",
+        )
+    ).operation_id
+    monkeypatch.undo()
+
+    janitor = RepositoryJanitor(repo, retention_days=30)
+    await janitor.run_purge_only()
+    assert old_id not in state_rows(repo)
+
+
+async def test_run_purge_only_is_noop_when_disabled() -> None:
+    """Disabled retention never reaches the store."""
+    repo = FakeOperationRepository(owner_id="a")
+
+    async def _boom(cutoff_iso: str) -> int:
+        raise AssertionError("purge must not run when retention is disabled")
+
+    repo.purge_terminal_before = _boom  # type: ignore[method-assign]
+    janitor = RepositoryJanitor(repo, retention_days=0)
+    await janitor.run_purge_only()
+
+
+async def test_run_purge_forever_loops_until_cancelled() -> None:
+    """The purge loop repeats passes and propagates cancellation."""
+    repo = FakeOperationRepository(owner_id="a")
+    janitor = RepositoryJanitor(repo, retention_days=30, purge_interval_seconds=0.01)
+    calls = 0
+    real_purge_only = janitor.run_purge_only
+
+    async def counting() -> None:
+        nonlocal calls
+        calls += 1
+        await real_purge_only()
+
+    janitor.run_purge_only = counting  # type: ignore[method-assign]
+    task = asyncio.create_task(janitor.run_purge_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 1
+
+
+async def test_run_purge_forever_survives_failed_pass() -> None:
+    """One transient purge failure is logged and skipped, not fatal."""
+    repo = FakeOperationRepository(owner_id="a")
+    janitor = RepositoryJanitor(repo, retention_days=30, purge_interval_seconds=0.01)
+    calls = 0
+    real_purge_only = janitor.run_purge_only
+
+    async def flaky() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient db error")
+        await real_purge_only()
+
+    janitor.run_purge_only = flaky  # type: ignore[method-assign]
+    task = asyncio.create_task(janitor.run_purge_forever())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls >= 2
+
+
+async def test_run_purge_forever_returns_immediately_when_disabled() -> None:
+    """Disabled retention never starts the purge loop."""
+    repo = FakeOperationRepository(owner_id="a")
+    janitor = RepositoryJanitor(repo, retention_days=0)
+    await asyncio.wait_for(janitor.run_purge_forever(), timeout=1.0)
