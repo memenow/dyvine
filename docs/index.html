@@ -214,6 +214,21 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
       </p>
       <p>
+        Douyin's web APIs additionally require a per-request Argus webSign
+        triple (<code>uifid</code>/<code>timestamp</code>/<code>x-secsdk-web-signature</code>)
+        that only the SecureSDK inside a real browser session can compute. Dyvine keeps one
+        headless-Chromium page purely as a signing session -- all API traffic and downloads stay
+        on plain HTTP -- starting it lazily on the first signed request (<code>DOUYIN_WEBSIGN_ENABLED</code>,
+        default <code>true</code>; page <code>DOUYIN_WEBSIGN_PAGE_URL</code>; budgets
+        <code>DOUYIN_WEBSIGN_INIT_TIMEOUT_SECONDS</code> and
+        <code>DOUYIN_WEBSIGN_SIGN_TIMEOUT_SECONDS</code>), and re-signs once with a fresh session
+        when it observes an Argus block (<code>DOUYIN_WEBSIGN_RETRY_ONCE</code>), and fails fast
+        (backing off) after repeated signer failures. The host must
+        provide a matching Chromium build (<code>playwright install chromium</code>); without it the
+        builders return unsigned URLs exactly as before, so unaffected endpoints keep working while
+        gated ones fail as HTTP 403. Set <code>DOUYIN_WEBSIGN_ENABLED=false</code> only as a kill-switch.
+      </p>
+      <p>
         Persistence targets Postgres: set <code>DATABASE_URL</code> to a
         <code>postgresql+asyncpg://</code> connection string and pick a pool
         strategy with <code>DATABASE_POOL_CLASS</code>: <code>null</code> (default)

@@ -87,7 +87,7 @@ Configuration is environment-driven through `dyvine.core.settings`:
 | `API_` | Server bind, CORS, prefix, rate limiting, multi-replica flags |
 | `SECURITY_` | API key (`SECURITY_API_KEY`) and router auth gate (`SECURITY_REQUIRE_API_KEY`) |
 | `DATABASE_` | Postgres URL, pool strategy (`null`/`queue`) and sizing, janitor cadence, operation retention |
-| `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode |
+| `DOUYIN_` | Cookie, headers, proxy, download root, livestream headers, local-retention mode, Argus webSign session |
 | `DOUYIN_WATCH_` | Watch Mode polling cadences, subscription cap, dedupe window, backfill flag |
 | `R2_` | Cloudflare R2 account, key, bucket, and endpoint |
 | (none) | `WATCH_ENABLED`: run watch loops in this process (see below) |
@@ -131,6 +131,19 @@ replica runs the loops and adopts new rows through a periodic
 reconcile pass. Crashed loops restart under exponential backoff and
 park after 5 consecutive crashes until the subscription is deleted
 and recreated.
+
+Douyin's web APIs additionally require a per-request Argus webSign
+triple (`uifid`/`timestamp`/`x-secsdk-web-signature`) that only the
+SecureSDK inside a real browser session can compute (`DOUYIN_WEBSIGN_*`;
+enabled by default). Dyvine keeps one headless-Chromium page purely as a
+signing session -- all API traffic and downloads stay on plain HTTP --
+starting it lazily on the first signed request, and re-signs once with a
+fresh session when it observes an Argus block, and fails fast
+(backing off) after repeated signer failures. The host must provide a
+matching Chromium build (`playwright install chromium`); without it the
+builders return unsigned URLs exactly as before, so unaffected endpoints
+keep working while gated ones fail as HTTP 403. Set
+`DOUYIN_WEBSIGN_ENABLED=false` only as a kill-switch.
 
 ## Common Commands
 

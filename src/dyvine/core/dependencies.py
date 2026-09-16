@@ -66,6 +66,12 @@ from ..services.livestreams import LivestreamService
 from ..services.posts import PostService
 from ..services.users import UserService
 from ..services.watch import WatchService
+from ..services.websign import (
+    WebSignProvider,
+    install_fetch_retry,
+    install_websign_patch,
+    uninstall_websign_patch,
+)
 from .background import BackgroundTaskRegistry
 from .logging import ContextLogger
 from .settings import settings
@@ -149,6 +155,9 @@ class ServiceContainer:
         # the watcher loops themselves so it cannot restart a loop
         # mid-shutdown.
         self._watch_reconcile_task: asyncio.Task[Any] | None = None
+        # Argus webSign session. The browser starts lazily on the first
+        # signed request, so an idle container pays nothing for it.
+        self._websign_provider: WebSignProvider | None = None
 
     async def initialize(
         self,
@@ -248,6 +257,22 @@ class ServiceContainer:
         # Initialize Douyin handler with configuration
         douyin_config = self._create_douyin_config()
         self._services["douyin_handler"] = DouyinHandler(douyin_config)
+
+        # Argus webSign layer. Installs after the handler exists because
+        # resolving f2 symbols imports the SDK (which performs network
+        # IO on import); the provider itself stays idle until the first
+        # signed request. A version drift raises here and fails boot
+        # loudly instead of serving silent HTTP 403s.
+        if settings.douyin.websign_enabled:
+            self._websign_provider = WebSignProvider(
+                page_url=settings.douyin.websign_page_url,
+                user_agent=settings.douyin.user_agent,
+                init_timeout_seconds=settings.douyin.websign_init_timeout_seconds,
+                sign_timeout_seconds=settings.douyin.websign_sign_timeout_seconds,
+            )
+            install_websign_patch(self._websign_provider)
+            if settings.douyin.websign_retry_once:
+                install_fetch_retry(self._websign_provider)
 
         # Initialize repositories. Production builds a Postgres pair over
         # one shared pool; tests inject fakes. The owner identity is fresh
@@ -437,6 +462,17 @@ class ServiceContainer:
                     )
                 finally:
                     setattr(self, attr, None)
+        try:
+            uninstall_websign_patch()
+        except Exception:
+            logger.exception("startup abort: websign uninstall failed")
+        if self._websign_provider is not None:
+            try:
+                self._websign_provider.close()
+            except Exception:
+                logger.exception("startup abort: websign close failed")
+            finally:
+                self._websign_provider = None
         self._services.clear()
 
     async def shutdown(self) -> None:
@@ -477,6 +513,14 @@ class ServiceContainer:
         # a sibling replica's sweep cannot mistake draining rows for
         # orphans (drain <= 20s, staleness threshold 120s).
         await self._background_tasks.drain()
+
+        # Tear down the signing session after in-flight work drains so no
+        # sign is mid-flight while the browser closes. Uninstall first so
+        # no new sign can start, then stop the provider thread.
+        uninstall_websign_patch()
+        if self._websign_provider is not None:
+            self._websign_provider.close()
+            self._websign_provider = None
 
         # Stop the liveness loop. Rows left behind (cancelled tasks that
         # never wrote a terminal state) go stale and are swept by the

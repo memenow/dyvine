@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import fake_repos
 import pytest
@@ -565,3 +565,21 @@ async def test_explicit_janitor_interval_forces_heartbeat_loop(
         assert _janitor_loop_name(container) == "RepositoryJanitor.run_forever"
     finally:
         await container.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_abort_startup_tolerates_websign_teardown_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify abort survives failing websign uninstall and close."""
+    container = dependencies.ServiceContainer()
+
+    def _boom() -> None:
+        raise RuntimeError("uninstall boom")
+
+    monkeypatch.setattr(dependencies, "uninstall_websign_patch", _boom)
+    provider = MagicMock()
+    provider.close.side_effect = RuntimeError("close boom")
+    container._websign_provider = provider
+    await container._abort_startup()
+    assert container._websign_provider is None
