@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import queue
 import sys
 import threading
 import types
@@ -506,6 +507,7 @@ def test_fetch_retry_skips_odd_shapes() -> None:
 class _RecordingPage:
     def __init__(self, fail_goto: bool = False) -> None:
         self.fail_goto = fail_goto
+        self.fail_idle = False
         self.gotos: list[str] = []
         self.evaluated: list[tuple[str, dict[str, Any]]] = []
 
@@ -515,6 +517,8 @@ class _RecordingPage:
             raise RuntimeError("navigation failed")
 
     def wait_for_load_state(self, *args: Any, **kwargs: Any) -> None:
+        if self.fail_idle:
+            raise RuntimeError("idle timeout")
         return None
 
     def wait_for_timeout(self, ms: int) -> None:
@@ -529,8 +533,9 @@ class _RecordingPage:
 
 
 class _RecordingPlaywright:
-    def __init__(self, *, fail_goto: bool = False) -> None:
+    def __init__(self, *, fail_goto: bool = False, fail_stop: bool = False) -> None:
         self.page = _RecordingPage(fail_goto=fail_goto)
+        self.fail_stop = fail_stop
         self.stops = 0
         self.launched_args: dict[str, Any] = {}
 
@@ -538,6 +543,8 @@ class _RecordingPlaywright:
         return self
 
     def stop(self) -> None:
+        if self.fail_stop:
+            raise RuntimeError("stop boom")
         self.stops += 1
 
     @property
@@ -727,3 +734,199 @@ async def test_fetch_retry_reraises_original_when_resign_fails() -> None:
         provider.invalidate.assert_called_once()
     finally:
         uninstall_websign_patch()
+
+
+# ── defensive-branch coverage ──────────────────────────────────────────
+
+
+def test_redact_url_degrades_on_non_url() -> None:
+    """Verify redaction degrades instead of raising."""
+    assert websign_mod._redact_url(object()) == "unparseable-url"
+
+
+def test_reply_drops_when_caller_timed_out() -> None:
+    """Verify late replies are dropped instead of blocking."""
+    reply: queue.Queue[Any] = queue.Queue(maxsize=1)
+    reply.put_nowait("first")
+    websign_mod._reply(reply, "late")
+    assert reply.get_nowait() == "first"
+
+
+def test_argus_probe_tolerates_raising_callable_body() -> None:
+    """Verify a callable body that raises probes as non-block."""
+
+    class _Raising:
+        status_code = 403
+
+        def text(self) -> str:
+            raise RuntimeError("unreadable")
+
+    assert not is_argus_block_response(_Raising())
+
+
+def test_provider_rejects_unexpected_headers() -> None:
+    """Verify non-dict headers tear the page down."""
+    factory = _factory_for(lambda url: {"url": url, "headers": "nope"})
+    provider = _provider(factory)
+    with provider, pytest.raises(WebSignError, match="unexpected headers"):
+        provider.sign("https://www.douyin.com/x/")
+    assert factory.state == {"opens": 1, "closes": 1}
+
+
+def test_provider_restarts_dead_thread() -> None:
+    """Verify a dead signer thread is reaped and restarted."""
+    factory = _factory_for(lambda url: {"url": url, "headers": {}})
+    provider = _provider(factory)
+    with provider:
+        provider.sign("https://www.douyin.com/x/")
+        old_thread = provider._thread
+        assert old_thread is not None
+        provider._ops.put(websign_mod._STOP)
+        old_thread.join(timeout=5)
+        assert not old_thread.is_alive()
+        result = provider.sign("https://www.douyin.com/x/?b=2")
+        assert result.url.endswith("?b=2")
+        assert provider._thread is not old_thread
+        assert factory.state["opens"] == 2
+
+
+def test_provider_rejects_unknown_reply_shape(monkeypatch: Any) -> None:
+    """Verify a foreign reply payload raises instead of returning Any."""
+    factory = _factory_for(lambda url: {"url": url, "headers": {}})
+    monkeypatch.setattr(websign_mod, "_sign_with_page", lambda *a: "junk")
+    provider = _provider(factory)
+    with provider, pytest.raises(WebSignError, match="returned str"):
+        provider.sign("https://www.douyin.com/x/")
+
+
+def test_provider_close_from_signer_thread_is_safe() -> None:
+    """Verify close() never deadlocks when called on its own thread."""
+    refs: dict[str, Any] = {}
+
+    def factory(**kwargs: Any) -> Any:
+        refs["thread"] = threading.current_thread()
+        refs["provider"].close()  # Runs on the signer thread.
+        return _FakePage(lambda url: {"url": url, "headers": {}}), lambda: None
+
+    provider = _provider(factory)
+    refs["provider"] = provider
+    result = provider.sign("https://www.douyin.com/x/")
+    assert result.url.endswith("/x/")
+    assert provider._closed
+    assert provider._thread is None
+    thread = refs["thread"]
+    provider._ops.put(websign_mod._STOP)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+def test_provider_wraps_unexpected_factory_error() -> None:
+    """Verify non-WebSignError failures surface wrapped."""
+
+    def boom(**kwargs: Any) -> Any:
+        raise RuntimeError("driver exploded")
+
+    provider = _provider(boom)
+    with provider, pytest.raises(WebSignError, match="driver exploded"):
+        provider.sign("https://www.douyin.com/x/")
+
+
+def test_provider_invalidate_tolerates_close_failure() -> None:
+    """Verify a raising closer does not break session rotation."""
+
+    def factory(**kwargs: Any) -> Any:
+        def closer() -> None:
+            raise RuntimeError("close boom")
+
+        return _FakePage(lambda url: {"url": url, "headers": {}}), closer
+
+    provider = _provider(factory)
+    with provider:
+        provider.sign("https://www.douyin.com/x/")
+        provider.invalidate()
+        result = provider.sign("https://www.douyin.com/x/?b=2")
+        assert result.url.endswith("?b=2")
+
+
+def test_open_tolerates_missing_networkidle(
+    fake_playwright: _RecordingPlaywright,
+) -> None:
+    """Verify a busy page still settles without network idle."""
+    fake_playwright.page.fail_idle = True
+    page, closer = websign_mod._open_signing_page(
+        page_url="https://www.douyin.com/",
+        user_agent="fake-agent",
+        init_timeout_seconds=60.0,
+        snippet_timeout_ms=25000,
+    )
+    assert page.gotos == ["https://www.douyin.com/"]
+    closer()
+
+
+def test_open_stop_failure_still_raises(monkeypatch: Any) -> None:
+    """Verify playwright.stop failure does not mask init errors."""
+    fake = _RecordingPlaywright(fail_goto=True, fail_stop=True)
+    module = types.ModuleType("playwright.sync_api")
+    module.sync_playwright = lambda: fake  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", module)
+    with pytest.raises(WebSignError, match="session init failed"):
+        websign_mod._open_signing_page(
+            page_url="https://www.douyin.com/",
+            user_agent="fake-agent",
+            init_timeout_seconds=60.0,
+            snippet_timeout_ms=25000,
+        )
+    assert fake.stops == 0
+
+
+def test_closer_runs_remaining_steps_after_failure(
+    fake_playwright: _RecordingPlaywright,
+) -> None:
+    """Verify one failing close step does not skip the rest."""
+    calls = {"n": 0}
+
+    def flaky_close() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("close boom")
+
+    fake_playwright.close = flaky_close  # type: ignore[method-assign]
+    _, closer = websign_mod._open_signing_page(
+        page_url="https://www.douyin.com/",
+        user_agent="fake-agent",
+        init_timeout_seconds=60.0,
+        snippet_timeout_ms=25000,
+    )
+    closer()
+    assert calls["n"] == 2
+    assert fake_playwright.stops == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_retry_install_idempotent() -> None:
+    """Verify double install wraps fetch helpers once."""
+    calls: list[str] = []
+
+    def script(url: str) -> _StubResponse:
+        calls.append(url)
+        if len(calls) == 1:
+            raise _Fake403()
+        return _StubResponse(200, "{}")
+
+    crawler_cls = _make_crawler(script)
+    provider = _stub_provider()
+    install_fetch_retry(provider, crawler_cls=crawler_cls)
+    install_fetch_retry(provider, crawler_cls=crawler_cls)
+    try:
+        response = await crawler_cls().get_fetch_data("https://www.douyin.com/e/")
+        assert response.status_code == 200
+        assert provider.sign.call_count == 1
+    finally:
+        uninstall_websign_patch()
+
+
+def test_uninstall_tolerates_dead_owner() -> None:
+    """Verify uninstall skips owners that reject attribute restore."""
+    websign_mod._PATCHED.append((object(), "missing", None))
+    uninstall_websign_patch()
+    assert not is_websign_patched()
