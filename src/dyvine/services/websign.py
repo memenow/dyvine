@@ -42,6 +42,7 @@ import functools
 import inspect
 import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
@@ -62,6 +63,11 @@ SUPPORTED_F2_VERSION = "0.0.1.7"
 ARGUS_BLOCK_MARKER = "Blocked by ArgusSecurityPlugin"
 # Query parameters appended by the webSign layer, in append order.
 WEBSIGN_QUERY_PARAMS = ("uifid", "timestamp", "x-secsdk-web-signature")
+
+# Backoff after repeated signing failures: without it, a broken signer
+# would burn a full init budget on every request before failing open.
+_FAILURE_THRESHOLD = 3
+_FAILURE_COOLDOWN_SECONDS = 300.0
 
 # Chromium flags proven against the live SecureSDK: full engine in
 # new-headless mode (the headless shell lacks features the SDK
@@ -272,6 +278,8 @@ class WebSignProvider:
     process pays nothing; any operation error tears the page down and
     the next sign re-initialises from scratch. :meth:`invalidate`
     forces that rotation (used after an observed Argus block).
+    After repeated failures the provider fails fast until a cooldown
+    passes, so a broken signer adds no per-request latency.
     """
 
     def __init__(
@@ -293,6 +301,8 @@ class WebSignProvider:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._closed = False
+        self._consecutive_failures = 0
+        self._last_failure_ts = 0.0
 
     @property
     def _snippet_timeout_ms(self) -> int:
@@ -305,6 +315,11 @@ class WebSignProvider:
         with self._state:
             if self._closed:
                 raise WebSignError("websign provider is closed")
+            if (
+                self._consecutive_failures >= _FAILURE_THRESHOLD
+                and time.monotonic() - self._last_failure_ts < _FAILURE_COOLDOWN_SECONDS
+            ):
+                raise WebSignError("websign backing off after repeated failures")
             if self._thread is None or not self._thread.is_alive():
                 if self._thread is not None:
                     self._thread.join(timeout=5)
@@ -358,6 +373,11 @@ class WebSignProvider:
     def __exit__(self, *exc_info: Any) -> None:
         self.close()
 
+    def _record_failure(self) -> None:
+        with self._state:
+            self._consecutive_failures += 1
+            self._last_failure_ts = time.monotonic()
+
     def _run(self) -> None:
         page: Page | None = None
         closer: Callable[[], None] | None = None
@@ -385,13 +405,17 @@ class WebSignProvider:
                     closer = self._close_page(page, closer)
                     page = None
                     self._ready.clear()
+                    self._record_failure()
                     _reply(op.reply, exc)
                 except Exception as exc:
                     closer = self._close_page(page, closer)
                     page = None
                     self._ready.clear()
+                    self._record_failure()
                     _reply(op.reply, WebSignError(str(exc)))
                 else:
+                    with self._state:
+                        self._consecutive_failures = 0
                     _reply(op.reply, result)
         finally:
             self._close_page(page, closer)

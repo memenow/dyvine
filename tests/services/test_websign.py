@@ -233,11 +233,12 @@ def test_provider_timeout_abandons_without_wedging() -> None:
     """Verify a timed-out sign never wedges later signs."""
     gate = threading.Event()
     factory = _factory_for(lambda url: {"url": url, "headers": {}}, on_open=gate.wait)
-    provider = _provider(factory, init_timeout_seconds=0.05, sign_timeout_seconds=0.05)
+    provider = _provider(factory, init_timeout_seconds=0.05, sign_timeout_seconds=5.0)
     with provider:
         with pytest.raises(WebSignError, match="timed out"):
             provider.sign("https://www.douyin.com/x/")
         gate.set()
+        assert provider._ready.wait(timeout=5)
         result = provider.sign("https://www.douyin.com/x/?b=2")
         assert result.url.endswith("?b=2")
 
@@ -930,3 +931,87 @@ def test_uninstall_tolerates_dead_owner() -> None:
     websign_mod._PATCHED.append((object(), "missing", None))
     uninstall_websign_patch()
     assert not is_websign_patched()
+
+
+def test_provider_backs_off_after_repeated_failures() -> None:
+    """Verify consecutive failures fail fast without new attempts."""
+    opens = {"n": 0}
+
+    def factory(**kwargs: Any) -> Any:
+        opens["n"] += 1
+        raise WebSignError("browser down")
+
+    provider = _provider(factory)
+    with provider:
+        for _ in range(3):
+            with pytest.raises(WebSignError, match="browser down"):
+                provider.sign("https://www.douyin.com/x/")
+        assert opens["n"] == 3
+        with pytest.raises(WebSignError, match="backing off"):
+            provider.sign("https://www.douyin.com/x/")
+        assert opens["n"] == 3
+
+
+def test_provider_backoff_resets_on_success() -> None:
+    """Verify a success clears the consecutive-failure count."""
+    factory_attempts = {"n": 0}
+    sign_attempts = {"n": 0}
+
+    def factory(**kwargs: Any) -> Any:
+        factory_attempts["n"] += 1
+        if factory_attempts["n"] <= 2:
+            raise WebSignError("flaky signer")
+
+        def script(url: str) -> Any:
+            sign_attempts["n"] += 1
+            if sign_attempts["n"] > 1:
+                raise WebSignError("flaky signer")
+            return {"url": url, "headers": {}}
+
+        return _FakePage(script), lambda: None
+
+    provider = _provider(factory)
+    with provider:
+        for _ in range(2):
+            with pytest.raises(WebSignError, match="flaky signer"):
+                provider.sign("https://www.douyin.com/x/")
+        assert provider.sign("https://www.douyin.com/x/").url.endswith("/x/")
+        for _ in range(2):
+            with pytest.raises(WebSignError, match="flaky signer"):
+                provider.sign("https://www.douyin.com/x/")
+
+
+def test_provider_backoff_expires_after_cooldown(monkeypatch: Any) -> None:
+    """Verify the backoff window eventually allows a retry."""
+    opens = {"n": 0}
+
+    def factory(**kwargs: Any) -> Any:
+        opens["n"] += 1
+        raise WebSignError("browser down")
+
+    monkeypatch.setattr(websign_mod, "_FAILURE_COOLDOWN_SECONDS", 0.0)
+    provider = _provider(factory)
+    with provider:
+        for _ in range(4):
+            with pytest.raises(WebSignError, match="browser down"):
+                provider.sign("https://www.douyin.com/x/")
+        assert opens["n"] == 4
+
+
+def test_invalidate_preserves_backoff() -> None:
+    """Verify explicit invalidation does not reset failure backoff."""
+    opens = {"n": 0}
+
+    def factory(**kwargs: Any) -> Any:
+        opens["n"] += 1
+        raise WebSignError("browser down")
+
+    provider = _provider(factory)
+    with provider:
+        for _ in range(3):
+            with pytest.raises(WebSignError):
+                provider.sign("https://www.douyin.com/x/")
+        provider.invalidate()
+        with pytest.raises(WebSignError, match="backing off"):
+            provider.sign("https://www.douyin.com/x/")
+        assert opens["n"] == 3

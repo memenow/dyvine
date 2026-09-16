@@ -138,7 +138,8 @@ SecureSDK inside a real browser session can compute (`DOUYIN_WEBSIGN_*`;
 enabled by default). Dyvine keeps one headless-Chromium page purely as a
 signing session -- all API traffic and downloads stay on plain HTTP --
 starting it lazily on the first signed request, and re-signs once with a
-fresh session when it observes an Argus block. The host must provide a
+fresh session when it observes an Argus block, and fails fast
+(backing off) after repeated signer failures. The host must provide a
 matching Chromium build (`playwright install chromium`); without it the
 builders return unsigned URLs exactly as before, so unaffected endpoints
 keep working while gated ones fail as HTTP 403. Set

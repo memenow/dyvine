@@ -222,7 +222,8 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         default <code>true</code>; page <code>DOUYIN_WEBSIGN_PAGE_URL</code>; budgets
         <code>DOUYIN_WEBSIGN_INIT_TIMEOUT_SECONDS</code> and
         <code>DOUYIN_WEBSIGN_SIGN_TIMEOUT_SECONDS</code>), and re-signs once with a fresh session
-        when it observes an Argus block (<code>DOUYIN_WEBSIGN_RETRY_ONCE</code>). The host must
+        when it observes an Argus block (<code>DOUYIN_WEBSIGN_RETRY_ONCE</code>), and fails fast
+        (backing off) after repeated signer failures. The host must
         provide a matching Chromium build (<code>playwright install chromium</code>); without it the
         builders return unsigned URLs exactly as before, so unaffected endpoints keep working while
         gated ones fail as HTTP 403. Set <code>DOUYIN_WEBSIGN_ENABLED=false</code> only as a kill-switch.
