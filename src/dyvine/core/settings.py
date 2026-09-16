@@ -315,11 +315,19 @@ class DouyinSettings(BaseSettings):
             deleting them after each run (implied when R2 is unconfigured).
         retain_max_gb: Optional GiB cap that prunes the oldest retained
             workspaces once exceeded; ``0`` disables pruning.
+        websign_enabled: Master switch for the Argus webSign layer.
+        websign_page_url: Page loaded to initialise the signing session.
+        websign_init_timeout_seconds: Chromium launch and SDK settle budget.
+        websign_sign_timeout_seconds: Per-request signing budget.
+        websign_retry_once: Re-sign and retry once on an Argus block.
 
     Environment Variables:
         DOUYIN_COOKIE, DOUYIN_USER_AGENT, DOUYIN_REFERER,
         DOUYIN_PROXY_HTTP, DOUYIN_PROXY_HTTPS, DOUYIN_DOWNLOAD_ROOT,
-        DOUYIN_RETAIN_LOCAL_DOWNLOADS, DOUYIN_RETAIN_MAX_GB.
+        DOUYIN_RETAIN_LOCAL_DOWNLOADS, DOUYIN_RETAIN_MAX_GB,
+        DOUYIN_WEBSIGN_ENABLED, DOUYIN_WEBSIGN_PAGE_URL,
+        DOUYIN_WEBSIGN_INIT_TIMEOUT_SECONDS,
+        DOUYIN_WEBSIGN_SIGN_TIMEOUT_SECONDS, DOUYIN_WEBSIGN_RETRY_ONCE.
 
     Note:
         A valid cookie is required for most Douyin API operations.
@@ -380,6 +388,36 @@ class DouyinSettings(BaseSettings):
             "greater than zero, the oldest per-task directories are pruned "
             "after each run until the total falls back under the cap. Zero "
             "leaves the workspace unbounded (pruning disabled)."
+        ),
+    )
+    websign_enabled: bool = Field(
+        default=True,
+        description=(
+            "Append the Argus webSign triple (uifid/timestamp/"
+            "x-secsdk-web-signature) to every Douyin web API URL via a "
+            "headless-Chromium signing session. Disable only as a "
+            "kill-switch; gated endpoints return HTTP 403 without it."
+        ),
+    )
+    websign_page_url: str = Field(
+        default="https://www.douyin.com/",
+        description="Page loaded to initialise the signing session.",
+    )
+    websign_init_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        description="Budget for launching Chromium and settling the SDK.",
+    )
+    websign_sign_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="Per-request signing budget once the session is ready.",
+    )
+    websign_retry_once: bool = Field(
+        default=True,
+        description=(
+            "On an observed Argus block, invalidate the signing session "
+            "and retry the request once with a fresh signature."
         ),
     )
 

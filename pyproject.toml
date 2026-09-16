@@ -44,6 +44,14 @@ dependencies = [
     "boto3>=1.43.89,<2.0.0",
     "f2>=0.0.1.7,<0.0.2",
     "httpx>=0.28.1,<1.0.0",
+    # Headless-Chromium signing session for the Argus webSign layer.
+    # Pinned exactly: the wheel and the browser build are a validated
+    # pair (1.62.0 against the production host's chromium-1234), and a
+    # drift breaks launches with "Executable doesn't exist". The wheel
+    # alone is not enough either: each host must also provide the
+    # matching Chromium build (``playwright install chromium`` once;
+    # production hosts keep it warm under the service user's cache).
+    "playwright==1.62.0",
 
     # Utilities
     "prometheus-client>=0.26.0,<1.0.0",

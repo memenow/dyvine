@@ -39,7 +39,7 @@ ships by manual `kubectl` rollout (see `README.md` Deployment).
 | `src/dyvine/db/` | Postgres repositories, session factory, janitor, health tracker |
 | `src/dyvine/middleware/` | Token-bucket rate limiting |
 | `src/dyvine/routers/` | User, post, livestream, and watch HTTP endpoints |
-| `src/dyvine/services/` | SDK orchestration, background work, R2 storage, watch scheduling |
+| `src/dyvine/services/` | SDK orchestration, background work, R2 storage, watch scheduling, Argus webSign signing |
 | `src/dyvine/schemas/` | Pydantic request and response models |
 | `scripts/dyvine_batch/` | Batch user-download CLI (`serial` / `concurrent`) |
 | `tests/` | Pytest suite mirroring the source tree |
