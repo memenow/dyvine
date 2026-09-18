@@ -69,14 +69,17 @@
       <nav class="crumbs"><a href="../index.html">Project documentation</a> / <a href="index.html">Architecture overview</a></nav>
       <h1>Dependency graph</h1>
       <p class="lede">Module imports and the third-party SDK surface Dyvine relies on.</p>
-      <p><span class="pill">Last reviewed: 2026-05-29</span></p>
+      <p><span class="pill">Last reviewed: 2026-09-18</span></p>
     </header>
 
     <p>
       The graph below highlights the boundary between Dyvine's own modules
-      (<code>routers</code>, <code>services</code>, <code>core</code>, <code>schemas</code>)
-      and the external SDKs Dyvine wraps (<code>f2</code>, <code>boto3</code>,
-      <code>fastapi</code>, <code>pydantic</code>).
+      (<code>routers</code>, <code>services</code>, <code>core</code>, <code>db</code>,
+      <code>schemas</code>) and the external SDKs Dyvine wraps (<code>f2</code>,
+      <code>boto3</code>, <code>playwright</code>, <code>fastapi</code>,
+      <code>pydantic</code>). Every f2 symbol is resolved through the deferred-import
+      hub <code>core/_lazy_f2</code>; <code>services/websign</code> additionally
+      resolves f2 at patch-install time to wrap its URL builders and raw fetch helpers.
     </p>
 
     <div class="diagram-frame">
@@ -85,39 +88,45 @@ graph LR
     Main[main.py] --> RouterU[routers/users]
     Main --> RouterP[routers/posts]
     Main --> RouterL[routers/livestreams]
+    Main --> RouterW[routers/watch]
+    Main --> MW[middleware/rate_limit]
     Main --> Core[core/*]
     Main --> ProbesPM[prometheus_client.make_asgi_app]
 
     RouterU --> SvcU[services/users]
     RouterP --> SvcP[services/posts]
     RouterL --> SvcL[services/livestreams]
+    RouterW --> SvcW[services/watch]
 
     SvcU --> SchU[schemas/users]
     SvcP --> SchP[schemas/posts]
     SvcL --> SchL[schemas/livestreams]
+    SvcW --> SchW[schemas/watch]
     SchU --> SchOps[schemas/operations]
     SchP --> SchOps
     SchL --> SchOps
 
-    SvcU --> Douyin[f2 DouyinHandler]
-    SvcP --> Douyin
-    SvcL --> Douyin
+    SvcU --> LazyF2[core/_lazy_f2]
+    SvcP --> LazyF2
+    SvcL --> LazyF2
     SvcL --> SvcU
-    SvcL --> F2DL[f2 DouyinDownloader]
-    SvcL --> F2Util[f2 WebCastIdFetcher]
+    LazyF2 --> Douyin[f2 DouyinHandler]
+    LazyF2 --> F2DL[f2 DouyinDownloader]
+    LazyF2 --> F2Util[f2 WebCastIdFetcher]
 
     SvcU --> Storage[services/storage]
     Storage --> Boto3[boto3 S3 client]
     Storage --> Prom[prometheus_client]
 
-    Lifecycle[services/lifecycle] --> Storage
-    Lifecycle --> RuleConfig[core/storage_lifecycle.json]
+    SvcW --> Ops[db/postgres]
+    SvcW --> SvcL
+    SvcW --> SvcP
 
     Core --> Settings[core/settings]
     Core --> Exceptions[core/exceptions]
     Core --> Logging[core/logging]
     Core --> Deps[core/dependencies]
-    Core --> Ops[db/postgres]
+    Core --> Ops
     Core --> Bg[core/background]
     Core --> Pag[core/pagination]
     Core --> Path[core/path_safety]
@@ -127,11 +136,21 @@ graph LR
     Deps --> SvcU
     Deps --> SvcL
     Deps --> SvcP
+    Deps --> SvcW
+    Deps --> Sign[services/websign]
     Deps --> Bg
     Deps --> Ops
+    Deps --> DbSession[db/session]
+    Deps --> DbJanitor[db/janitor]
+    Deps --> DbHealth[db/health]
     Deps --> Settings
+    Deps --> LazyF2
+    Sign --> Douyin
+    Sign --> PW[playwright headless Chromium]
     Settings --> PydanticSettings[pydantic-settings]
-    Ops --> PG[(Postgres via asyncpg)]
+    Ops --> DbSession
+    Ops --> DbHealth
+    DbSession --> PG[(Postgres via asyncpg)]
     Bg --> Logging
 
     Dec --> Exceptions
@@ -142,13 +161,17 @@ graph LR
     ErrH --> Logging
     Path --> Exceptions
     Path --> Settings
+    MW --> ErrH
+    MW --> Settings
       </pre>
     </div>
 
     <h2>External boundary</h2>
     <ul>
-      <li><strong><code>f2</code></strong> — third-party Douyin SDK. Wrapped exclusively from <code>UserService</code>, <code>PostService</code>, and <code>LivestreamService</code>; never imported from routers.</li>
+      <li><strong><code>f2</code></strong> — third-party Douyin SDK. Imported only from <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>ServiceContainer</code> (constructs the handler), and <code>services/websign.py</code> (wraps the URL builders and raw fetch helpers); never imported from routers, and never at module scope — the services resolve their symbols through <code>core/_lazy_f2</code>, and <code>services/websign.py</code> imports its two patch targets directly inside the install functions (still deferred to first use, never at import time).</li>
       <li><strong><code>boto3</code></strong> — used only inside <code>R2StorageService</code>. Routers and other services touch R2 through that single facade.</li>
+      <li><strong><code>playwright</code></strong> — used only by <code>services/websign.py</code> to keep one headless-Chromium signing session. The browser signs URLs only; all API traffic and downloads stay on httpx.</li>
+      <li><strong><code>sqlalchemy[asyncio]</code> / <code>asyncpg</code> / <code>alembic</code></strong> — the persistence stack, used only by <code>db/</code>: the session factory and repositories run async SQLAlchemy over asyncpg, and Alembic versions the schema.</li>
       <li><strong><code>fastapi</code> / <code>pydantic</code> / <code>pydantic-settings</code></strong> — the request/response and config layer. Schemas live exclusively in <code>schemas/</code>; settings in <code>core/settings.py</code>.</li>
       <li><strong><code>prometheus_client</code></strong> — exposes the <code>/metrics</code> ASGI app and counter/histogram families used by both <code>main</code> and <code>R2StorageService</code>.</li>
     </ul>

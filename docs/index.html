@@ -96,7 +96,7 @@
         <span class="pill">FastAPI</span>
         <span class="pill">Postgres operation store</span>
         <span class="pill">Cloudflare R2 optional</span>
-        <span class="pill">Last reviewed: 2026-05-31</span>
+        <span class="pill">Last reviewed: 2026-09-18</span>
       </div>
     </header>
 
@@ -586,7 +586,7 @@ kubectl kustomize k8s/overlays/production \
         -e "s|DB_CIDR|&lt;postgres CIDR&gt;|g" \
   | kubectl apply -f -</code></pre>
       <p>
-        The overlay starts 3 API replicas
+        The overlay runs 1–3 API replicas behind an HPA
         (<code>WATCH_ENABLED=false</code>) plus 1 watcher replica
         (<code>WATCH_ENABLED=true</code>) behind an Envoy Gateway
         <code>Gateway</code> + <code>HTTPRoute</code> (TLS via

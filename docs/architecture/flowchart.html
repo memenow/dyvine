@@ -69,8 +69,8 @@
     <header>
       <nav class="crumbs"><a href="../index.html">Project documentation</a> / <a href="index.html">Architecture overview</a></nav>
       <h1>End-to-end request flowchart</h1>
-      <p class="lede">High-level view of how a request fans out across the three router domains, the operation store, and Cloudflare R2.</p>
-      <p><span class="pill">Last reviewed: 2026-05-29</span></p>
+      <p class="lede">High-level view of how a request fans out across the four router domains, the operation store, and Cloudflare R2.</p>
+      <p><span class="pill">Last reviewed: 2026-09-18</span></p>
     </header>
 
     <p>
@@ -93,12 +93,19 @@ flowchart TD
     D -->|Users| U[UserService]
     D -->|Posts| P[PostService]
     D -->|Livestreams| L[LivestreamService]
+    D -->|Watch| W[WatchService]
 
     U --> F[Douyin API via f2]
     P --> F
     L --> F
 
-    F --> G{Upstream OK?}
+    F --> Sign[webSign-patched f2 builders, URL + signature triple, fail-open]
+    Sign --> G{Upstream OK?}
+
+    W --> WR[(WatchRepository Postgres)]
+    W -.->|watcher replica only| L
+    W -.->|watcher replica only| P
+
     G -->|No| E
     G -->|Yes| H[Domain logic]
 
@@ -135,7 +142,7 @@ flowchart TD
     </ul>
 
     <footer>
-      Diagram source mirrors <code>src/dyvine/main.py</code>, the three router modules, and <code>core/dependencies.py</code>.
+      Diagram source mirrors <code>src/dyvine/main.py</code>, the four router modules, <code>services/watch.py</code>, and <code>core/dependencies.py</code>.
       View the underlying calls in <a href="call-graph.html">the call graph</a>.
     </footer>
   </main>
