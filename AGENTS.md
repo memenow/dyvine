@@ -63,6 +63,13 @@ ships by manual `kubectl` rollout (see `README.md` Deployment).
 - Public API routes and the error envelope are stable; behavior changes
   need a regression test first.
 
+## Branching and PRs
+
+Branch from `main` (`feature/*`, `chore/*`, or `docs/*` prefix), make
+one scoped change per branch, keep docs and tests in the same commit
+series as the code they describe, and open a pull request back to
+`main`. CI must pass before merge.
+
 ## Working Rules
 
 - Use standard American English for code, identifiers, comments, and

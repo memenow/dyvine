@@ -72,7 +72,7 @@ _FAILURE_COOLDOWN_SECONDS = 300.0
 # Chromium flags proven against the live SecureSDK: full engine in
 # new-headless mode (the headless shell lacks features the SDK
 # probes), no sandbox (required when running as root, as in minimal
-# containers), and the automation flag removed so the SDK initialises
+# containers), and the automation flag removed so the SDK initializes
 # its signer.
 CHROMIUM_ARGS = (
     "--headless=new",
@@ -276,7 +276,7 @@ class WebSignProvider:
     queue: at most one browser, one page, one in-flight sign. The
     browser starts lazily on the first :meth:`sign` so an idle
     process pays nothing; any operation error tears the page down and
-    the next sign re-initialises from scratch. :meth:`invalidate`
+    the next sign re-initializes from scratch. :meth:`invalidate`
     forces that rotation (used after an observed Argus block).
     After repeated failures the provider fails fast until a cooldown
     passes, so a broken signer adds no per-request latency.
@@ -311,7 +311,7 @@ class WebSignProvider:
         return max(5000, int((self._sign_timeout - 5.0) * 1000))
 
     def sign(self, url: str) -> SignedResult:
-        """Sign one request URL, initialising the session on first use."""
+        """Sign one request URL, initializing the session on first use."""
         with self._state:
             if self._closed:
                 raise WebSignError("websign provider is closed")

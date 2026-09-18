@@ -19,7 +19,7 @@
 
 `initialize` is awaited from the FastAPI lifespan; `shutdown` drains
 the `BackgroundTaskRegistry`, stops the janitor, disposes the
-database pool, and reaps every executor in reverse initialisation
+database pool, and reaps every executor in reverse initialization
 order so a graceful shutdown never tears shared state down before
 in-flight work finishes.
 
@@ -485,7 +485,7 @@ class ServiceContainer:
         background registry drains while the janitor still heartbeats
         (so siblings never sweep rows mid-drain), then the janitor
         stops, the database pool disposes, and the executors reap in
-        reverse initialisation order.
+        reverse initialization order.
         """
         if not self._initialized:
             return

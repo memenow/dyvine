@@ -1,13 +1,19 @@
 """Composite Pydantic settings for Dyvine.
 
-The composite `Settings` aggregates four `BaseSettings` subclasses,
+The composite `Settings` aggregates six `BaseSettings` subclasses,
 each scoped by a distinct environment-variable prefix:
 
-- `APISettings` (`API_`) — server, CORS, operation DB path.
+- `APISettings` (`API_`) — server, CORS, rate limiting, and
+  multi-replica flags.
+- `DatabaseSettings` (`DATABASE_`) — Postgres URL, pool strategy,
+  janitor cadence, and operation retention.
 - `SecuritySettings` (`SECURITY_`) — API key and gating flag.
 - `R2Settings` (`R2_`) — Cloudflare R2 credentials and endpoint.
 - `DouyinSettings` (`DOUYIN_`) — session cookie, headers, proxy,
-  download root, and livestream-specific HTTP headers.
+  download root, livestream-specific HTTP headers, and the Argus
+  webSign signing session.
+- `WatchSettings` (`DOUYIN_WATCH_`) — watch-mode polling cadences
+  and subscription guardrails.
 
 A model-level validator (`_validate_security_in_production`) refuses
 to instantiate the container when `api.debug` is `false` and
@@ -316,7 +322,7 @@ class DouyinSettings(BaseSettings):
         retain_max_gb: Optional GiB cap that prunes the oldest retained
             workspaces once exceeded; ``0`` disables pruning.
         websign_enabled: Master switch for the Argus webSign layer.
-        websign_page_url: Page loaded to initialise the signing session.
+        websign_page_url: Page loaded to initialize the signing session.
         websign_init_timeout_seconds: Chromium launch and SDK settle budget.
         websign_sign_timeout_seconds: Per-request signing budget.
         websign_retry_once: Re-sign and retry once on an Argus block.
@@ -401,7 +407,7 @@ class DouyinSettings(BaseSettings):
     )
     websign_page_url: str = Field(
         default="https://www.douyin.com/",
-        description="Page loaded to initialise the signing session.",
+        description="Page loaded to initialize the signing session.",
     )
     websign_init_timeout_seconds: float = Field(
         default=120.0,
@@ -521,18 +527,24 @@ class WatchSettings(BaseSettings):
 class Settings(BaseSettings):
     """Composite settings container with nested configuration groups.
 
-    Aggregates `APISettings`, `SecuritySettings`, `R2Settings`, and
-    `DouyinSettings` so a single import gives access to every Pydantic-
-    validated env-driven knob the application reads. The model-level
-    `_validate_security_in_production` validator refuses to instantiate
-    when `api.debug` is False and a placeholder secret remains.
+    Aggregates `APISettings`, `DatabaseSettings`, `SecuritySettings`,
+    `R2Settings`, `DouyinSettings`, and `WatchSettings` so a single
+    import gives access to every Pydantic-validated env-driven knob the
+    application reads. The model-level `_validate_security_in_production`
+    validator refuses to instantiate when `api.debug` is False and a
+    placeholder secret remains.
 
     Attributes:
-        api: Server, CORS, and operation DB configuration.
+        api: Server, CORS, rate limiting, and multi-replica flags.
+        database: Postgres URL, pool strategy, janitor cadence, and
+            operation retention.
         security: Secret + API keys and the `require_api_key` gate.
         r2: Cloudflare R2 credentials and endpoint.
-        douyin: Session cookie, headers, proxy, download root, and
-            livestream-specific HTTP headers.
+        douyin: Session cookie, headers, proxy, download root,
+            livestream-specific HTTP headers, and the Argus webSign
+            signing session.
+        watch: Watch-mode polling cadences and subscription
+            guardrails.
 
     Example:
         Standard access through the cached singleton::

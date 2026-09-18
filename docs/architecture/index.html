@@ -95,7 +95,7 @@
       <h1>Dyvine Architecture</h1>
       <p class="lede">Reference diagrams for the Dyvine FastAPI service.</p>
       <div class="pillrow">
-        <span class="pill">Last reviewed: 2026-05-31</span>
+        <span class="pill">Last reviewed: 2026-09-18</span>
         <span class="pill">Source layout: <code>src/dyvine/</code></span>
         <span class="pill">Entry point: <code>main.py</code></span>
       </div>
@@ -122,9 +122,9 @@
     <h2>Layered architecture at a glance</h2>
     <ul>
       <li><strong>Presentation</strong> — FastAPI routers under <code>src/dyvine/routers</code>. All router endpoints sit behind an <code>X-API-Key</code> dependency and the <code>handle_errors</code> decorator.</li>
-      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>R2StorageService</code>, and <code>WatchService</code> in <code>src/dyvine/services</code>.</li>
+      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>R2StorageService</code>, and <code>WatchService</code> in <code>src/dyvine/services</code>. <code>services/websign.py</code> adds the Argus webSign layer: a headless-Chromium signing session (one page that signs URLs only — all API traffic stays on httpx) that lazily wraps f2's URL builders.</li>
       <li><strong>Persistence</strong> — <code>OperationRepository</code> / <code>WatchRepository</code> (Postgres + asyncpg, Alembic-versioned) at <code>src/dyvine/db/</code>; owner heartbeats and an orphan sweep keep multi-replica state crash-safe.</li>
-      <li><strong>Infrastructure</strong> — <code>ServiceContainer</code> wires two named thread-pool executors (R2, R2-head), a <code>BackgroundTaskRegistry</code>, the asyncpg pool, a <code>RepositoryJanitor</code> loop, and the f2 <code>DouyinHandler</code>.</li>
+      <li><strong>Infrastructure</strong> — <code>ServiceContainer</code> wires two named thread-pool executors (R2, R2-head), a <code>BackgroundTaskRegistry</code>, the asyncpg pool, a <code>RepositoryJanitor</code> loop, the f2 <code>DouyinHandler</code>, and a lazily initialized <code>WebSignProvider</code> (one daemon thread that owns the signing browser).</li>
       <li><strong>Observability</strong> — Prometheus metrics (<code>/metrics</code>), structured JSON logging, request correlation IDs, split <code>/livez</code>/<code>/readyz</code>/<code>/startupz</code> probes.</li>
     </ul>
 
@@ -133,7 +133,8 @@
       <li>Every long-running download returns immediately as a persisted <code>OperationRecord</code> and continues on a tracked background task.</li>
       <li>The lifespan drains the <code>BackgroundTaskRegistry</code> before reaping executor pools, so an active R2 upload always finishes (or is cancelled with structured logging) before the process exits.</li>
       <li>User-supplied filesystem paths are jailed inside <code>DOUYIN_DOWNLOAD_ROOT</code>; symlink redirection, traversal segments, and absolute prefixes are rejected pre- and post-mkdir.</li>
-      <li>The composite <code>Settings</code> validator refuses to boot in non-debug mode when <code>SECURITY_SECRET_KEY</code> or <code>SECURITY_API_KEY</code> still match the placeholder sentinel.</li>
+      <li>The composite <code>Settings</code> validator refuses to boot in non-debug mode when <code>security.api_key</code> (checked only while <code>require_api_key</code> is on) or <code>database.url</code> still matches its development default.</li>
+      <li>The webSign layer fails open: endpoint builders return the unsigned URL when the signer is unavailable, so only Argus-gated endpoints degrade (HTTP 403).</li>
       <li><code>OperationRepository.sweep_orphans</code> fails <code>pending</code>/<code>running</code> rows whose owner stopped heartbeating, so a crashed deployment never leaves orphaned in-progress rows behind.</li>
     </ul>
 

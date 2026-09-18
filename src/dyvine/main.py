@@ -1,6 +1,6 @@
 """FastAPI entry point for Dyvine.
 
-Wires the Dyvine service: lifespan-driven `ServiceContainer` initialisation,
+Wires the Dyvine service: lifespan-driven `ServiceContainer` initialization,
 the CORS + correlation-ID HTTP middleware, four feature routers
 (`users`, `posts`, `livestreams`, `watch`), and the operational endpoints
 (`/livez`, `/readyz`, `/startupz`, `/health`, plus the Prometheus
@@ -10,7 +10,9 @@ Architecture:
     - Presentation: FastAPI routers under `routers/` (each gated by the
       `require_api_key` dependency mounted at the router level).
     - Service: `UserService`, `PostService`, `LivestreamService`,
-      `R2StorageService` constructed by `ServiceContainer`.
+      `WatchService`, `R2StorageService` constructed by
+      `ServiceContainer`, which also builds a lazy `WebSignProvider`
+      that patches f2's URL builders with Argus webSign signatures.
     - Persistence: Postgres-backed `OperationRepository` /
       `WatchRepository` behind `DatabaseSessionFactory`, with a
       `RepositoryJanitor` liveness loop; long-running tasks are tracked
@@ -19,7 +21,7 @@ Architecture:
       correlation IDs, Prometheus counters/histograms.
 
 Middleware:
-    1. `CORSMiddleware` honours `API_CORS_ORIGINS`; credentialed CORS is
+    1. `CORSMiddleware` honors `API_CORS_ORIGINS`; credentialed CORS is
        auto-disabled when the allowlist is `["*"]`.
     2. `request_middleware` assigns a UUID4 correlation ID per request
        (or accepts a UUID provided via `X-Request-ID`), measures
@@ -35,8 +37,9 @@ Middleware:
     single error envelope; they are not middleware.
 
 Environment configuration:
-    `API_*`, `SECURITY_*`, `DOUYIN_*`, and `R2_*` variables drive
-    `core.settings.Settings`. The composite validator refuses to boot
+    `API_*`, `SECURITY_*`, `DATABASE_*`, `DOUYIN_*`, `DOUYIN_WATCH_*`,
+    and `R2_*` variables drive `core.settings.Settings`. The composite
+    validator refuses to boot
     when `API_DEBUG=false` and `SECURITY_API_KEY` (when
     `SECURITY_REQUIRE_API_KEY` is true) still matches the placeholder
     sentinel.

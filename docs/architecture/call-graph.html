@@ -69,11 +69,11 @@
       <nav class="crumbs"><a href="../index.html">Project documentation</a> / <a href="index.html">Architecture overview</a></nav>
       <h1>Call graph</h1>
       <p class="lede">Primary call relationships among the routers, services, and infrastructure helpers.</p>
-      <p><span class="pill">Last reviewed: 2026-05-29</span></p>
+      <p><span class="pill">Last reviewed: 2026-09-18</span></p>
     </header>
 
     <p>
-      The call graph below summarises the principal calls that flow from the FastAPI
+      The call graph below summarizes the principal calls that flow from the FastAPI
       entry point into the service layer and the persistence/storage helpers. It is
       intentionally lossy — see the source modules and <a href="control-flow.html">control-flow graph</a>
       for the exhaustive paths.
@@ -90,10 +90,18 @@ graph TD
     OS --> Pool[(asyncpg pool)]
     OS --> Sweep[sweep_orphans]
     Container --> Janitor[RepositoryJanitor]
+    Container --> Resume[WatchService.resume_persisted]
+    Container --> Reconcile[WatchService.run_reconcile_forever]
+    Resume --> WLoop[watcher loop tasks]
+    Reconcile --> WLoop
+    Container --> WebSign[WebSignProvider lazy init]
+    Container --> InstallPatch[install_websign_patch wraps f2 endpoint builders]
+    WebSign --> Playwright[headless Chromium page]
 
     Main --> RouterL[routers.livestreams]
     Main --> RouterP[routers.posts]
     Main --> RouterU[routers.users]
+    Main --> RouterW[routers.watch]
 
     RouterL --> DL[LivestreamService.download_stream]
     RouterL --> GDS[LivestreamService.get_download_status]
@@ -144,12 +152,23 @@ graph TD
     PD --> CleanupTmp[_cleanup_temp_dir]
     PD --> Finalize[_finalize_status]
 
+    RouterW --> WCS[WatchService.create_subscription]
+    RouterW --> WLS[WatchService.list_subscriptions]
+    RouterW --> WGS[WatchService.get_subscription]
+    RouterW --> WDS[WatchService.delete_subscription]
+    WCS --> WRepo[WatchRepository]
+    WLS --> WRepo
+    WGS --> WRepo
+    WDS --> WRepo
+    WLoop --> DL
+    WLoop --> DNP[PostService.download_new_posts]
+
     Storage --> Boto3PUT[client.put_object]
     Storage --> Boto3Sign[generate_presigned_url]
     Storage --> R2Head[_list_objects_sync head fan-out]
 
     Lifespan --> ProbesH[/livez /readyz /startupz /health/]
-    ProbesH --> ContainerStatus[container.operation_store.healthcheck]
+    ProbesH --> ContainerStatus[container.db_health.snapshot]
     ProbesH --> R2Cfg[settings.r2.is_configured]
       </pre>
     </div>
@@ -162,7 +181,7 @@ graph TD
     </ul>
 
     <footer>
-      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,watch}.py</code>, <code>db/*.py</code>, <code>core/{background,dependencies,path_safety}.py</code>, <code>middleware/rate_limit.py</code>.
+      Source modules: <code>main.py</code>, <code>routers/*.py</code>, <code>services/{users,posts,livestreams,storage,watch,websign}.py</code>, <code>db/*.py</code>, <code>core/{background,dependencies,path_safety}.py</code>, <code>middleware/rate_limit.py</code>.
     </footer>
   </main>
 

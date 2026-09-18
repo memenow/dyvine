@@ -1,6 +1,6 @@
 # Dyvine
 
-Dyvine is a Python 3.12 FastAPI service for asynchronous Douyin content
+Dyvine is a Python 3.12+ FastAPI service for asynchronous Douyin content
 downloads, persistent operation tracking, and optional Cloudflare R2 archival.
 It wraps the third-party `f2` Douyin SDK with a REST API for videos, image
 galleries, livestreams, and user content.
@@ -261,8 +261,8 @@ kubectl kustomize k8s/overlays/production \
   | kubectl apply -f -
 ```
 
-The overlay starts 3 API replicas (`WATCH_ENABLED=false`) plus 1
-watcher replica (`WATCH_ENABLED=true`) behind an Envoy Gateway
+The overlay runs 1–3 API replicas behind an HPA (`WATCH_ENABLED=false`)
+plus 1 watcher replica (`WATCH_ENABLED=true`) behind an Envoy Gateway
 `Gateway` + `HTTPRoute` (TLS via cert-manager). After rollout, smoke
 test through a port-forward: `/readyz` must be ready and an
 unauthenticated `GET /api/v1/watch` must return 401. Secrets come from
@@ -278,7 +278,7 @@ domains follow the storage matrix in `.env.example`.
 | `src/dyvine/db/` | Postgres repositories, session factory, janitor, passive health tracker (Alembic-versioned) |
 | `src/dyvine/middleware/` | Token-bucket rate limiting |
 | `src/dyvine/routers/` | User, post, livestream, and watch HTTP endpoints |
-| `src/dyvine/services/` | Douyin SDK orchestration, background work, R2 storage, watch scheduling |
+| `src/dyvine/services/` | Douyin SDK orchestration, background work, R2 storage, watch scheduling, Argus webSign signing |
 | `src/dyvine/schemas/` | Pydantic request and response models |
 | `scripts/dyvine_batch/` | Batch user-download CLI (`serial` / `concurrent`) |
 | `scripts/migrate_watch_to_pg.py` | One-shot SQLite → Postgres watch migration |
