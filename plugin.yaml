@@ -1,0 +1,66 @@
+name: dyvine
+version: 0.1.0
+description: Douyin download automation (users, posts, livestreams, queues, Feishu delivery)
+author: memenow
+requires_hermes: ">=0.21"
+requires_env:
+  - DATABASE_URL
+  - DOUYIN_COOKIE
+provides_tools:
+  - dyvine.profile.get
+  - dyvine.social.following
+  - dyvine.social.followers
+  - dyvine.identity.get
+  - dyvine.users.resolve
+  - dyvine.posts.list
+  - dyvine.posts.download
+  - dyvine.posts.download_status
+  - dyvine.single.download
+  - dyvine.mix.download
+  - dyvine.collects.list
+  - dyvine.collects.download
+  - dyvine.comments.list
+  - dyvine.stats.get
+  - dyvine.feed.user
+  - dyvine.feed.related
+  - dyvine.feed.friend
+  - dyvine.live.download
+  - dyvine.live.im
+  - dyvine.live.following
+  - dyvine.queue.import_seeds
+  - dyvine.queue.enqueue
+  - dyvine.queue.claim
+  - dyvine.queue.update
+  - dyvine.queue.list
+  - dyvine.queue.status
+  - dyvine.queue.release
+  - dyvine.rounds.create
+  - dyvine.rounds.list
+  - dyvine.delivery.send_account
+  - dyvine.delivery.status
+  - dyvine.notify.send
+  - dyvine.profiles.upsert
+  - dyvine.profiles.get
+  - dyvine.operation.get
+provides_hooks: []
+kind: standalone
+license: Apache-2.0
+# Every third-party package imported by the tool path (get_engine
+# closure, verified by an import-hook trace — not just the direct
+# imports). Bounds mirror pyproject.toml, except floors relaxed for
+# loose installers: pydantic accepts the hermes pin, and httpx admits
+# f2 0.0.1.7's ``==0.27.2`` pin (our usage works on both surfaces).
+# alembic is intentionally absent: migrations run operator-side from
+# a repo checkout (``uv run alembic upgrade head``), never in the
+# gateway host.
+python_dependencies:
+  - f2>=0.0.1.7,<0.0.2
+  - sqlalchemy[asyncio]>=2.0.52,<3.0.0
+  - asyncpg>=0.31.0,<1.0.0
+  - pydantic>=2,<3
+  - pydantic-settings>=2.15.0,<3.0.0
+  - httpx>=0.27.2,<1.0.0
+  - boto3>=1.43.89,<2.0.0
+  - prometheus-client>=0.26.0,<1.0.0
+  - psutil>=7.2.2,<8.0.0
+  - python-dotenv>=1.2.3,<2.0.0
