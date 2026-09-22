@@ -1,6 +1,6 @@
 """User domain service.
 
-`UserService` encapsulates the public surface used by the user router:
+`UserService` encapsulates the user domain surface used by tools:
 
 - ``get_user_info(user_id)`` — fetch and validate a Douyin profile,
   returning a typed ``UserResponse``.
@@ -37,7 +37,9 @@ import unicodedata
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
 
+import httpx
 from pydantic import AnyHttpUrl
 
 from ..core.background import BackgroundTaskRegistry, spawn_or_fallback
@@ -325,6 +327,178 @@ class UserService:
         finally:
             await _safely_close_handler(handler)
 
+    async def get_following(
+        self, user_id: str, count: int = 20
+    ) -> list[dict[str, Any]]:
+        """List accounts ``user_id`` follows, newest first.
+
+        Args:
+            user_id: The Douyin user ID.
+            count: Maximum entries to return.
+
+        Raises:
+            UserServiceError: If the upstream fetch fails.
+        """
+        return await self._fetch_social_graph(user_id, "following", count)
+
+    async def get_followers(
+        self, user_id: str, count: int = 20
+    ) -> list[dict[str, Any]]:
+        """List accounts following ``user_id``, newest first.
+
+        Args:
+            user_id: The Douyin user ID.
+            count: Maximum entries to return.
+
+        Raises:
+            UserServiceError: If the upstream fetch fails.
+        """
+        return await self._fetch_social_graph(user_id, "follower", count)
+
+    async def _fetch_social_graph(
+        self, user_id: str, kind: str, count: int
+    ) -> list[dict[str, Any]]:
+        """Page one social-graph iterator up to ``count`` entries."""
+        fetcher_name = (
+            "fetch_user_following" if kind == "following" else "fetch_user_follower"
+        )
+        handler_kwargs = {
+            "url": f"https://www.douyin.com/user/{user_id}",
+            "cookie": settings.douyin_cookie,
+            "proxy": settings.douyin_proxy_http,
+            "mode": "post",
+        }
+        handler = DouyinHandler(handler_kwargs)
+        try:
+            iterator = getattr(handler, fetcher_name)(
+                sec_user_id=user_id, count=min(max(count, 1), 200)
+            )
+            entries: list[dict[str, Any]] = []
+            try:
+                async for page in iterator:
+                    to_list = getattr(page, "_to_list", None)
+                    items = to_list() if callable(to_list) else []
+                    for item in items:
+                        if isinstance(item, dict):
+                            entries.append(dict(item))
+                            if len(entries) >= count:
+                                return entries
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+            return entries
+        except Exception as e:
+            logger.exception(
+                "Failed to fetch social graph",
+                extra={"user_id": user_id, "kind": kind},
+            )
+            raise UserServiceError(f"Failed to fetch {kind} list: {str(e)}") from e
+        finally:
+            await _safely_close_handler(handler)
+
+    async def get_login_identity(self) -> dict[str, Any]:
+        """Return the identity the configured cookie authenticates as.
+
+        f2's ``fetch_query_user`` takes no keyword: it resolves who the
+        current login session belongs to. Useful as a cookie-health
+        check before running owner-scoped modes (collection, music,
+        collects).
+        """
+        handler_kwargs = {
+            "cookie": settings.douyin_cookie,
+            "proxy": settings.douyin_proxy_http,
+            "mode": "post",
+        }
+        handler = DouyinHandler(handler_kwargs)
+        try:
+            result = await handler.fetch_query_user()
+            to_dict = getattr(result, "_to_dict", None)
+            if callable(to_dict):
+                data = to_dict()
+                return dict(data) if isinstance(data, dict) else {}
+            to_raw = getattr(result, "_to_raw", None)
+            if callable(to_raw):
+                data = to_raw()
+                return dict(data) if isinstance(data, dict) else {}
+            return {}
+        except Exception as e:
+            logger.exception("Failed to query login identity")
+            raise UserServiceError(f"Failed to query login identity: {str(e)}") from e
+        finally:
+            await _safely_close_handler(handler)
+
+    async def resolve_share_url(
+        self, url: str, *, client: httpx.AsyncClient | None = None
+    ) -> dict[str, str]:
+        """Follow a Douyin share link to its canonical target identity.
+
+        Users paste ``v.douyin.com`` short links (batch-URL input);
+        this follows the redirect chain and parses the final URL for
+        a user (``/user/{sec_user_id}``) or post
+        (``/video|note/{aweme_id}``) identity. f2 has no equivalent,
+        so plain HTTPS redirect-following is the implementation.
+
+        Args:
+            url: Any Douyin share URL (short or canonical).
+            client: Optional injected ``httpx.AsyncClient`` (tests);
+                when omitted a redirect-following client is owned
+                locally. An injected client is never closed here.
+
+        Returns:
+            ``{"kind": "user", "sec_user_id": ..., "url": ...}`` or
+            ``{"kind": "post", "aweme_id": ..., "url": ...}`` where
+            ``url`` is the final URL after redirects.
+
+        Raises:
+            UserServiceError: On non-HTTP(S) input, request failure,
+                or a final URL with no recognizable identity.
+        """
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise UserServiceError(f"Not a shareable URL: {url!r}")
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            )
+        }
+        try:
+            if client is None:
+                async with httpx.AsyncClient(
+                    follow_redirects=True, timeout=30.0, headers=headers
+                ) as owned:
+                    response = await owned.get(url)
+            else:
+                response = await client.get(url, headers=headers)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            raise UserServiceError(
+                f"Share link fetch failed with status {status}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise UserServiceError(f"Share link fetch failed: {e}") from e
+        final = str(response.url)
+        path = urlparse(final).path
+        user_match = re.search(r"/user/([^/?#]+)", path)
+        if user_match:
+            return {
+                "kind": "user",
+                "sec_user_id": user_match.group(1),
+                "url": final,
+            }
+        post_match = re.search(r"/(?:video|note)/([^/?#]+)", path)
+        if post_match:
+            return {
+                "kind": "post",
+                "aweme_id": post_match.group(1),
+                "url": final,
+            }
+        logger.warning("Unrecognized share-link target", extra={"url": final})
+        raise UserServiceError(f"Share link target not recognized: {final}")
+
     async def start_download(
         self,
         user_id: str,
@@ -365,7 +539,7 @@ class UserService:
             include_likes=include_likes,
             max_items=max_items,
         )
-        # Route through the shared registry so the FastAPI lifespan can
+        # Route through the shared registry so host shutdown can
         # drain in-flight downloads before the executor pools are reaped.
         # ``spawn_or_fallback`` falls back to ``asyncio.create_task`` for
         # unit tests that instantiate ``UserService`` directly.

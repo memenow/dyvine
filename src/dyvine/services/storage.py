@@ -7,12 +7,11 @@ content into Cloudflare R2. The service:
   method then short-circuits with a ``StorageError`` so callers can
   treat the disabled state as a recoverable condition.
 - Dispatches every blocking boto3 call onto a dedicated executor
-  attached by ``ServiceContainer.set_executor`` / ``set_head_executor``
+  attached by :meth:`set_executor` / :meth:`set_head_executor`
   so the event loop never blocks on a slow R2 round trip.
 - Emits Prometheus counters (``r2_upload_requests_total``,
   ``r2_upload_bytes_sum``, ``r2_upload_failures_total``) plus an upload
-  duration histogram so production runs are observable through
-  ``/metrics``.
+  duration histogram so production runs stay observable.
 - Generates standardised paths for user content
   (``{images,videos}/{user_id}/...``) and livestream recordings
   (``livestreams/{user_id}/{stream_id}/recording_{ts}.mp4``).
@@ -94,8 +93,8 @@ class R2StorageService:
     Wraps a boto3 S3 client configured for the R2 endpoint. Every
     blocking call (``put_object``, ``head_object``, ``delete_object``,
     paginated ``list_objects_v2``) is dispatched onto a dedicated
-    `concurrent.futures.Executor` attached post-construction by the
-    `ServiceContainer`. The R2 head-fan-out used inside
+    `concurrent.futures.Executor` attached post-construction via
+    :meth:`set_executor`. The R2 head-fan-out used inside
     `_list_objects_sync` runs on a separate executor so concurrent
     listings cannot occupy the same threads that serve uploads.
 
@@ -181,8 +180,8 @@ class R2StorageService:
     def set_executor(self, executor: Executor | None) -> None:
         """Attach a dedicated executor after construction.
 
-        The service is instantiated eagerly inside ``UserService`` today; the
-        ``ServiceContainer`` wires in the shared R2 executor post-hoc so all
+        The service is instantiated eagerly inside ``UserService`` today;
+        the host wires in the shared R2 executor post-hoc so all
         R2 calls share one bounded thread pool without changing the
         ``UserService`` constructor signature.
         """
@@ -191,7 +190,7 @@ class R2StorageService:
     def set_head_executor(self, executor: Executor | None) -> None:
         """Attach the dedicated ``head_object`` fan-out executor.
 
-        Mirrors :meth:`set_executor` so the container can wire the head
+        Mirrors :meth:`set_executor` so the host can wire the head
         pool post-construction without changing ``UserService``.
         """
         self._head_executor = executor
@@ -663,8 +662,7 @@ class R2StorageService:
             logger.warning(
                 "R2 head executor not attached; falling back to a one-off "
                 "pool. Each call holds the calling executor slot for the "
-                "full fan-out; wire ``set_head_executor`` from the "
-                "service container.",
+                "full fan-out; wire ``set_head_executor`` from the host.",
                 extra={"prefix": prefix, "object_count": len(keys)},
             )
             self._head_pool_warning_emitted = True

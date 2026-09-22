@@ -2,7 +2,7 @@
 
 Defines the canonical `OperationStatus` enum (``pending`` /
 ``running`` / ``completed`` / ``partial`` / ``failed``) and the
-`OperationResponse` Pydantic model that every async-download endpoint
+`OperationResponse` Pydantic model that every async-download tool
 returns. Per-domain response classes
 (`schemas.users.DownloadResponse`, `schemas.livestreams.LiveStreamDownloadResponse`,
 `schemas.posts.BulkDownloadResponse`) reuse these primitives so SDK
@@ -29,7 +29,7 @@ class OperationStatus(StrEnum):
     Centralising the vocabulary avoids the historical drift between
     ``OperationResponse.status`` (free-form string) and
     ``BulkDownloadResponse.status`` (own ``DownloadStatus`` enum).
-    Persistence layers and routers both reuse these literals so an SDK
+    Persistence layers and services both reuse these literals so callers
     can branch on the same set of values regardless of the operation
     type.
     """

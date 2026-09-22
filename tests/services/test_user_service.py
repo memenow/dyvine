@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fake_repos import FakeOperationRepository
 
-from dyvine.core.exceptions import OperationNotFoundError
+from dyvine.core.exceptions import OperationNotFoundError, ServiceError
 from dyvine.core.settings import settings
 from dyvine.services.users import DownloadResponse, UserService
 
@@ -1321,3 +1322,170 @@ async def test_concurrent_downloads_use_isolated_temp_directories(
     assert workspace_root.exists()
     assert not (workspace_root / op_a.operation_id).exists()
     assert not (workspace_root / op_b.operation_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_get_following_collects_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Following pages concatenate through ``_to_list`` up to count."""
+    from dyvine.services import users as users_mod
+
+    class _Page:
+        def __init__(self, items: list) -> None:
+            self._items = items
+
+        def _to_list(self) -> list:
+            return self._items
+
+    async def _iterator(**kwargs: Any) -> Any:
+        yield _Page([{"sec_user_id": "a"}, {"sec_user_id": "b"}])
+        yield _Page([{"sec_user_id": "c"}])
+
+    seen: dict = {}
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        @staticmethod
+        def fetch_user_following(**kwargs: Any) -> Any:
+            seen.update(kwargs)
+            return _iterator()
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    service = UserService(FakeOperationRepository())
+    assert await service.get_following("u1", count=2) == [
+        {"sec_user_id": "a"},
+        {"sec_user_id": "b"},
+    ]
+    assert seen["sec_user_id"] == "u1"
+
+
+@pytest.mark.asyncio
+async def test_get_followers_failure_wraps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Follower fetch errors surface as ``UserServiceError``."""
+    from dyvine.core.exceptions import ServiceError
+    from dyvine.services import users as users_mod
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        @staticmethod
+        def fetch_user_follower(**kwargs: Any) -> Any:
+            raise RuntimeError("upstream down")
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    service = UserService(FakeOperationRepository())
+    with pytest.raises(ServiceError, match="Failed to fetch follower list"):
+        await service.get_followers("u1")
+
+
+@pytest.mark.asyncio
+async def test_get_login_identity_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Login identity normalizes through ``_to_dict``."""
+    from dyvine.services import users as users_mod
+
+    payload = {"sec_user_id": "owner-sec", "nickname": "owner"}
+    mock_result = MagicMock()
+    mock_result._to_dict.return_value = payload
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        fetch_query_user = AsyncMock(return_value=mock_result)
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    service = UserService(FakeOperationRepository())
+    assert await service.get_login_identity() == payload
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_user_target() -> None:
+    """A short link landing on /user/... yields kind=user."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            extensions={"history": []},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(
+        transport=transport, follow_redirects=True, base_url="https://www.douyin.com"
+    )
+    service = UserService(FakeOperationRepository())
+    result = await service.resolve_share_url(
+        "https://www.douyin.com/user/MS4wLjABAAAAsec", client=client
+    )
+    assert result["kind"] == "user"
+    assert result["sec_user_id"] == "MS4wLjABAAAAsec"
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_post_target() -> None:
+    """A short link landing on /video/... yields kind=post."""
+
+    service = UserService(FakeOperationRepository())
+    request = httpx.Request("GET", "https://www.douyin.com/video/738899001122")
+    response = httpx.Response(200, request=request)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    result = await service.resolve_share_url("https://v.douyin.com/abc/", client=client)
+    assert result == {
+        "kind": "post",
+        "aweme_id": "738899001122",
+        "url": "https://www.douyin.com/video/738899001122",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_rejects_non_http() -> None:
+    """Non-HTTP(S) input fails before any request."""
+    service = UserService(FakeOperationRepository())
+    with pytest.raises(ServiceError, match="Not a shareable URL"):
+        await service.resolve_share_url("not-a-url")
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_status_error() -> None:
+    """HTTP failures surface the status code."""
+
+    service = UserService(FakeOperationRepository())
+    request = httpx.Request("GET", "https://v.douyin.com/gone/")
+    response = httpx.Response(404, request=request)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    with pytest.raises(ServiceError, match="status 404"):
+        await service.resolve_share_url("https://v.douyin.com/gone/", client=client)
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_unrecognized_target() -> None:
+    """A final URL with no identity raises."""
+
+    service = UserService(FakeOperationRepository())
+    request = httpx.Request("GET", "https://www.douyin.com/discover")
+    response = httpx.Response(200, request=request)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    with pytest.raises(ServiceError, match="not recognized"):
+        await service.resolve_share_url("https://v.douyin.com/x/", client=client)
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_transport_error() -> None:
+    """Transport failures wrap as ServiceError, not raw httpx errors."""
+
+    service = UserService(FakeOperationRepository())
+    client = MagicMock()
+    client.get = AsyncMock(side_effect=httpx.ConnectError("dns down"))
+    with pytest.raises(ServiceError, match="Share link fetch failed"):
+        await service.resolve_share_url("https://v.douyin.com/x/", client=client)

@@ -1,4 +1,4 @@
-"""Pydantic models for the post router.
+"""Pydantic models for posts.
 
 Provides:
 
@@ -48,7 +48,7 @@ class PostType(StrEnum):
 
 
 # Backwards-compatible alias for the canonical operation status enum. The
-# router/service layers stored these values as raw strings before the
+# service layers stored these values as raw strings before the
 # ``OperationStatus`` consolidation; keeping the alias avoids touching
 # every import site while still routing through one source of truth.
 DownloadStatus = OperationStatus

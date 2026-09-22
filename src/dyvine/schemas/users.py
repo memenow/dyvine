@@ -1,17 +1,14 @@
-"""Pydantic models for the user router.
+"""Pydantic models for users.
 
 Provides:
 
-- `UserDownloadRequest` — typed body shape for client SDKs that want
-  to construct download requests programmatically. The router itself
-  takes the equivalent fields as `Query` parameters; the model is
-  exported here so consumers can introspect the contract.
-- `UserResponse` — `GET /users/{user_id}` payload. `room_data` is kept
-  open as `dict[str, Any]` because Douyin evolves the underlying
-  schema; treat it as opaque metadata.
-- `DownloadResponse` — alias for `OperationResponse` used by the
-  router so the user-download contract stays interchangeable with the
-  generic operation envelope.
+- `UserDownloadRequest` — typed shape for download requests.
+- `UserResponse` — user payload. `room_data` is kept open as
+  `dict[str, Any]` because Douyin evolves the underlying schema;
+  treat it as opaque metadata.
+- `DownloadResponse` — alias for `OperationResponse` so the
+  user-download contract stays interchangeable with the generic
+  operation envelope.
 """
 
 from __future__ import annotations
@@ -28,9 +25,9 @@ _USER_ID_PATTERN = r"^[A-Za-z0-9_\-]{6,128}$"
 class UserDownloadRequest(BaseModel):
     """Schema for user download request.
 
-    Mirrors the ``download_user_content`` Query contract (user-ID
-    alphabet, positive ``max_items``) so SDK-side validation agrees
-    with what the router enforces.
+    Mirrors the ``download_user_content`` contract (user-ID
+    alphabet, positive ``max_items``) so caller-side validation agrees
+    with what the service enforces.
     """
 
     user_id: str = Field(

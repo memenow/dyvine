@@ -1,6 +1,6 @@
 """Post domain service.
 
-`PostService` encapsulates the public surface used by the post router:
+`PostService` encapsulates the post domain surface used by tools:
 
 - ``get_post_detail(aweme_id)`` — return a typed ``PostDetail`` for a
   single Douyin post.
@@ -58,15 +58,19 @@ from ..schemas.posts import (
 )
 
 if TYPE_CHECKING:
+    from f2.apps.douyin.crawler import DouyinCrawler  # type: ignore
     from f2.apps.douyin.db import AsyncUserDB  # type: ignore
     from f2.apps.douyin.handler import DouyinHandler  # type: ignore
+    from f2.apps.douyin.model import PostDetail as F2PostDetail  # type: ignore
 else:
     # Deferred: importing f2 performs real HTTPS requests (see
     # ``core._lazy_f2``), so the SDK loads on first real use only.
     from ..core._lazy_f2 import LazyF2Symbol
 
     AsyncUserDB = LazyF2Symbol("f2.apps.douyin.db", "AsyncUserDB")
+    DouyinCrawler = LazyF2Symbol("f2.apps.douyin.crawler", "DouyinCrawler")
     DouyinHandler = LazyF2Symbol("f2.apps.douyin.handler", "DouyinHandler")
+    F2PostDetail = LazyF2Symbol("f2.apps.douyin.model", "PostDetail")
 
 logger = ContextLogger(__name__)
 
@@ -80,21 +84,70 @@ PostServiceError = ServiceError
 # items when ``total_posts`` is unknown.
 PAGE_SIZE = 20
 
+#: Bulk-downloadable per-user feeds, mapped to the f2 handler iterator
+#: each one paginates. ``post``/``like`` iterators take a target
+#: ``sec_user_id``; ``collection``/``music`` are scoped to the login
+#: cookie owner (Douyin exposes nobody else's) and take only cursor
+#: arguments, with ``sec_user_id`` anchoring the output directory just
+#: like the f2 CLI does. All four yield pages with an ``aweme_list``,
+#: so one loop serves every mode.
+BULK_FETCHERS: dict[str, str] = {
+    "post": "fetch_user_post_videos",
+    "like": "fetch_user_like_videos",
+    "collection": "fetch_user_collection_videos",
+    "music": "fetch_user_music_collection",
+}
+
+#: Modes whose f2 iterator is scoped to the cookie owner and takes no
+#: ``sec_user_id`` argument.
+OWNER_SCOPED_MODES = frozenset({"collection", "music"})
+
+#: Operation types the status snapshot accepts. The ``post`` mode keeps
+#: its historic ``user_posts_bulk_download`` type; every other mode uses
+#: ``user_{mode}_bulk_download``.
+BULK_OPERATION_TYPES = frozenset(
+    {
+        "user_posts_bulk_download",
+        "user_like_bulk_download",
+        "user_collection_bulk_download",
+        "user_music_bulk_download",
+        "user_mix_bulk_download",
+        "user_collects_bulk_download",
+        "single_post_download",
+        "user_posts_incremental_download",
+    }
+)
+
 
 @dataclass(slots=True)
 class UserPostsPage:
     """Single-page result from :meth:`PostService.get_user_posts`.
 
     Carries both the materialised ``PostDetail`` items and the raw
-    upstream cursor needed to fetch the next page. Routers wrap the
-    cursor in an opaque token; service callers receive the integer
-    Douyin cursor verbatim. ``next_cursor`` is ``None`` when the feed
+    upstream cursor needed to fetch the next page. Callers receive
+    the integer Douyin cursor verbatim. ``next_cursor`` is ``None`` when the feed
     is exhausted (``has_more=False`` upstream).
     """
 
     posts: list[PostDetail]
     next_cursor: int | None
     has_more: bool
+
+
+@dataclass(slots=True)
+class SinglePostDownloadResult:
+    """Outcome of an inline single-post download.
+
+    Unlike the bulk loop this coroutine finishes the work before
+    returning, so the result carries the downloaded file paths
+    directly alongside the auditable operation row id.
+    """
+
+    operation_id: str
+    aweme_id: str
+    post_type: PostType
+    download_path: str
+    files: list[str]
 
 
 @dataclass(slots=True)
@@ -226,6 +279,438 @@ class PostService:
             )
             raise PostServiceError(f"Failed to fetch post: {str(e)}") from e
 
+    async def download_single_post(self, aweme_id: str) -> SinglePostDownloadResult:
+        """Download one post (video or album) inline and return its files.
+
+        Unlike :meth:`start_bulk_download` this coroutine finishes the
+        work before returning: a single post is small enough to await
+        directly, which keeps the plugin tool synchronous. An operation
+        row of type ``single_post_download`` records the outcome for
+        auditing either way.
+
+        Args:
+            aweme_id: Unique identifier of the post.
+
+        Returns:
+            The downloaded file paths plus the operation id.
+
+        Raises:
+            PostNotFoundError: If the post does not exist.
+            PostServiceError: If the author cannot be resolved or the
+                download itself fails.
+        """
+        operation = await self.operation_store.create_operation(
+            operation_type="single_post_download",
+            subject_id=aweme_id,
+            status="running",
+            message="Single post download in progress",
+            progress=0.0,
+        )
+        try:
+            fetched = await self.handler.fetch_one_video(aweme_id)
+            if not fetched:
+                raise PostNotFoundError(f"Post not found: {aweme_id}")
+            post_data = _mapping_from(fetched, "_to_dict") or {}
+            prepared = _prepare_post_for_downloader(post_data)
+            sec_user_id = prepared.get("sec_user_id")
+            if not sec_user_id or not isinstance(sec_user_id, str):
+                raise PostServiceError(f"Cannot resolve author of post: {aweme_id}")
+
+            async with AsyncUserDB("douyin_users.db") as db:
+                user_path = await self.handler.get_or_add_user_data(
+                    self.handler.kwargs, sec_user_id, db
+                )
+            post_type = self._determine_post_type(prepared)
+            before = {entry.name for entry in user_path.iterdir()}
+            await self._download_post_content(prepared, post_type, user_path)
+            files = sorted(
+                str(user_path / name)
+                for name in {entry.name for entry in user_path.iterdir()} - before
+            )
+            # ``user_path`` is never ``None`` here, so the helper always
+            # returns a string; the fallback only satisfies the type
+            # checker while keeping the basename-only privacy posture.
+            download_path = relative_to_download_root(user_path) or user_path.name
+            await self.operation_store.update_operation(
+                operation.operation_id,
+                status="completed",
+                message="Single post download completed",
+                progress=100.0,
+                completed_items=1,
+                total_items=1,
+                download_path=download_path,
+                metadata={"aweme_id": aweme_id, "files": files},
+            )
+            return SinglePostDownloadResult(
+                operation_id=operation.operation_id,
+                aweme_id=aweme_id,
+                post_type=post_type,
+                download_path=download_path,
+                files=files,
+            )
+        except (PostNotFoundError, PostServiceError) as e:
+            await self.operation_store.update_operation(
+                operation.operation_id,
+                status="failed",
+                message="Single post download failed",
+                error=str(e),
+            )
+            raise
+        except Exception as e:
+            logger.exception(
+                "Error downloading single post",
+                extra={"aweme_id": aweme_id, "error": str(e)},
+            )
+            await self.operation_store.update_operation(
+                operation.operation_id,
+                status="failed",
+                message="Single post download failed",
+                error=str(e),
+            )
+            raise PostServiceError(f"Failed to download post: {str(e)}") from e
+
+    async def list_collects(self) -> list[dict[str, Any]]:
+        """List the login cookie owner's collects folders.
+
+        Douyin only exposes the cookie owner's own folders, so the
+        upstream iterator takes no user argument, exactly like
+        ``collection`` bulk mode.
+        """
+        folders: list[dict[str, Any]] = []
+        iterator = self.handler.fetch_user_collects()
+        try:
+            async for collects in iterator:
+                data = _mapping_from(collects, "_to_dict")
+                if data:
+                    folders.append(data)
+        finally:
+            aclose = getattr(iterator, "aclose", None)
+            if callable(aclose):
+                await aclose()
+        return folders
+
+    async def get_post_stats(
+        self, aweme_id: str, aweme_type: int = 0
+    ) -> dict[str, Any]:
+        """Fetch upstream statistics for one post.
+
+        Args:
+            aweme_id: Unique identifier of the post.
+            aweme_type: Post kind code (``0`` video, ``68`` album, ...).
+                Defaults to video; pass the value from
+                :meth:`get_post_detail` when known.
+
+        Raises:
+            PostServiceError: If the upstream fetch fails.
+        """
+        try:
+            stats = await self.handler.fetch_post_stats(
+                aweme_id=aweme_id, aweme_type=aweme_type
+            )
+            return _mapping_from(stats, "_to_dict") or {}
+        except Exception as e:
+            logger.exception(
+                "Error fetching post stats",
+                extra={"aweme_id": aweme_id, "error": str(e)},
+            )
+            raise PostServiceError(f"Failed to fetch post stats: {str(e)}") from e
+
+    async def get_user_feed(
+        self, sec_user_id: str, count: int = 20
+    ) -> list[dict[str, Any]]:
+        """List a user's feed videos (first ``count`` items).
+
+        Raises:
+            PostServiceError: If the upstream fetch fails.
+        """
+        return await self._collect_feed_items(
+            "fetch_user_feed_videos",
+            {
+                "sec_user_id": sec_user_id,
+                "max_cursor": 0,
+                "page_counts": PAGE_SIZE,
+            },
+            count,
+            extra={"sec_user_id": sec_user_id},
+        )
+
+    async def get_related_posts(
+        self, aweme_id: str, count: int = 20
+    ) -> list[dict[str, Any]]:
+        """List posts related to ``aweme_id`` (first ``count`` items).
+
+        Raises:
+            PostServiceError: If the upstream fetch fails.
+        """
+        return await self._collect_feed_items(
+            "fetch_related_videos",
+            {"aweme_id": aweme_id, "page_counts": PAGE_SIZE},
+            count,
+            extra={"aweme_id": aweme_id},
+        )
+
+    async def get_friend_feed(self, count: int = 20) -> list[dict[str, Any]]:
+        """List friend-feed videos for the login cookie owner.
+
+        The iterator is owner-scoped and takes no user argument.
+
+        Raises:
+            PostServiceError: If the upstream fetch fails.
+        """
+        return await self._collect_feed_items(
+            "fetch_friend_feed_videos",
+            {"cursor": 0, "max_counts": count},
+            count,
+            extra={},
+        )
+
+    async def _collect_feed_items(
+        self,
+        fetcher_name: str,
+        fetcher_kwargs: dict[str, Any],
+        count: int,
+        *,
+        extra: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Page one feed iterator up to ``count`` normalized items."""
+        items: list[dict[str, Any]] = []
+        try:
+            iterator = getattr(self.handler, fetcher_name)(**fetcher_kwargs)
+            try:
+                async for page in iterator:
+                    for item in _list_from(page, "_to_list") or []:
+                        items.append(item)
+                        if len(items) >= count:
+                            return items[:count]
+            finally:
+                aclose = getattr(iterator, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+        except Exception as e:
+            logger.exception(
+                "Error fetching feed",
+                extra={**extra, "fetcher": fetcher_name, "error": str(e)},
+            )
+            raise PostServiceError(f"Failed to fetch feed: {str(e)}") from e
+        return items
+
+    async def get_post_comments(
+        self, aweme_id: str, count: int = 20
+    ) -> list[dict[str, Any]]:
+        """List top-level comments of one post (first ``count`` items).
+
+        f2 exposes comments at crawler level only (no handler
+        wrapper), so this drives ``DouyinCrawler`` directly with the
+        service handler's kwargs and normalizes the raw ``comments``
+        array. Replies stay out of scope: the endpoint returns one
+        level only.
+
+        Raises:
+            PostServiceError: If the upstream fetch fails.
+        """
+        try:
+            kwargs = dict(getattr(self.handler, "kwargs", {}) or {})
+            async with DouyinCrawler(kwargs) as crawler:
+                response = await crawler.fetch_post_comment(
+                    F2PostDetail(aweme_id=aweme_id)
+                )
+        except Exception as e:
+            logger.exception(
+                "Error fetching post comments",
+                extra={"aweme_id": aweme_id, "error": str(e)},
+            )
+            raise PostServiceError(f"Failed to fetch post comments: {str(e)}") from e
+        comments = (response or {}).get("comments") or []
+        return [dict(item) for item in comments if isinstance(item, dict)][
+            : max(count, 0)
+        ]
+
+    async def start_mix_download(self, mix_id: str) -> BulkDownloadResponse:
+        """Schedule an asynchronous download of every post in a mix album.
+
+        Args:
+            mix_id: The mix (collection album) identifier.
+
+        Returns:
+            Pending response carrying the ``operation_id`` to poll.
+        """
+        return await self._start_container_download(
+            container_id=mix_id,
+            operation_type="user_mix_bulk_download",
+            fetcher_name="fetch_user_mix_videos",
+            task_name="posts-mix",
+        )
+
+    async def start_collects_download(self, collects_id: str) -> BulkDownloadResponse:
+        """Schedule an asynchronous download of a collects folder.
+
+        Args:
+            collects_id: The collects folder identifier.
+
+        Returns:
+            Pending response carrying the ``operation_id`` to poll.
+        """
+        return await self._start_container_download(
+            container_id=collects_id,
+            operation_type="user_collects_bulk_download",
+            fetcher_name="fetch_user_collects_videos",
+            task_name="posts-collects",
+        )
+
+    async def _start_container_download(
+        self,
+        *,
+        container_id: str,
+        operation_type: str,
+        fetcher_name: str,
+        task_name: str,
+    ) -> BulkDownloadResponse:
+        """Persist the operation row and spawn a container download loop."""
+        if not container_id or not container_id.strip():
+            raise PostServiceError("Container id is required")
+        operation = await self.operation_store.create_operation(
+            operation_type=operation_type,
+            subject_id=container_id,
+            status="pending",
+            message="Container download scheduled",
+            progress=0.0,
+        )
+        coro = self._run_container_download(
+            operation.operation_id, container_id, fetcher_name
+        )
+        spawn_or_fallback(
+            self._task_registry, coro, name=f"{task_name}-{operation.operation_id}"
+        )
+        return BulkDownloadResponse(
+            operation_id=operation.operation_id,
+            sec_user_id=container_id,
+            download_path=None,
+            total_posts=0,
+            downloaded_count=dict.fromkeys(PostType, 0),
+            total_downloaded=0,
+            status=DownloadStatus.PENDING,
+            message="Container download scheduled",
+            error_details=None,
+        )
+
+    async def _run_container_download(
+        self, operation_id: str, container_id: str, fetcher_name: str
+    ) -> None:
+        """Paginate one mix/collects container and download every post.
+
+        The total is unknown up front (no profile equivalent), so
+        progress stays ``None`` and the terminal state is
+        ``completed`` unless a batch fails mid-run. The author directory
+        anchors on the first post's ``sec_user_id``, mirroring the f2
+        CLI, which may arrive as a bare string or a one-item list.
+        """
+        download_stats: dict[PostType, int] = dict.fromkeys(PostType, 0)
+        failed_count = 0
+        user_path: Path | None = None
+        try:
+            await self.operation_store.update_operation(
+                operation_id,
+                status="running",
+                message="Container download in progress",
+                error=None,
+            )
+            current_cursor = 0
+            page_count = 0
+            fetcher = getattr(self.handler, fetcher_name)
+            while True:
+                page_count += 1
+                if page_count > MAX_PAGES_FALLBACK:
+                    logger.warning(
+                        "Container download exceeded page cap; stopping",
+                        extra={
+                            "container_id": container_id,
+                            "operation_id": operation_id,
+                        },
+                    )
+                    break
+                iterator = fetcher(
+                    container_id, max_cursor=current_cursor, page_counts=PAGE_SIZE
+                )
+                try:
+                    try:
+                        page = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                    items = _list_from(page, "_to_list") or []
+                    if not items:
+                        break
+                    if user_path is None:
+                        sec = items[0].get("sec_user_id")
+                        if isinstance(sec, list):
+                            sec = sec[0] if sec else None
+                        if not sec or not isinstance(sec, str):
+                            raise PostServiceError(
+                                "Cannot resolve author of container " f"{container_id}"
+                            )
+                        async with AsyncUserDB("douyin_users.db") as db:
+                            user_path = await self.handler.get_or_add_user_data(
+                                self.handler.kwargs, sec, db
+                            )
+                    failed_count += await self._process_posts_batch(
+                        {"aweme_list": items}, download_stats, user_path
+                    )
+                    await self.operation_store.update_operation(
+                        operation_id,
+                        completed_items=sum(download_stats.values()),
+                        message="Container download in progress",
+                        metadata={
+                            "download_stats": _serialize_download_stats(download_stats),
+                            "failed_count": failed_count,
+                        },
+                    )
+                    raw = _mapping_from(page, "_to_raw") or {}
+                    has_more = raw.get("has_more", False)
+                    next_cursor = raw.get("max_cursor", 0)
+                    if not has_more or not next_cursor or next_cursor == current_cursor:
+                        break
+                    current_cursor = next_cursor
+                finally:
+                    aclose = getattr(iterator, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
+            total_downloaded = sum(download_stats.values())
+            await self.operation_store.update_operation(
+                operation_id,
+                status="completed",
+                message=(
+                    f"Container download completed: "
+                    f"{total_downloaded} posts, {failed_count} failed"
+                ),
+                completed_items=total_downloaded,
+                download_path=(
+                    relative_to_download_root(user_path) if user_path else None
+                ),
+                metadata={
+                    "download_stats": _serialize_download_stats(download_stats),
+                    "failed_count": failed_count,
+                },
+            )
+        except Exception as e:
+            logger.exception(
+                "Error in container download",
+                extra={
+                    "container_id": container_id,
+                    "operation_id": operation_id,
+                    "error": str(e),
+                },
+            )
+            total_downloaded = sum(download_stats.values())
+            await self.operation_store.update_operation(
+                operation_id,
+                status="partial" if total_downloaded else "failed",
+                message="Container download failed",
+                error=str(e),
+                metadata={
+                    "download_stats": _serialize_download_stats(download_stats),
+                    "failed_count": failed_count,
+                },
+            )
+
     async def get_user_posts(
         self,
         sec_user_id: str,
@@ -292,7 +777,7 @@ class PostService:
                 # The upstream cursor is a Douyin-defined sentinel, not
                 # an offset; stuck cursors (``raw_next == max_cursor``)
                 # mean the feed is exhausted and we expose ``None`` so
-                # the router does not invite the caller to re-fetch the
+                # callers are not invited to re-fetch the
                 # same window.
                 next_cursor = raw_next if raw_next != max_cursor else None
             else:
@@ -341,8 +826,9 @@ class PostService:
         self,
         sec_user_id: str,
         max_cursor: int = 0,
+        mode: str = "post",
     ) -> BulkDownloadResponse:
-        """Schedule an asynchronous bulk download of every post from a user.
+        """Schedule an asynchronous bulk download of a user's feed.
 
         Validates the user profile up front so the caller receives a 404
         immediately when the account does not exist, then persists a
@@ -355,6 +841,13 @@ class PostService:
         Args:
             sec_user_id: Unique identifier of the user.
             max_cursor: Starting pagination cursor for fetching posts.
+            mode: Which per-user feed to download (``post``, ``like``,
+                ``collection`` or ``music``). ``post`` keeps the historic
+                ``user_posts_bulk_download`` operation type; other modes
+                use ``user_{mode}_bulk_download``. ``collection`` and
+                ``music`` always fetch the login cookie owner's items
+                (Douyin exposes nobody else's); ``sec_user_id`` only
+                anchors the output directory for those two modes.
 
         Returns:
             BulkDownloadResponse: Pending response carrying the
@@ -362,12 +855,22 @@ class PostService:
 
         Raises:
             UserNotFoundError: If the requested user cannot be found.
-            PostServiceError: If the profile lookup itself fails.
+            PostServiceError: If the profile lookup itself fails, or the
+                requested mode is unknown.
         """
+        if mode not in BULK_FETCHERS:
+            raise PostServiceError(
+                f"Unknown bulk download mode: {mode} "
+                f"(expected one of {sorted(BULK_FETCHERS)})"
+            )
         try:
             logger.info(
                 "Validating user before scheduling bulk download",
-                extra={"sec_user_id": sec_user_id, "max_cursor": max_cursor},
+                extra={
+                    "sec_user_id": sec_user_id,
+                    "max_cursor": max_cursor,
+                    "mode": mode,
+                },
             )
             profile = await self.handler.fetch_user_profile(sec_user_id)
         except UserNotFoundError:
@@ -382,13 +885,18 @@ class PostService:
         if not profile or not getattr(profile, "nickname", None):
             raise UserNotFoundError(f"User not found: {sec_user_id}")
 
+        operation_type = (
+            "user_posts_bulk_download"
+            if mode == "post"
+            else f"user_{mode}_bulk_download"
+        )
         operation = await self.operation_store.create_operation(
-            operation_type="user_posts_bulk_download",
+            operation_type=operation_type,
             subject_id=sec_user_id,
             status="pending",
             message="Bulk download scheduled",
             progress=0.0,
-            metadata={"max_cursor": max_cursor},
+            metadata={"max_cursor": max_cursor, "mode": mode},
         )
 
         # Forward the already-fetched profile to the background coroutine so
@@ -397,9 +905,9 @@ class PostService:
         # a small failure window where the existence check passed but the
         # bulk loop sees a transient error.
         coro = self._run_bulk_download(
-            operation.operation_id, sec_user_id, max_cursor, profile=profile
+            operation.operation_id, sec_user_id, max_cursor, mode=mode, profile=profile
         )
-        # Route through the shared registry so the FastAPI lifespan can
+        # Route through the shared registry so host shutdown can
         # drain the in-flight bulk download before the executor pools are
         # reaped. ``spawn_or_fallback`` falls back to ``asyncio.create_task``
         # for unit tests that instantiate ``PostService`` directly.
@@ -428,6 +936,7 @@ class PostService:
         max_cursor: int,
         *,
         profile: Any,
+        mode: str = "post",
     ) -> None:
         """Execute the bulk download loop and persist progress to the store.
 
@@ -444,6 +953,7 @@ class PostService:
             profile: The user profile already validated by
                 :meth:`start_bulk_download`. Re-using the existing payload
                 avoids a second ``fetch_user_profile`` call.
+            mode: Which feed iterator to paginate (see ``BULK_FETCHERS``).
         """
         download_stats: dict[PostType, int] = dict.fromkeys(PostType, 0)
         download_path: str | None = None
@@ -534,7 +1044,9 @@ class PostService:
                     )
                     break
                 try:
-                    posts = await self._fetch_posts_batch(sec_user_id, current_cursor)
+                    posts = await self._fetch_posts_batch(
+                        sec_user_id, current_cursor, mode
+                    )
                     if not posts:
                         break
 
@@ -757,10 +1269,7 @@ class PostService:
         # original ``error_code`` and ``details``.
         op = await self.operation_store.get_operation(operation_id)
 
-        if op.operation_type not in (
-            "user_posts_bulk_download",
-            "user_posts_incremental_download",
-        ):
+        if op.operation_type not in BULK_OPERATION_TYPES:
             raise OperationNotFoundError(f"Download task {operation_id} not found")
 
         download_stats = _deserialize_download_stats(op.metadata)
@@ -1023,8 +1532,9 @@ class PostService:
         self,
         sec_user_id: str,
         cursor: int,
+        mode: str = "post",
     ) -> dict[str, Any]:
-        """Fetch a batch of posts from a user.
+        """Fetch a batch of posts from a user's feed.
 
         Returns an empty dict only when the upstream feed is exhausted
         (``StopAsyncIteration``). Any other exception propagates so the
@@ -1033,13 +1543,22 @@ class PostService:
         ``partial`` / ``failed`` terminal state instead of a silent clean
         break.
         """
+        try:
+            fetcher_name = BULK_FETCHERS[mode]
+        except KeyError:
+            raise PostServiceError(f"Unknown bulk download mode: {mode}") from None
         logger.info(
-            "Fetching posts batch", extra={"sec_user_id": sec_user_id, "cursor": cursor}
+            "Fetching posts batch",
+            extra={"sec_user_id": sec_user_id, "cursor": cursor, "mode": mode},
         )
 
-        posts_iterator = self.handler.fetch_user_post_videos(
-            sec_user_id=sec_user_id, max_cursor=cursor, page_counts=PAGE_SIZE
-        )
+        fetcher = getattr(self.handler, fetcher_name)
+        if mode in OWNER_SCOPED_MODES:
+            posts_iterator = fetcher(max_cursor=cursor, page_counts=PAGE_SIZE)
+        else:
+            posts_iterator = fetcher(
+                sec_user_id=sec_user_id, max_cursor=cursor, page_counts=PAGE_SIZE
+            )
 
         try:
             try:

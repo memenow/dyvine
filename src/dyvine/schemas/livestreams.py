@@ -1,15 +1,13 @@
-"""Pydantic models for the livestream router.
+"""Pydantic models for livestream downloads.
 
 Provides:
 
-- `LiveStreamDownloadRequest` — SDK-facing request body for downloads
-  identified by `user_id`. The router itself takes `user_id` as a
-  path parameter and `output_path` as an embedded body field; the
-  model is exported here for consumers that want a typed contract.
-- `LiveStreamURLDownloadRequest` — body for the URL-based download
-  endpoint (`POST /livestreams/stream:download`). Validates the host
-  against the `douyin.com` allowlist to prevent SSRF and rejects
-  output paths that contain absolute prefixes or `..` segments.
+- `LiveStreamDownloadRequest` — request shape for downloads
+  identified by `user_id`, with `output_path` as an embedded field.
+- `LiveStreamURLDownloadRequest` — URL-based download request.
+  Validates the host against the `douyin.com` allowlist to prevent
+  SSRF and rejects output paths that contain absolute prefixes or
+  `..` segments.
 - `LiveStreamDownloadResponse` — alias for `OperationResponse`.
 
 The schema-layer `output_path` validator is intentionally cheap: the
@@ -29,7 +27,7 @@ from .operations import OperationResponse
 
 _USER_ID_PATTERN = r"^[A-Za-z0-9_\-]{6,128}$"
 
-# Hostnames the livestream URL endpoint is allowed to point at. Anything
+# Hostnames livestream URL downloads are allowed to point at. Anything
 # else is rejected at the schema layer so the service never builds an
 # outbound HTTP request to an attacker-controlled host (SSRF).
 _ALLOWED_LIVESTREAM_HOSTS: frozenset[str] = frozenset(

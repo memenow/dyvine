@@ -215,6 +215,58 @@ class LivestreamService:
 
         return result
 
+    async def get_live_im(self, room_id: str, unique_id: str) -> dict[str, Any]:
+        """Fetch live-room IM state for one viewer identity.
+
+        Args:
+            room_id: The live room identifier.
+            unique_id: The viewer's Douyin unique id.
+
+        Raises:
+            LivestreamError: If the upstream fetch fails.
+        """
+        try:
+            fetched = await self.douyin_handler.fetch_live_im(
+                room_id=room_id, unique_id=unique_id
+            )
+            to_dict = getattr(fetched, "_to_dict", None)
+            if callable(to_dict):
+                data = to_dict()
+                return dict(data) if isinstance(data, dict) else {}
+            return {}
+        except Exception as error:
+            logger.exception(
+                "Failed to fetch live IM",
+                extra={"room_id": room_id, "error": str(error)},
+            )
+            raise LivestreamError(f"Failed to fetch live IM: {error}") from error
+
+    async def get_following_lives(self) -> list[dict[str, Any]]:
+        """List live rooms of followed accounts for the cookie owner.
+
+        The iterator is owner-scoped and takes no user argument.
+
+        Raises:
+            LivestreamError: If the upstream fetch fails.
+        """
+        try:
+            fetched = await self.douyin_handler.fetch_user_following_lives()
+            to_list = getattr(fetched, "_to_list", None)
+            if callable(to_list):
+                items = to_list()
+                return [dict(item) for item in items if isinstance(item, dict)]
+            to_dict = getattr(fetched, "_to_dict", None)
+            if callable(to_dict):
+                data = to_dict()
+                rooms = (data or {}).get("rooms") or (data or {}).get("lives") or []
+                return [dict(item) for item in rooms if isinstance(item, dict)]
+            return []
+        except Exception as error:
+            logger.exception("Failed to fetch following lives")
+            raise LivestreamError(
+                f"Failed to fetch following lives: {error}"
+            ) from error
+
     @staticmethod
     def _extract_stream_map(live_filter: Any) -> dict[str, str]:
         """Extract HLS stream map from the f2 live filter."""
@@ -228,18 +280,39 @@ class LivestreamService:
                 return stream_map
         return {}
 
+    #: Default quality ranking when the caller requests nothing: highest
+    #: first, then whatever the room offers.
+    _DEFAULT_QUALITY_ORDER = ("FULL_HD1", "HD1", "SD1", "SD2")
+
+    @staticmethod
+    def _select_stream(
+        stream_map: dict[str, str], preferred: str | None = None
+    ) -> tuple[str, str] | None:
+        """Choose ``(label, URL)`` from the available stream variants.
+
+        An explicit ``preferred`` label (case-insensitive) wins when it
+        maps to a non-empty URL; otherwise the default ranking applies,
+        then the first non-empty entry. ``None`` means nothing usable.
+        """
+        if preferred:
+            wanted = preferred.strip().upper()
+            for label, value in stream_map.items():
+                if label.upper() == wanted and isinstance(value, str) and value:
+                    return label, value
+        for key in LivestreamService._DEFAULT_QUALITY_ORDER:
+            candidate = stream_map.get(key)
+            if isinstance(candidate, str) and candidate:
+                return key, candidate
+        for label, value in stream_map.items():
+            if isinstance(value, str) and value:
+                return label, value
+        return None
+
     @staticmethod
     def _select_stream_url(stream_map: dict[str, str]) -> str | None:
         """Choose the preferred stream URL from the available variants."""
-        preferred_order = ("FULL_HD1", "HD1", "SD1", "SD2")
-        for key in preferred_order:
-            value = stream_map.get(key)
-            if isinstance(value, str) and value:
-                return value
-        for value in stream_map.values():
-            if isinstance(value, str) and value:
-                return value
-        return None
+        selected = LivestreamService._select_stream(stream_map)
+        return selected[1] if selected else None
 
     @staticmethod
     def _stream_map_from_room_data(
@@ -540,7 +613,10 @@ class LivestreamService:
         return lock
 
     async def download_stream(
-        self, url: str, output_path: str | None = None
+        self,
+        url: str,
+        output_path: str | None = None,
+        quality: str | None = None,
     ) -> LiveStreamDownloadResponse:
         """Download a Douyin livestream.
 
@@ -549,6 +625,10 @@ class LivestreamService:
                 a user profile URL, or a bare numeric webcast ID.
             output_path: Optional directory path where the stream file is saved.
                 Defaults to ``data/douyin/downloads/livestreams``.
+            quality: Optional quality label (e.g. ``FULL_HD1``, ``HD1``).
+                Case-insensitive; when missing or unavailable the highest
+                offered variant wins and the fallback is recorded on the
+                operation metadata.
 
         Returns:
             A persisted operation response. The actual download runs as a
@@ -608,8 +688,13 @@ class LivestreamService:
             logger.warning("No stream URLs found for webcast ID: %s", webcast_id)
             raise LivestreamError("No live stream available for this user")
 
-        if not self._select_stream_url(resolved_stream_map):
+        selected = self._select_stream(resolved_stream_map, quality)
+        if selected is None:
             raise LivestreamError("No suitable quality stream found")
+        selected_label, selected_url = selected
+        quality_fallback = bool(
+            quality and selected_label.upper() != quality.strip().upper()
+        )
 
         # ``resolve_within_root`` rejects absolute paths and traversal
         # segments before the service touches the filesystem so an
@@ -623,6 +708,13 @@ class LivestreamService:
         output_dir.mkdir(parents=True, exist_ok=True)
         ensure_within_root(output_dir)
 
+        # f2's ``handler_stream`` reads ``m3u8_pull_url["FULL_HD1"]``
+        # unconditionally, so the selected URL is pinned under that key
+        # while the full map stays available for inspection. Without
+        # this, rooms that only offer HD/SD variants would pass the
+        # selection check above and then crash inside the downloader.
+        normalized_stream_map = dict(resolved_stream_map)
+        normalized_stream_map["FULL_HD1"] = selected_url
         webcast_payload = {
             "room_id": room_id,
             "live_title": room_info.get("live_title_raw")
@@ -632,7 +724,7 @@ class LivestreamService:
             "nickname": room_info.get("nickname_raw")
             or room_info.get("nickname")
             or "",
-            "m3u8_pull_url": resolved_stream_map,
+            "m3u8_pull_url": normalized_stream_map,
             "flv_pull_url": resolved_flv_map or room_info.get("flv_pull_url") or {},
         }
 
@@ -673,6 +765,10 @@ class LivestreamService:
                     "source_url": normalized,
                     "webcast_id": webcast_id,
                     "room_id": room_id,
+                    "requested_quality": quality,
+                    "selected_quality": selected_label,
+                    "quality_fallback": quality_fallback,
+                    "available_qualities": sorted(resolved_stream_map),
                 },
             )
 
@@ -684,7 +780,7 @@ class LivestreamService:
                 output_dir,
                 target_file,
             )
-            # Route through the shared registry so the FastAPI lifespan can
+            # Route through the shared registry so host shutdown can
             # drain in-flight recordings before the R2 / audit executors
             # are reaped. ``spawn_or_fallback`` falls back to a bare
             # ``asyncio.create_task`` for isolated unit tests that bypass
