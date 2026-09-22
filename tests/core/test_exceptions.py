@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dyvine.core.exceptions import (
-    AuthenticationError,
     DownloadError,
     DyvineError,
     LivestreamNotFoundError,
@@ -92,12 +91,6 @@ def test_validation_error_inherits_dyvine_error() -> None:
     err = ValidationError("v")
     assert isinstance(err, DyvineError)
     assert not isinstance(err, ServiceError)
-
-
-def test_authentication_error_inherits_dyvine_error() -> None:
-    """Verify authentication error inherits dyvine error."""
-    err = AuthenticationError("a")
-    assert isinstance(err, DyvineError)
 
 
 def test_rate_limit_error_inherits_dyvine_error() -> None:

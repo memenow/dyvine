@@ -40,25 +40,9 @@
     h2 { font-size: 1.375rem; margin-top: 32px; }
     h3 { font-size: 1.125rem; }
     .lede { color: var(--muted); margin: 0; }
-    nav.toc {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px 20px;
-      margin: 24px 0;
-    }
-    nav.toc ol { padding-left: 20px; margin: 0; }
-    nav.toc li { padding: 4px 0; }
-    nav.toc a { color: var(--accent); text-decoration: none; }
-    nav.toc a:hover { text-decoration: underline; }
     nav.crumbs { margin-bottom: 8px; }
     nav.crumbs a { color: var(--accent); text-decoration: none; }
     nav.crumbs a:hover { text-decoration: underline; }
-    .meta {
-      display: inline-block;
-      font-size: 0.875rem;
-      color: var(--muted);
-    }
     article ul { padding-left: 22px; }
     article li { margin: 4px 0; }
     code {
@@ -75,6 +59,7 @@
       border-radius: 8px;
       overflow-x: auto;
     }
+    pre.mermaid { background: var(--panel); }
     .pillrow { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
     .pill {
       display: inline-block;
@@ -93,54 +78,84 @@
     <header>
       <nav class="crumbs"><a href="../index.html">&larr; Project documentation</a></nav>
       <h1>Dyvine Architecture</h1>
-      <p class="lede">Reference diagrams for the Dyvine FastAPI service.</p>
+      <p class="lede">Reference diagrams for the Dyvine hermes plugin.</p>
       <div class="pillrow">
-        <span class="pill">Last reviewed: 2026-09-18</span>
-        <span class="pill">Source layout: <code>src/dyvine/</code></span>
-        <span class="pill">Entry point: <code>main.py</code></span>
+        <span class="pill">Last reviewed: 2026-09-22</span>
+        <span class="pill">Source layout: <code>src/dyvine/</code> + <code>src/dyvine_hermes/</code></span>
+        <span class="pill">Entry point: <code>register(ctx)</code></span>
       </div>
     </header>
 
     <p>
-      Dyvine fronts the third-party <code>f2</code> Douyin SDK with a FastAPI service that
+      Dyvine wraps the third-party <code>f2</code> Douyin SDK as a hermes-native plugin that
       delivers asynchronous content downloads, persistent operation tracking, and optional
-      Cloudflare R2 archival. These diagrams describe the runtime architecture as it is
-      implemented in <code>main</code>.
+      Cloudflare R2 archival. There is no HTTP surface: the gateway loads
+      <code>plugin.yaml</code> plus <code>register(ctx)</code> (directory install) or the
+      <code>hermes_agent.plugins</code> entry point (pip install), and calls tools.
     </p>
 
-    <nav class="toc">
-      <strong>Diagrams</strong>
-      <ol>
-        <li><a href="flowchart.html">End-to-end request flowchart</a> — top-level routing and decision points.</li>
-        <li><a href="sequence.html">Sequence diagram</a> — livestream and bulk-download interactions across components.</li>
-        <li><a href="control-flow.html">Control-flow graph</a> — webcast resolution, jail enforcement, and pagination terminals.</li>
-        <li><a href="dependency-graph.html">Dependency graph</a> — module imports and external SDK boundaries.</li>
-        <li><a href="call-graph.html">Call graph</a> — primary call relationships among routers, services, and infrastructure.</li>
-      </ol>
-    </nav>
+    <h2>Components</h2>
+    <pre class="mermaid">
+flowchart TD
+    GW[Hermes gateway] -->|loads manifest + calls register| REG[dyvine_hermes.plugin register]
+    REG -->|35 tools + 1 skill| TOOLSET[dyvine toolset]
+    TOOLSET -->|args dict| WRAP[as_tool_handler: serialize to JSON string]
+    WRAP --> RAW[raw handler: one service call]
+    RAW -->|first call boots| ENG[get_engine: one Engine per process]
+    ENG --> SVC[services: users / posts / livestreams / queue / profiles / delivery]
+    ENG --> REPO[Postgres repositories]
+    SVC --> F2[f2 Douyin SDK]
+    SVC --> R2[Cloudflare R2]
+    SVC --> REPO[(Postgres: operations, queue, seeds, send_status, profiles, rounds, watch)]
+    SVC --> FS[Feishu open platform]
+</pre>
+
+    <h2>Submit-then-poll (long downloads)</h2>
+    <pre class="mermaid">
+sequenceDiagram
+    participant A as Agent
+    participant T as dyvine.posts.download
+    participant E as Engine
+    participant P as Postgres
+    A->>T: {"sec_user_id": "...", "mode": "post"}
+    T->>E: start background download
+    E->>P: insert operation (pending)
+    T-->>A: {"operation_id": "...", "status": "pending"}
+    Note over E: tracked background task downloads;<br/>state lands in Postgres first
+    A->>T: dyvine.posts.download_status {"operation_id": "..."}
+    T->>P: read operation row
+    T-->>A: {"status": "completed", ...}
+</pre>
 
     <h2>Layered architecture at a glance</h2>
     <ul>
-      <li><strong>Presentation</strong> — FastAPI routers under <code>src/dyvine/routers</code>. All router endpoints sit behind an <code>X-API-Key</code> dependency and the <code>handle_errors</code> decorator.</li>
-      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>R2StorageService</code>, and <code>WatchService</code> in <code>src/dyvine/services</code>. <code>services/websign.py</code> adds the Argus webSign layer: a headless-Chromium signing session (one page that signs URLs only — all API traffic stays on httpx) that lazily wraps f2's URL builders.</li>
-      <li><strong>Persistence</strong> — <code>OperationRepository</code> / <code>WatchRepository</code> (Postgres + asyncpg, Alembic-versioned) at <code>src/dyvine/db/</code>; owner heartbeats and an orphan sweep keep multi-replica state crash-safe.</li>
-      <li><strong>Infrastructure</strong> — <code>ServiceContainer</code> wires two named thread-pool executors (R2, R2-head), a <code>BackgroundTaskRegistry</code>, the asyncpg pool, a <code>RepositoryJanitor</code> loop, the f2 <code>DouyinHandler</code>, and a lazily initialized <code>WebSignProvider</code> (one daemon thread that owns the signing browser).</li>
-      <li><strong>Observability</strong> — Prometheus metrics (<code>/metrics</code>), structured JSON logging, request correlation IDs, split <code>/livez</code>/<code>/readyz</code>/<code>/startupz</code> probes.</li>
+      <li><strong>Plugin shell</strong> — <code>src/dyvine_hermes/</code>: <code>register</code> wires 35 tool specs to handlers, serializes results to JSON strings (the registry rejects anything else), and registers the bundled <code>dyvine:dyvine-ops</code> skill. Import is side-effect free: no network, no pools.</li>
+      <li><strong>Service</strong> — <code>UserService</code>, <code>PostService</code>, <code>LivestreamService</code>, <code>QueueService</code>, <code>ProfileService</code>, delivery channels, <code>R2StorageService</code>, and <code>WatchService</code> in <code>src/dyvine/services</code>. <code>services/websign.py</code> adds the Argus webSign layer: a headless-Chromium signing session (one page that signs URLs only — all traffic stays on httpx) that lazily wraps f2's URL builders.</li>
+      <li><strong>Persistence</strong> — Postgres repositories (asyncpg, Alembic-versioned) at <code>src/dyvine/db/</code>; owner heartbeats and an orphan sweep keep state crash-safe. The only state store.</li>
+      <li><strong>Infrastructure</strong> — the per-process <code>Engine</code> owns one session factory, one owner identity, a <code>BackgroundTaskRegistry</code>, two named thread-pool executors (R2, R2-head), the f2 <code>DouyinHandler</code>, and a lazily initialized webSign session.</li>
+      <li><strong>Observability</strong> — Prometheus counters/histograms, structured JSON logging, correlation IDs, and a passive <code>DatabaseHealthTracker</code> (last-known reachability, never a probe).</li>
     </ul>
 
     <h2>Operational invariants</h2>
     <ul>
-      <li>Every long-running download returns immediately as a persisted <code>OperationRecord</code> and continues on a tracked background task.</li>
-      <li>The lifespan drains the <code>BackgroundTaskRegistry</code> before reaping executor pools, so an active R2 upload always finishes (or is cancelled with structured logging) before the process exits.</li>
+      <li>Every long-running download returns immediately as a persisted operation row and continues on a tracked background task.</li>
+      <li>Shutdown drains the <code>BackgroundTaskRegistry</code> before reaping executor pools, so an active R2 upload always finishes (or is cancelled with structured logging) before the process exits.</li>
       <li>User-supplied filesystem paths are jailed inside <code>DOUYIN_DOWNLOAD_ROOT</code>; symlink redirection, traversal segments, and absolute prefixes are rejected pre- and post-mkdir.</li>
-      <li>The composite <code>Settings</code> validator refuses to boot in non-debug mode when <code>security.api_key</code> (checked only while <code>require_api_key</code> is on) or <code>database.url</code> still matches its development default.</li>
+      <li>The composite <code>Settings</code> validator refuses to boot in non-debug mode when <code>database.url</code> still matches its localhost development default.</li>
       <li>The webSign layer fails open: endpoint builders return the unsigned URL when the signer is unavailable, so only Argus-gated endpoints degrade (HTTP 403).</li>
-      <li><code>OperationRepository.sweep_orphans</code> fails <code>pending</code>/<code>running</code> rows whose owner stopped heartbeating, so a crashed deployment never leaves orphaned in-progress rows behind.</li>
+      <li>The orphan sweep fails <code>pending</code>/<code>running</code> rows whose owner stopped heartbeating, so a crashed process never leaves orphaned in-progress rows behind.</li>
+      <li>Tools are single-shot and idempotent; periodic work is driven by hermes cron, never by in-plugin loops. When idle the plugin holds zero connections and does zero work.</li>
     </ul>
 
     <footer>
-      Diagrams render with <a href="https://mermaid.js.org/">Mermaid 11</a> from the official CDN. Open each page to view the diagram inline; no build step required.
+      Diagrams render with <a href="https://mermaid.js.org/">Mermaid 11</a> from the official CDN; no build step required.
     </footer>
   </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({ startOnLoad: true, theme: prefersDark ? "dark" : "default", securityLevel: "loose" });
+  </script>
 </body>
 </html>

@@ -1,15 +1,16 @@
-"""Dyvine — FastAPI service for downloading Douyin content.
+"""Dyvine — Douyin download engine behind the hermes plugin.
 
 Subpackages:
-    - ``core``: settings, dependency container, operation store, logging,
-      path-safety helpers, error handlers.
-    - ``services``: domain services (users, posts, livestreams) and the
-      R2 storage facade.
-    - ``routers``: FastAPI routers, all gated by the ``require_api_key``
-      dependency.
-    - ``schemas``: Pydantic request/response models.
+    - ``core``: settings, background tasks, logging, path-safety
+      helpers, pagination.
+    - ``db``: Postgres repositories (operations, queue, seeds, send
+      status, profiles, rounds, watch) plus the session factory.
+    - ``services``: domain services (users, posts, livestreams,
+      queue, profiles, delivery) and the R2 storage facade.
+    - ``schemas``: Pydantic models shared by the services.
 
-The runtime entry point is ``dyvine.main:app``.
+There is no HTTP surface: the hermes plugin in
+``dyvine_hermes`` (see ``plugin.yaml``) is the only interface.
 """
 
 __version__ = "1.0.0"

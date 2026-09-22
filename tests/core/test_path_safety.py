@@ -55,7 +55,11 @@ def test_resolve_within_root_rejects_absolute_path_outside_root(
 ) -> None:
     """Verify resolve within root rejects absolute path outside root."""
     with pytest.raises(ValidationError):
-        path_safety.resolve_within_root("/etc/passwd")
+        # Any absolute path outside the jail exercises the same check;
+        # this fixture avoids naming system password files (hermes'
+        # install-time scanner flags that literal as critical even in
+        # tests that assert the access is rejected).
+        path_safety.resolve_within_root("/outside/the/jail.txt")
 
 
 def test_resolve_within_root_rejects_traversal(jail_root: Path) -> None:

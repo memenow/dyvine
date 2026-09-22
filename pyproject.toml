@@ -15,12 +15,13 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-cov>=7.1.0",
     "testcontainers[postgres]>=4.15.0,<5.0.0",
+    "pyyaml>=6.0.2,<7.0.0",
 ]
 
 [project]
 name = "dyvine"
 version = "1.0.0"
-description = "A high-performance Python API for interacting with Douyin content"
+description = "Hermes plugin for Douyin download automation (users, posts, livestreams, queues, Feishu delivery)"
 requires-python = ">=3.12"
 authors = [
     { name = "Bill Duke", email = "billduke@memenow.xyz" }
@@ -28,14 +29,21 @@ authors = [
 dependencies = [
     # Core dependencies. Each direct dependency carries an upper bound so
     # ``pyproject.toml`` resolution does not silently drag the next major
-    # version onto the API once it ships. ``uv.lock`` still pins exact
-    # versions for reproducible installs in CI and the Dockerfile; the
-    # bounds below add a second guard for tools that read pep-621
-    # metadata without consulting the lockfile (pip, poetry, etc.).
-    "fastapi>=0.141.1,<1.0.0",
-    "uvicorn[standard]>=0.52.4,<1.0.0",
-    "pydantic>=2.13.5,<3.0.0",
+    # version onto the plugin once it ships. ``uv.lock`` still pins exact
+    # versions for reproducible installs in CI; the bounds below add a
+    # second guard for installers that read pep-621 metadata without
+    # consulting the lockfile (pip, hermes plugin installs).
+    # NOTE: keep this list in sync with ``plugin.yaml``
+    # ``python_dependencies`` (plus operator-side ``alembic`` below):
+    # hermes installs entry-point plugins from these bounds.
+    "pydantic>=2,<3.0.0",
     "pydantic-settings>=2.15.0,<3.0.0",
+    # ``httpx`` floor admits f2 0.0.1.7's ``==0.27.2`` pin: loose
+    # installers (pip, hermes plugin installs) resolve f2's pins,
+    # while ``[tool.uv] override-dependencies`` below lifts the
+    # development lockfile to 0.28+. Dyvine's own httpx usage is
+    # compatible with both surfaces.
+    "httpx>=0.27.2,<1.0.0",
     "python-dotenv>=1.2.3,<2.0.0",
 
     # External integrations. ``f2`` is an especially low-maintenance
@@ -43,7 +51,6 @@ dependencies = [
     # constrain it; widen the bound only after a deliberate test pass.
     "boto3>=1.43.89,<2.0.0",
     "f2>=0.0.1.7,<0.0.2",
-    "httpx>=0.28.1,<1.0.0",
     # Headless-Chromium signing session for the Argus webSign layer.
     # Pinned exactly: the wheel and the browser build are a validated
     # pair (1.62.0 against the production host's chromium-1234), and a
@@ -56,7 +63,6 @@ dependencies = [
     # Utilities
     "prometheus-client>=0.26.0,<1.0.0",
     "psutil>=7.2.2,<8.0.0",
-    "python-multipart>=0.0.32,<0.1.0",
 
     # Persistence. Async SQLAlchemy over asyncpg is the only production
     # backend; Alembic versions the schema (see ``alembic/``).
@@ -70,7 +76,16 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --asyncio-mode=auto"
+# ``--import-mode=importlib`` imports test modules by path without
+# inserting directories into ``sys.path``. The repo root must carry an
+# ``__init__.py`` (hermes directory plugins require ``plugin.yaml`` +
+# ``__init__.py`` with ``register()`` beside each other), and the
+# default ``prepend`` mode would treat the root as package ``dyvine``
+# and shadow ``src/dyvine`` on the import path. ``tests/conftest.py``
+# already puts ``src/`` and ``tests/`` on ``sys.path`` explicitly, so
+# no test relies on pytest's insertion. Test basenames must stay
+# unique (no ``__init__.py`` packages under ``tests/``).
+addopts = "-v --tb=short --asyncio-mode=auto --import-mode=importlib"
 # Each fixture binds to the function-scoped event loop so async tests
 # do not accidentally share state via a longer-lived loop.
 asyncio_default_fixture_loop_scope = "function"
@@ -85,14 +100,10 @@ filterwarnings = [
     "ignore:websockets\\..*:DeprecationWarning",
     "ignore::DeprecationWarning:websockets.*",
     "ignore::DeprecationWarning:websockets_proxy.*",
-    # starlette >= 1.1 deprecates the httpx-backed TestClient in favour of
-    # a not-yet-available ``httpx2``; the suite stays on httpx until that
-    # migration path exists. Drop this once tests move off TestClient.
-    "ignore::starlette.exceptions.StarletteDeprecationWarning",
     # anyio >= 4.15 deprecates the ``anyio.abc.BlockingPortal`` alias in
-    # favour of ``anyio.from_thread.BlockingPortal``; starlette's
-    # TestClient still imports the old path at module scope. Drop this
-    # once starlette migrates to the new import.
+    # favour of ``anyio.from_thread.BlockingPortal``; some transitive
+    # dependency still imports the old path at module scope. Drop this
+    # once the import moves.
     "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated:DeprecationWarning",
     # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
     # cleanup) to a warning. Older test environments did not surface
@@ -106,8 +117,12 @@ markers = [
     "asyncio: mark test as async/await test"
 ]
 
+[project.entry-points."hermes_agent.plugins"]
+# Entry-point (pip) distribution: ``dyvine_hermes`` exposes register().
+dyvine = "dyvine_hermes"
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/dyvine"]
+packages = ["src/dyvine", "src/dyvine_hermes"]
 
 [tool.uv]
 # f2 0.0.1.7 (the upstream Douyin SDK) pins the packages below with ``==``

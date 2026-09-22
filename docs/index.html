@@ -90,13 +90,13 @@
   <main>
     <header>
       <h1>Dyvine</h1>
-      <p class="lede">FastAPI service for asynchronous Douyin content downloads, persistent operation tracking, and optional Cloudflare R2 archival.</p>
+      <p class="lede">Hermes-native plugin for Douyin download automation: 35 tools for users, posts, livestreams, queues, Feishu delivery, and profiles, with Postgres state and optional Cloudflare R2 archival.</p>
       <div class="pillrow">
         <span class="pill">Python 3.12+</span>
-        <span class="pill">FastAPI</span>
-        <span class="pill">Postgres operation store</span>
+        <span class="pill">Hermes plugin</span>
+        <span class="pill">Postgres state store</span>
         <span class="pill">Cloudflare R2 optional</span>
-        <span class="pill">Last reviewed: 2026-09-18</span>
+        <span class="pill">Last reviewed: 2026-09-22</span>
       </div>
     </header>
 
@@ -104,13 +104,13 @@
       <strong>Contents</strong>
       <ol>
         <li><a href="#overview">Overview</a></li>
+        <li><a href="#install">Install</a></li>
         <li><a href="#quick-start">Quick Start</a></li>
         <li><a href="#configuration">Configuration</a></li>
-        <li><a href="#api-reference">API Reference</a></li>
+        <li><a href="#tool-reference">Tool Reference</a></li>
+        <li><a href="#queue-delivery">Queue &amp; Delivery SOP</a></li>
         <li><a href="#watch-mode">Watch Mode</a></li>
         <li><a href="#operations">Operations</a></li>
-        <li><a href="#batch-cli">Batch CLI</a></li>
-        <li><a href="#deployment">Deployment</a></li>
         <li><a href="#development">Development</a></li>
         <li><a href="#security-notes">Security Notes</a></li>
         <li><a href="#maintenance-notes">Maintenance Notes</a></li>
@@ -120,33 +120,60 @@
     <section id="overview">
       <h2>Overview</h2>
       <p>
-        Dyvine fronts the third-party <code>f2</code> Douyin SDK with a REST API that schedules long-running work,
-        persists operation state, and exposes operational health probes. It supports downloads for videos,
-        image galleries, livestreams, and user content.
+        Dyvine wraps the third-party <code>f2</code> Douyin SDK as a hermes plugin.
+        There is no HTTP surface: <code>plugin.yaml</code> plus <code>register(ctx)</code>
+        is the only interface, distributed both as a directory plugin (Git URL) and as
+        a pip package (<code>hermes_agent.plugins</code> entry point).
       </p>
       <ul>
-        <li>Async, fire-and-forget downloads return an <code>operation_id</code> immediately and continue on tracked background tasks.</li>
-        <li>Persistent operation state is stored in a shared Postgres database (schema versioned by Alembic).</li>
-        <li>Router endpoints are protected by <code>X-API-Key</code> authentication by default.</li>
+        <li>35 idempotent, single-shot tools take a JSON object and return a JSON string.</li>
+        <li>Async, fire-and-forget downloads return an <code>operation_id</code> immediately and continue on tracked background tasks; poll with the matching status tool.</li>
+        <li>Persistent state lives in a shared Postgres database (schema versioned by Alembic): operations, download queue, seeds, send status, profiles, rounds, and watch subscriptions.</li>
+        <li>Idle-quiet by design: importing the plugin performs zero network I/O and opens zero connections; the engine boots on the first tool call.</li>
         <li>User-supplied output paths are resolved inside <code>DOUYIN_DOWNLOAD_ROOT</code> and rejected when they escape the configured root.</li>
         <li>Dedicated thread pools isolate R2 calls and R2 metadata fan-out; database IO is natively async over asyncpg.</li>
-        <li>Operational endpoints include <code>/livez</code>, <code>/readyz</code>, <code>/startupz</code>, <code>/health</code>, and <code>/metrics</code>.</li>
+        <li>A bundled <code>dyvine:dyvine-ops</code> skill carries the batch-delivery SOP plus the tool manual.</li>
       </ul>
       <table>
         <thead>
           <tr><th>Domain</th><th>Purpose</th></tr>
         </thead>
         <tbody>
-          <tr><td>Users</td><td>Profile lookup and bulk download of a user's posts or likes to R2.</td></tr>
-          <tr><td>Posts</td><td>Per-post detail, paginated post listing, and bulk download of a user's posts.</td></tr>
-          <tr><td>Livestreams</td><td>Active-room download by user ID or direct URL with deduplication.</td></tr>
-          <tr><td>Watch</td><td>Long-lived subscriptions that auto-download a user's new posts and record their livestreams on configurable polling cadences.</td></tr>
-          <tr><td>System</td><td>Liveness, readiness, startup, health, and Prometheus metrics endpoints.</td></tr>
+          <tr><td>Users</td><td>Share-link resolution, profile lookup, social graph, login-identity check.</td></tr>
+          <tr><td>Posts</td><td>Per-post detail, paginated listing, comments, stats, feeds, and bulk download (post/like/collection/music/mix/collects).</td></tr>
+          <tr><td>Livestreams</td><td>Room download at the highest available quality, live IM, followed-room listing.</td></tr>
+          <tr><td>Queue &amp; rounds</td><td>Seed import, idempotent enqueue, serial-group-aware claims, heartbeats, round headers.</td></tr>
+          <tr><td>Delivery</td><td>Per-account Feishu group delivery, delivery counters, hermes-native notify for other channels.</td></tr>
+          <tr><td>Profiles &amp; ops</td><td>Cached profile snapshots and generic operation polling.</td></tr>
+          <tr><td>Watch</td><td>Subscriptions that auto-download a user's new posts and record livestreams on configurable polling cadences.</td></tr>
         </tbody>
       </table>
       <p>
         Architecture diagrams are available in <a href="architecture/index.html">docs/architecture/index.html</a>.
       </p>
+    </section>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p>From the hermes catalog (once listed):</p>
+      <pre><code>hermes plugins install dyvine</code></pre>
+      <p>From Git:</p>
+      <pre><code>hermes plugins install &lt;owner&gt;/dyvine --enable</code></pre>
+      <p>From pip (entry-point distribution):</p>
+      <pre><code>pip install dyvine
+# then enable `dyvine` in hermes (`hermes plugins enable dyvine`)</code></pre>
+      <p>At install hermes prompts for the required environment (<code>requires_env</code>):</p>
+      <pre><code>DATABASE_URL=postgresql+asyncpg://user:password@host:5432/dyvine
+DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
+      <div class="note">
+        <strong>Feishu credentials are not plugin inputs.</strong> Delivery reads the hermes
+        defaults (<code>FEISHU_APP_ID</code>/<code>FEISHU_APP_SECRET</code> from
+        <code>~/.hermes/.env</code>) at runtime. Channels other than Feishu groups go
+        through hermes-native messaging; <code>dyvine.notify.send</code> is a thin
+        wrapper, not a channel implementation.
+      </div>
+      <p>Apply the schema once before first use (operator-side, from a repo checkout with the same <code>DATABASE_URL</code>):</p>
+      <pre><code>uv run alembic upgrade head</code></pre>
     </section>
 
     <section id="quick-start">
@@ -155,36 +182,25 @@
       <ul>
         <li><a href="https://docs.astral.sh/uv/">uv</a> or Python 3.12+</li>
         <li>Git</li>
-        <li>Postgres 16+ (operation and watch state live in Postgres)</li>
+        <li>Postgres 16+ (all plugin state lives in Postgres)</li>
         <li>A valid Douyin session cookie</li>
         <li>Optional Cloudflare R2 credentials and bucket for archival uploads</li>
       </ul>
-      <h3>Install</h3>
+      <h3>Develop</h3>
       <pre><code>git clone https://github.com/memenow/dyvine.git
 cd dyvine
-uv sync --all-extras</code></pre>
-      <h3>Run</h3>
-      <pre><code>docker run -d --name dyvine-pg \
+uv sync --all-extras
+cp .env.example .env   # set DOUYIN_COOKIE, DATABASE_URL
+docker run -d --name dyvine-pg \
   -e POSTGRES_USER=dyvine -e POSTGRES_PASSWORD=dyvine \
   -e POSTGRES_DB=dyvine -p 5432:5432 postgres:16
-cp .env.example .env   # set SECURITY_API_KEY, DOUYIN_COOKIE, DATABASE_URL
-uv run alembic upgrade head
-uv run uvicorn dyvine.main:app --reload</code></pre>
-      <p>For a production-style process, run:</p>
-      <pre><code>uv run uvicorn dyvine.main:app --host 0.0.0.0 --port 8000 \
-    --timeout-graceful-shutdown 25</code></pre>
-      <table>
-        <thead>
-          <tr><th>Surface</th><th>URL</th></tr>
-        </thead>
-        <tbody>
-          <tr><td>Application</td><td><code>http://localhost:8000</code></td></tr>
-          <tr><td>Swagger UI</td><td><code>http://localhost:8000/docs</code></td></tr>
-          <tr><td>ReDoc</td><td><code>http://localhost:8000/redoc</code></td></tr>
-          <tr><td>OpenAPI spec</td><td><code>http://localhost:8000/api/v1/openapi.json</code></td></tr>
-          <tr><td>Prometheus metrics</td><td><code>http://localhost:8000/metrics</code></td></tr>
-        </tbody>
-      </table>
+uv run alembic upgrade head</code></pre>
+      <h3>Validate</h3>
+      <pre><code>make test       # pytest
+make coverage   # pytest with the 80% gate
+make lint       # ruff + mypy
+make format     # black + isort
+make doctor     # hermes plugins doctor --ci (needs docker)</code></pre>
     </section>
 
     <section id="configuration">
@@ -193,31 +209,38 @@ uv run uvicorn dyvine.main:app --reload</code></pre>
       <pre><code>cp .env.example .env</code></pre>
       <p>Minimum required settings for a non-debug deployment:</p>
       <pre><code>API_DEBUG=false
-SECURITY_API_KEY=&lt;48+ bytes of entropy&gt;
 DOUYIN_COOKIE=&lt;browser session cookie&gt;
 DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pre>
-      <p>Generate strong local secrets with:</p>
-      <pre><code>python -c "import secrets; print(secrets.token_urlsafe(48))"</code></pre>
+      <table>
+        <thead>
+          <tr><th>Prefix</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>API_</code></td><td>Debug flag only (<code>API_DEBUG</code>); no HTTP server exists.</td></tr>
+          <tr><td><code>DATABASE_</code></td><td>Postgres URL, pool strategy (<code>null</code>/<code>queue</code>) and sizing, janitor cadence, operation retention.</td></tr>
+          <tr><td><code>DOUYIN_</code></td><td>Cookie, headers, proxy, download root, livestream headers, local-retention mode, Argus webSign session.</td></tr>
+          <tr><td><code>DOUYIN_WATCH_</code></td><td>Watch polling cadences, subscription cap, dedupe window, backfill flag.</td></tr>
+          <tr><td><code>R2_</code></td><td>Cloudflare R2 account, key, bucket, and endpoint.</td></tr>
+          <tr><td>(none)</td><td><code>WATCH_ENABLED</code>: run watch loops in this process.</td></tr>
+        </tbody>
+      </table>
       <p>
         Optional R2 archival requires <code>R2_ACCOUNT_ID</code>, <code>R2_ACCESS_KEY_ID</code>,
         <code>R2_SECRET_ACCESS_KEY</code>, <code>R2_BUCKET_NAME</code>, and <code>R2_ENDPOINT</code>.
-        The storage service auto-disables when any R2 field is empty. By default the readiness probe
-        fails until all R2 fields and the Douyin cookie are set.
+        The storage service auto-disables when any R2 field is empty.
       </p>
       <p>
         Set <code>DOUYIN_RETAIN_LOCAL_DOWNLOADS=true</code> to run in local-retention mode: each task's
         files are kept under <code>DOUYIN_DOWNLOAD_ROOT/tasks/&lt;task_id&gt;</code> instead of being swept after upload,
-        R2 is dropped from the readiness gate (reported as <code>disabled</code>), and the upload step is
-        skipped while R2 is unconfigured. <code>/readyz</code> also verifies that this retained workspace
-        can be created and written. Retention also applies implicitly whenever R2 is unset, so a
-        finished download is never discarded. Bound the retained workspace with
+        and the upload step is skipped while R2 is unconfigured. Retention also applies implicitly
+        whenever R2 is unset, so a finished download is never discarded. Bound the retained workspace with
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
       </p>
       <p>
         Douyin's web APIs additionally require a per-request Argus webSign
         triple (<code>uifid</code>/<code>timestamp</code>/<code>x-secsdk-web-signature</code>)
         that only the SecureSDK inside a real browser session can compute. Dyvine keeps one
-        headless-Chromium page purely as a signing session -- all API traffic and downloads stay
+        headless-Chromium page purely as a signing session -- all traffic and downloads stay
         on plain HTTP -- starting it lazily on the first signed request (<code>DOUYIN_WEBSIGN_ENABLED</code>,
         default <code>true</code>; page <code>DOUYIN_WEBSIGN_PAGE_URL</code>; budgets
         <code>DOUYIN_WEBSIGN_INIT_TIMEOUT_SECONDS</code> and
@@ -236,18 +259,15 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>queue</code> keeps a capped pool tuned by <code>DATABASE_POOL_SIZE</code>,
         <code>DATABASE_POOL_MAX_OVERFLOW</code>, <code>DATABASE_POOL_TIMEOUT</code>,
         <code>DATABASE_POOL_RECYCLE_SECONDS</code>, and <code>DATABASE_POOL_PRE_PING</code>.
-        The <code>k8s/</code> cluster uses <code>queue</code> because HPA-scaled replicas
-        share one database. <code>DATABASE_OPERATION_RETENTION_DAYS</code> bounds how long
+        <code>DATABASE_OPERATION_RETENTION_DAYS</code> bounds how long
         terminal operation rows are kept (<code>0</code> disables purging), and
-        <code>DATABASE_JANITOR_INTERVAL_SECONDS</code> (<code>0</code> = automatic) controls
+        <code>DATABASE_JANITOR_INTERVAL_SECONDS</code> (<code>0</code> = disabled) controls
         the janitor heartbeat/sweep cadence. Apply schema changes with
-        <code>alembic upgrade head</code>.
+        <code>uv run alembic upgrade head</code>.
       </p>
-      <h3>Watch Mode configuration (<code>DOUYIN_WATCH_</code> prefix)</h3>
+      <h3>Watch configuration (<code>DOUYIN_WATCH_</code> prefix)</h3>
       <p>
-        Watch Mode subscriptions are created through the <code>/api/v1/watch</code> API. The following
-        environment variables set the service-wide defaults; each variable can be overridden
-        per subscription when calling <code>POST /watch</code>.
+        The following environment variables set the service-wide watch defaults.
       </p>
       <table>
         <thead>
@@ -257,85 +277,80 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
           <tr><td><code>DOUYIN_WATCH_LIVE_POLL_SECONDS</code></td><td><code>300</code></td><td>60–3600</td><td>Seconds between live-status checks per subscription.</td></tr>
           <tr><td><code>DOUYIN_WATCH_POST_POLL_SECONDS</code></td><td><code>2700</code></td><td>300–86400</td><td>Seconds between new-post checks per subscription.</td></tr>
           <tr><td><code>DOUYIN_WATCH_RECENT_ID_CAP</code></td><td><code>200</code></td><td>20–2000</td><td>Maximum aweme_ids kept in each subscription's dedupe checkpoint.</td></tr>
-          <tr><td><code>DOUYIN_WATCH_MAX_SUBSCRIPTIONS</code></td><td><code>50</code></td><td>1–10000</td><td>Maximum number of concurrent watch subscriptions; <code>POST /watch</code> returns 429 when this cap is reached.</td></tr>
+          <tr><td><code>DOUYIN_WATCH_MAX_SUBSCRIPTIONS</code></td><td><code>50</code></td><td>1–10000</td><td>Maximum number of concurrent watch subscriptions.</td></tr>
           <tr><td><code>DOUYIN_WATCH_BACKFILL_ON_CREATE</code></td><td><code>false</code></td><td>—</td><td>When <code>true</code>, a new subscription downloads the user's existing posts once before switching to incremental-only mode.</td></tr>
         </tbody>
       </table>
     </section>
 
-    <section id="api-reference">
-      <h2>API Reference</h2>
-      <p>Router endpoints sit under the configurable <code>API_PREFIX</code>, which defaults to <code>/api/v1</code>.</p>
-
-      <h3>Authentication</h3>
+    <section id="tool-reference">
+      <h2>Tool Reference</h2>
       <p>
-        When <code>SECURITY_REQUIRE_API_KEY=true</code>, every router request must include the configured key in
-        the <code>X-API-Key</code> header. Mismatches return <code>401 Unauthorized</code>.
+        All 35 tools live in the <code>dyvine</code> toolset. Every tool takes a JSON
+        object and returns a JSON string. DB-only tools need just
+        <code>DATABASE_URL</code>; Douyin-backed tools additionally need
+        <code>DOUYIN_COOKIE</code>. Long downloads follow submit-then-poll: the
+        download tools return an <code>operation_id</code> immediately, and the
+        matching status tools report progress until the operation turns terminal
+        (<code>completed</code>, <code>partial</code>, or <code>failed</code>).
+        <code>partial</code> is normal (deleted/private/age-gated posts); only
+        <code>interrupted by upstream error</code> means work remains.
       </p>
-      <pre><code>X-API-Key: &lt;SECURITY_API_KEY&gt;</code></pre>
-
-      <h3>Rate Limiting</h3>
-      <p>
-        A per-replica token bucket caps each caller (keyed on
-        <code>X-API-Key</code>, else client IP): sustained
-        <code>API_RATE_LIMIT_PER_SECOND</code>, burst
-        <code>API_RATE_LIMIT_BURST</code>. Over-limit callers receive the
-        standard 429 envelope with a <code>Retry-After</code> header. Probes,
-        <code>/metrics</code>, <code>/health</code>, and <code>/</code> are
-        exempt.
-      </p>
-
-      <h3>System Endpoints</h3>
-      <pre><code>GET /                       # Service metadata and feature list
-GET /livez                  # Process liveness signal
-GET /readyz                 # Dependency-aware readiness
-GET /startupz               # Lifespan startup completion
-GET /health                 # Aggregated runtime metrics
-GET /metrics                # Prometheus exposition format</code></pre>
-
-      <h3>Users</h3>
-      <pre><code>GET  /api/v1/users/{user_id}
-POST /api/v1/users/{user_id}/content:download
-GET  /api/v1/users/operations/{operation_id}</code></pre>
-
-      <h3>Posts</h3>
-      <pre><code>GET  /api/v1/posts/{post_id}
-GET  /api/v1/posts/users/{user_id}/posts
-POST /api/v1/posts/users/{user_id}/posts:download
-GET  /api/v1/posts/operations/{operation_id}</code></pre>
-      <p>
-        The list endpoint accepts an opaque <code>page_token</code> query parameter. Echo the response's
-        <code>next_page_token</code> back unchanged on the follow-up call.
-      </p>
-
-      <h3>Livestreams</h3>
-      <pre><code>POST /api/v1/livestreams/users/{user_id}/stream:download
-POST /api/v1/livestreams/stream:download
-GET  /api/v1/livestreams/operations/{operation_id}</code></pre>
-      <p>The URL endpoint validates the host against an exact allowlist (<code>douyin.com</code>, <code>www.douyin.com</code>, <code>live.douyin.com</code>, <code>v.douyin.com</code>) to prevent SSRF — other subdomains get 422.</p>
-
-      <h3>Watch</h3>
-      <pre><code>POST   /api/v1/watch
-GET    /api/v1/watch
-GET    /api/v1/watch/{subscription_id}
-DELETE /api/v1/watch/{subscription_id}</code></pre>
-      <p>See the <a href="#watch-mode">Watch Mode</a> section for full endpoint details.</p>
-
+      <table>
+        <thead>
+          <tr><th>Tool</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>dyvine.profile.get</code></td><td>Fetch a Douyin user profile by sec_user_id.</td></tr>
+          <tr><td><code>dyvine.social.following</code></td><td>List accounts a user follows.</td></tr>
+          <tr><td><code>dyvine.social.followers</code></td><td>List accounts following a user.</td></tr>
+          <tr><td><code>dyvine.identity.get</code></td><td>Resolve who the configured DOUYIN_COOKIE authenticates as.</td></tr>
+          <tr><td><code>dyvine.users.resolve</code></td><td>Follow a Douyin share short link to its user/post identity.</td></tr>
+          <tr><td><code>dyvine.posts.list</code></td><td>List one page of a user's posts.</td></tr>
+          <tr><td><code>dyvine.posts.download</code></td><td>Start a background bulk download (modes: post, like, collection, music).</td></tr>
+          <tr><td><code>dyvine.posts.download_status</code></td><td>Poll a bulk/download operation by id.</td></tr>
+          <tr><td><code>dyvine.single.download</code></td><td>Download one post (video or album) inline and return file paths.</td></tr>
+          <tr><td><code>dyvine.mix.download</code></td><td>Start a background download of a mix album by mix_id.</td></tr>
+          <tr><td><code>dyvine.collects.list</code></td><td>List the cookie owner's collects folders.</td></tr>
+          <tr><td><code>dyvine.collects.download</code></td><td>Start a background download of a collects folder.</td></tr>
+          <tr><td><code>dyvine.comments.list</code></td><td>List top-level comments of a post.</td></tr>
+          <tr><td><code>dyvine.stats.get</code></td><td>Fetch upstream statistics of a post.</td></tr>
+          <tr><td><code>dyvine.feed.user</code></td><td>List a user's feed videos.</td></tr>
+          <tr><td><code>dyvine.feed.related</code></td><td>List posts related to one post.</td></tr>
+          <tr><td><code>dyvine.feed.friend</code></td><td>List friend-feed videos for the cookie owner.</td></tr>
+          <tr><td><code>dyvine.live.download</code></td><td>Download a livestream (default highest quality; quality override optional).</td></tr>
+          <tr><td><code>dyvine.live.im</code></td><td>Fetch live-room IM state for a viewer identity.</td></tr>
+          <tr><td><code>dyvine.live.following</code></td><td>List live rooms of followed accounts (cookie owner).</td></tr>
+          <tr><td><code>dyvine.queue.import_seeds</code></td><td>Upsert seed accounts [{sec_user_id, nickname?, source_url?}].</td></tr>
+          <tr><td><code>dyvine.queue.enqueue</code></td><td>Enqueue all non-excluded seeds into a round (idempotent).</td></tr>
+          <tr><td><code>dyvine.queue.claim</code></td><td>Claim the oldest pending entry (serial-group aware).</td></tr>
+          <tr><td><code>dyvine.queue.update</code></td><td>Patch a queue entry (status/checkpoint/counters).</td></tr>
+          <tr><td><code>dyvine.queue.list</code></td><td>List queue entries oldest-first with filters.</td></tr>
+          <tr><td><code>dyvine.queue.status</code></td><td>Tally queue entries by status (one round or all).</td></tr>
+          <tr><td><code>dyvine.queue.release</code></td><td>Requeue entries whose claimer stopped heartbeating.</td></tr>
+          <tr><td><code>dyvine.rounds.create</code></td><td>Create a delivery round header (idempotent).</td></tr>
+          <tr><td><code>dyvine.rounds.list</code></td><td>List delivery rounds in creation order.</td></tr>
+          <tr><td><code>dyvine.delivery.send_account</code></td><td>Deliver one account's pending media files to its Feishu group.</td></tr>
+          <tr><td><code>dyvine.delivery.status</code></td><td>Read delivery counters by nickname (or sec_user_id).</td></tr>
+          <tr><td><code>dyvine.notify.send</code></td><td>Send a message via hermes-native channels (non-Feishu).</td></tr>
+          <tr><td><code>dyvine.profiles.upsert</code></td><td>Insert or patch a cached profile snapshot.</td></tr>
+          <tr><td><code>dyvine.profiles.get</code></td><td>Fetch a cached profile snapshot.</td></tr>
+          <tr><td><code>dyvine.operation.get</code></td><td>Fetch any operation row by id.</td></tr>
+        </tbody>
+      </table>
       <h3>Examples</h3>
-      <pre><code>curl -H "X-API-Key: $SECURITY_API_KEY" \
-     "http://localhost:8000/api/v1/users/USER_ID"
+      <pre><code>dyvine.users.resolve        {"url": "https://v.douyin.com/abc/"}
+  -&gt; {"kind": "user", "sec_user_id": "...", "url": "..."}
 
-curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
-     "http://localhost:8000/api/v1/posts/users/USER_ID/posts:download"
+dyvine.posts.download       {"sec_user_id": "...", "mode": "post"}
+  -&gt; {"operation_id": "...", "status": "pending", ...}
 
-curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"url": "https://live.douyin.com/123456789"}' \
-     "http://localhost:8000/api/v1/livestreams/stream:download"
+dyvine.posts.download_status {"operation_id": "..."}
+  -&gt; {"operation_id": "...", "status": "completed", ...}
 
-curl -H "X-API-Key: $SECURITY_API_KEY" \
-     "http://localhost:8000/api/v1/livestreams/operations/OPERATION_ID"</code></pre>
-
+dyvine.rounds.create        {"round": "weekly-2026-09-27"}
+dyvine.queue.import_seeds   {"items": [{"sec_user_id": "...", "nickname": "..."}]}
+dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       <h3>Operation Response</h3>
       <pre><code>{
   "operation_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -360,6 +375,28 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
       </p>
     </section>
 
+    <section id="queue-delivery">
+      <h2>Queue &amp; Delivery SOP</h2>
+      <p>
+        The bundled <code>dyvine:dyvine-ops</code> skill carries the full
+        batch-delivery SOP. The durable rules, condensed:
+      </p>
+      <ul>
+        <li>Never send a bare text probe: the first message in a delivery group is always the author's profile link + nickname.</li>
+        <li>Always deliver to a NEW group with the recipient as <code>owner_id</code> (an <code>open_id</code> starting with <code>ou_</code> — never a plain <code>user_id</code>); never reuse an old group; dissolve superseded groups via <code>DELETE /im/v1/chats/{chat_id}</code>.</li>
+        <li>Paired batches: two accounts per batch; the previous batch must be fully delivered AND verified before local files are cleaned and the next batch starts.</li>
+        <li>Prefilters never retry: files over 30 MB are permanent failures (Feishu <code>234006</code>); 0-byte files are deleted locally (Feishu <code>234010</code>) and reported as incomplete posts.</li>
+        <li>Backfill dedupe: re-runs pass <code>already_sent</code> (exact paths from ALL history rounds) and <code>known_permanent</code>; a built group with zero delivered files (0/0) must be backfilled, never left.</li>
+        <li>Same-nickname accounts (distinct <code>sec_user_id</code>s) run strictly serially: download directories and progress keys are nickname-based.</li>
+        <li>Batch URL input: regex-extract <code>v.douyin.com</code> links from pasted share texts and resolve each with <code>dyvine.users.resolve</code>.</li>
+        <li>Leak scan orders each account's latest operation by <code>created_at</code>. Concentrated mass failures usually mean an expired <code>DOUYIN_COOKIE</code>; scattered <code>interrupted</code> after a refresh means Douyin-side volume throttling — converge over multiple rounds.</li>
+      </ul>
+      <p>
+        Periodic work is driven by hermes cron calling single-shot tools; the plugin
+        runs no resident loops and holds no connections while idle.
+      </p>
+    </section>
+
     <section id="watch-mode">
       <h2>Watch Mode</h2>
       <p>
@@ -367,67 +404,13 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
         <em>subscription</em> targets one Douyin user and runs a long-lived
         <code>asyncio</code> loop with two independent polling cadences: a
         <em>live-status check</em> and a <em>new-post check</em>. When a live check
-        finds the user streaming, it delegates to <code>LivestreamService.download_stream</code>
+        finds the user streaming, it delegates to the livestream downloader
         (deduped by <code>room_id</code>). When a post check finds new content, it delegates
-        to <code>PostService.download_new_posts</code>. Both paths create normal operation
-        rows observable through the existing operation-polling endpoints.
+        to the incremental post downloader. Both paths create normal operation
+        rows observable through the operation-polling tools.
       </p>
 
-      <h3>Endpoints</h3>
-      <table>
-        <thead>
-          <tr><th>Method</th><th>Path</th><th>Status</th><th>Description</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>POST</code></td>
-            <td><code>/api/v1/watch</code></td>
-            <td>201 / 200 / 429</td>
-            <td>
-              Create a subscription. Idempotent on <code>user_id</code>: returns 201 for
-              a new subscription and 200 when one already exists for that user. Returns 429
-              when the <code>DOUYIN_WATCH_MAX_SUBSCRIPTIONS</code> cap is reached.
-            </td>
-          </tr>
-          <tr>
-            <td><code>GET</code></td>
-            <td><code>/api/v1/watch</code></td>
-            <td>200</td>
-            <td>List all subscriptions. Response shape: <code>{"subscriptions": [...], "total": N}</code>.</td>
-          </tr>
-          <tr>
-            <td><code>GET</code></td>
-            <td><code>/api/v1/watch/{subscription_id}</code></td>
-            <td>200 / 404</td>
-            <td>Fetch one subscription by ID; 404 when unknown.</td>
-          </tr>
-          <tr>
-            <td><code>DELETE</code></td>
-            <td><code>/api/v1/watch/{subscription_id}</code></td>
-            <td>204 / 404</td>
-            <td>
-              Cancel the subscription's watcher loop and delete its record. A livestream
-              recording already in progress runs to completion in its own background
-              task; DELETE only stops <em>future</em> checks.
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Request body (<code>POST /watch</code>)</h3>
-      <table>
-        <thead>
-          <tr><th>Field</th><th>Required</th><th>Bounds</th><th>Description</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><code>user_id</code></td><td>Yes</td><td>6–128 alphanumeric/<code>_</code>/<code>-</code> chars</td><td>Douyin <code>sec_user_id</code> of the user to watch.</td></tr>
-          <tr><td><code>live_poll_seconds</code></td><td>No</td><td>60–3600</td><td>Seconds between live-status checks. Omit to use <code>DOUYIN_WATCH_LIVE_POLL_SECONDS</code>.</td></tr>
-          <tr><td><code>post_poll_seconds</code></td><td>No</td><td>300–86400</td><td>Seconds between new-post checks. Omit to use <code>DOUYIN_WATCH_POST_POLL_SECONDS</code>.</td></tr>
-          <tr><td><code>backfill_on_create</code></td><td>No</td><td>bool</td><td>Download the user's existing posts once on creation. Omit to use <code>DOUYIN_WATCH_BACKFILL_ON_CREATE</code> (default <code>false</code>).</td></tr>
-        </tbody>
-      </table>
-
-      <h3>Subscription response fields</h3>
+      <h3>Subscription fields</h3>
       <table>
         <thead>
           <tr><th>Field</th><th>Type</th><th>Description</th></tr>
@@ -448,68 +431,47 @@ curl -H "X-API-Key: $SECURITY_API_KEY" \
 
       <h3>Behavior and invariants</h3>
       <ul>
-        <li>Each cadence uses monotonic due-times with +/&#x2212;10% jitter so multiple subscriptions never hammer the upstream API in lockstep.</li>
+        <li>Each cadence uses monotonic due-times with +/&#x2212;10% jitter so multiple subscriptions never hammer the upstream in lockstep.</li>
         <li>With <code>backfill_on_create=false</code> (the default), the service snapshots the user's current first page of posts at creation time. The first post check then stops pagination at that boundary and downloads only posts published afterward.</li>
         <li>New-post deduplication is membership-based using a bounded recent-aweme_id set (capped by <code>DOUYIN_WATCH_RECENT_ID_CAP</code>). The checkpoint is only advanced after a successful run so an interrupted cycle re-downloads at most the most-recent window, which the f2 downloader overwrites idempotently.</li>
         <li>A live check delegates to the existing livestream downloader; a live-status miss or an already-in-progress recording is silently skipped.</li>
-        <li>Each triggered download creates a regular operation row (<code>livestream_download</code> or <code>user_posts_incremental_download</code>) that can be polled through the existing operation endpoints.</li>
+        <li>Each triggered download creates a regular operation row (<code>livestream_download</code> or <code>user_posts_incremental_download</code>) pollable through the operation tools.</li>
         <li>Subscriptions survive restarts: they are persisted in a dedicated <code>watch_subscriptions</code> Postgres table (same database as the operations table) and all enabled subscriptions are re-armed automatically on startup.</li>
-        <li><code>/readyz</code> does not gate on watch health. A crashed watcher loop restarts under exponential backoff and parks after 5 consecutive crashes; a parked subscription resumes only after delete-and-recreate.</li>
-        <li><code>/health</code> reports an informational <code>watch_subscriptions</code> field showing the count of currently active watcher loops.</li>
-        <li>Watch scheduling splits across replicas with <code>WATCH_ENABLED</code>: API replicas run with <code>false</code> (subscription CRUD keeps working against shared Postgres, no loops run locally) while exactly one watcher replica runs the loops and adopts new rows through a periodic reconcile pass. See <code>k8s/overlays/production/</code> for the reference split deployment.</li>
+        <li>A crashed watcher loop restarts under exponential backoff and parks after 5 consecutive crashes; a parked subscription resumes only after delete-and-recreate.</li>
+        <li>Watch scheduling splits with <code>WATCH_ENABLED</code>: CRUD-only processes run with <code>false</code> (no loops run locally) while exactly one watcher process runs the loops and adopts new rows through a periodic reconcile pass.</li>
       </ul>
-
-      <h3>Example</h3>
-      <pre><code># Create a subscription (new-posts-only mode)
-curl -X POST -H "X-API-Key: $SECURITY_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"user_id": "SEC_USER_ID", "live_poll_seconds": 300, "post_poll_seconds": 2700}' \
-     "http://localhost:8000/api/v1/watch"
-
-# List all subscriptions
-curl -H "X-API-Key: $SECURITY_API_KEY" \
-     "http://localhost:8000/api/v1/watch"
-
-# Delete a subscription
-curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
-     "http://localhost:8000/api/v1/watch/SUBSCRIPTION_ID"</code></pre>
     </section>
 
     <section id="operations">
       <h2>Operations</h2>
-      <h3>Persistent Operation Store</h3>
+      <h3>Persistent State Store</h3>
       <p>
-        <code>src/dyvine/db/postgres.py</code> persists operations and watch
-        subscriptions in Postgres (SQLAlchemy 2.0 async over asyncpg),
-        connecting to <code>DATABASE_URL</code>. The schema is versioned
-        by Alembic: run <code>alembic upgrade head</code> before the new
-        revision serves traffic.
+        <code>src/dyvine/db/postgres.py</code> persists operations, queue entries,
+        seeds, send status, profiles, rounds, and watch subscriptions in Postgres
+        (SQLAlchemy 2.0 async over asyncpg), connecting to <code>DATABASE_URL</code>.
+        The schema is versioned by Alembic: run <code>uv run alembic upgrade head</code>
+        before tools run against a new revision.
       </p>
       <ul>
         <li>Every operation row carries an <code>owner_id</code> and a heartbeat timestamp.</li>
-        <li>On multi-replica deployments (or an explicit <code>DATABASE_JANITOR_INTERVAL_SECONDS</code>), a per-replica janitor heartbeats owned rows and fails rows whose owner went quiet; only genuinely orphaned rows are touched. Single replicas run boot recovery plus a daily retention purge only, and never touch the database while idle.</li>
+        <li>With an explicit <code>DATABASE_JANITOR_INTERVAL_SECONDS</code>, the janitor heartbeats owned rows and fails rows whose owner went quiet; only genuinely orphaned rows are touched. Single processes run boot recovery plus a daily retention purge only, and never touch the database while idle.</li>
         <li>Terminal rows older than <code>DATABASE_OPERATION_RETENTION_DAYS</code> are purged at boot and daily.</li>
-        <li>Read-only lookups and probes never touch the stores; only real task execution opens database connections (pinned by <code>tests/test_stateless_contract.py</code>).</li>
+        <li>Read-only lookups never touch the stores; only real task execution opens database connections (pinned by <code>tests/test_stateless_contract.py</code>).</li>
         <li>Unit tests inject in-memory fakes; the contract suite in <code>tests/db/</code> runs identical assertions against both backends.</li>
       </ul>
       <h3>Background Task Lifecycle</h3>
       <p>
         Long-running downloads are scheduled through <code>BackgroundTaskRegistry</code>. During shutdown,
-        the FastAPI lifespan drains tracked tasks before reaping executor pools.
+        tracked tasks drain before executor pools are reaped. State always lands in Postgres first, so a
+        gateway restart loses at most in-flight progress, never records.
       </p>
-      <h3>Health and Probes</h3>
-      <table>
-        <thead>
-          <tr><th>Endpoint</th><th>Purpose</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><code>/livez</code></td><td>Process liveness; returns 200 when the event loop is responsive.</td></tr>
-          <tr><td><code>/readyz</code></td><td>Dependency-aware readiness; returns 503 when a required dependency is missing. The database entry reports the last-known state (<code>operation_store</code>: <code>unknown</code>/<code>available</code>/<code>unavailable</code>, plus <code>operation_store_checked_at</code>) observed from real repository calls — the probe itself never opens a connection, and <code>unknown</code> counts as ready.</td></tr>
-          <tr><td><code>/startupz</code></td><td>Startup completion state.</td></tr>
-          <tr><td><code>/health</code></td><td>Informational runtime metrics and dependency snapshot; always returns 200.</td></tr>
-          <tr><td><code>/metrics</code></td><td>Prometheus exposition format.</td></tr>
-        </tbody>
-      </table>
+      <h3>Idle Health</h3>
+      <p>
+        Repositories record each call's outcome in a <code>DatabaseHealthTracker</code>
+        (<code>unknown</code>/<code>available</code>/<code>unavailable</code> plus a
+        checked-at timestamp) observed from real calls, so idle health readers consult
+        last-known state instead of probing. <code>unknown</code> counts as healthy.
+      </p>
       <h3>Concurrency Model</h3>
       <table>
         <thead>
@@ -518,95 +480,16 @@ curl -X DELETE -H "X-API-Key: $SECURITY_API_KEY" \
         <tbody>
           <tr><td><code>dyvine-r2</code></td><td>16</td><td>R2 PUT, HEAD, DELETE, and list operations.</td></tr>
           <tr><td><code>dyvine-r2-head</code></td><td>16</td><td>Per-key <code>head_object</code> fan-out during listing hydration.</td></tr>
-          <tr><td><code>asyncpg pool</code></td><td>0–7</td><td>Operation/watch reads and writes. <code>null</code> pool class (default) holds zero idle connections; <code>queue</code> caps at <code>DATABASE_POOL_SIZE</code> + <code>DATABASE_POOL_MAX_OVERFLOW</code> (5 + 2 by default).</td></tr>
+          <tr><td><code>asyncpg pool</code></td><td>0–7</td><td>State reads and writes. <code>null</code> pool class (default) holds zero idle connections; <code>queue</code> caps at <code>DATABASE_POOL_SIZE</code> + <code>DATABASE_POOL_MAX_OVERFLOW</code> (5 + 2 by default).</td></tr>
         </tbody>
       </table>
-    </section>
-
-    <section id="batch-cli">
-      <h2>Batch CLI</h2>
-      <p>
-        <code>scripts/dyvine_batch/</code> submits downloads for many users from a
-        text file (one user ID per line, <code>#</code> comments and blanks skipped)
-        and polls them to a summary report:
-      </p>
-      <pre><code># Concurrent: submit all users, then poll together (recommended)
-uv run python -m scripts.dyvine_batch concurrent users.txt --api-key KEY
-
-# Serial: one user at a time
-uv run python -m scripts.dyvine_batch serial users.txt --api-key KEY</code></pre>
-      <p>
-        Configuration precedence per knob is CLI flag, then <code>DYVINE_*</code>
-        environment (<code>DYVINE_API_KEY</code>, <code>DYVINE_API_URL</code>,
-        <code>DYVINE_API_PREFIX</code>, <code>DYVINE_MAX_POLL_ROUNDS</code>), then the
-        repo <code>.env</code> file (<code>SECURITY_API_KEY</code>,
-        <code>API_HOST</code>/<code>API_PORT</code>, <code>API_PREFIX</code>), then the
-        default (<code>http://localhost:8000</code>, prefix <code>/api/v1</code>, 720
-        poll rounds). Useful flags: <code>--include-likes</code>,
-        <code>--max-concurrent</code>, <code>--poll-interval</code>,
-        <code>--timeout</code>, <code>--max-poll-rounds</code> (a job that never turns
-        terminal fails after this many polls instead of looping forever).
-      </p>
-      <p>
-        Exit codes: <code>0</code> on success (individual download failures are
-        reported, not errors), <code>1</code> on configuration/input errors,
-        <code>2</code> on CLI usage errors or unexpected crashes, <code>130</code> on
-        keyboard interrupt.
-      </p>
-    </section>
-
-    <section id="deployment">
-      <h2>Deployment</h2>
-      <h3>Docker</h3>
-      <pre><code>docker build -t dyvine:latest .
-
-docker run -d \
-  --name dyvine \
-  -p 8000:8000 \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/logs:/app/logs \
-  --env-file .env \
-  --restart unless-stopped \
-  dyvine:latest</code></pre>
-      <ul>
-        <li>The image is multi-stage and runs as non-root user <code>1000</code>.</li>
-        <li>The runtime layer uses <code>python -m uvicorn</code> with <code>--timeout-graceful-shutdown 25</code>.</li>
-        <li>The build removes the <code>f2</code>-injected <code>black</code> binary from the production layer.</li>
-        <li><code>DATABASE_URL</code> in <code>.env</code> must point at a reachable Postgres; migrate legacy stores first with <code>uv run python -m scripts.migrate_watch_to_pg</code>.</li>
-      </ul>
-      <h3>Kubernetes</h3>
-      <p>Kustomize manifests live under <code>k8s/</code> with a base and a production overlay. There is no CD pipeline and no releases: migrate first, then render the overlay with the image tag, public host, and Postgres CIDR substituted.</p>
-      <pre><code>kubectl apply -k k8s/jobs/migrate
-kubectl wait --for=condition=complete job/dyvine-migrate \
-  -n dyvine --timeout=660s
-
-kubectl kustomize k8s/overlays/production \
-  | sed -e 's|/dyvine:main-latest|/dyvine:&lt;tag&gt;|g' \
-        -e "s/INGRESS_HOST/&lt;public host&gt;/g" \
-        -e "s|DB_CIDR|&lt;postgres CIDR&gt;|g" \
-  | kubectl apply -f -</code></pre>
-      <p>
-        The overlay runs 1–3 API replicas behind an HPA
-        (<code>WATCH_ENABLED=false</code>) plus 1 watcher replica
-        (<code>WATCH_ENABLED=true</code>) behind an Envoy Gateway
-        <code>Gateway</code> + <code>HTTPRoute</code> (TLS via
-        cert-manager). After rollout, smoke test through a
-        port-forward: <code>/readyz</code> must be ready and an
-        unauthenticated <code>GET /api/v1/watch</code> must return 401.
-      </p>
-      <div class="note">
-        <strong>Scaling note:</strong> The API scales horizontally when R2 archival is
-        configured (<code>API_MULTI_REPLICA=true</code>, enforced at boot) or download
-        workspaces sit on shared storage; without either, stay on one replica. Watch
-        loops run on exactly one watcher replica.
-      </div>
     </section>
 
     <section id="development">
       <h2>Development</h2>
       <h3>Test Suite</h3>
       <pre><code>uv run pytest
-uv run pytest --cov=src/dyvine
+uv run pytest --cov=src/dyvine --cov=src/dyvine_hermes
 uv run pytest tests/services/test_post_service.py</code></pre>
       <p>
         CI gates merges on <code>pytest --cov-fail-under=80</code>. The warning filter is set to
@@ -615,15 +498,17 @@ uv run pytest tests/services/test_post_service.py</code></pre>
       <h3>Quality Gates</h3>
       <pre><code>make format        # black + isort
 make lint          # ruff + mypy
-make test          # pytest</code></pre>
+make test          # pytest
+make coverage      # pytest with the 80% gate
+make doctor        # hermes plugins doctor --ci (needs docker)</code></pre>
       <h3>Continuous Integration</h3>
       <table>
         <thead>
           <tr><th>Workflow</th><th>Trigger</th><th>Purpose</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, lint/type gates, migration drift check, manifest render check, container scan. No image push, no releases: this project ships by manual <code>kubectl</code> rollout.</td></tr>
-          <tr><td><code>security.yml</code></td><td>Pull request and push to <code>main</code>, weekly schedule, manual</td><td>Dependency and container security audit.</td></tr>
+          <tr><td><code>ci.yml</code></td><td>Push and PR to <code>main</code></td><td>Tests, coverage gate, lint/type gates, migration drift check, hermes plugin doctor.</td></tr>
+          <tr><td><code>security.yml</code></td><td>Pull request and push to <code>main</code>, weekly schedule, manual</td><td>Dependency security audit.</td></tr>
         </tbody>
       </table>
     </section>
@@ -631,11 +516,11 @@ make test          # pytest</code></pre>
     <section id="security-notes">
       <h2>Security Notes</h2>
       <ul>
-        <li>API key auth is enabled by default.</li>
-        <li>Non-debug settings reject placeholder production secrets.</li>
-        <li>Livestream URL schema validation only accepts <code>douyin.com</code> family hosts.</li>
+        <li>Non-debug settings reject the placeholder database default.</li>
+        <li>Livestream URL validation only accepts <code>douyin.com</code> family hosts.</li>
         <li>Output paths are checked before and after directory creation, including symlink segment detection.</li>
-        <li><code>/health</code> and <code>/livez</code> are informational; use <code>/readyz</code> for dependency-aware gating.</li>
+        <li>Feishu credentials come from hermes defaults at runtime — never from the repo, Postgres, or logs. Never commit secrets, cookies, real user IDs, or local environment files.</li>
+        <li>Tool error messages stay human-readable and secret-free; the registry renders propagated errors.</li>
       </ul>
       <p>
         Contributor workflow: create a feature branch from <code>main</code>, run
@@ -649,10 +534,11 @@ make test          # pytest</code></pre>
     <section id="maintenance-notes">
       <h2>Maintenance Notes</h2>
       <ul>
-        <li><code>README.md</code> is the concise maintainer entry point; keep it, <code>.env.example</code>, this page, and <code>AGENTS.md</code> in sync when configuration, commands, probes, or deployment behavior changes. Automated contributors follow <code>AGENTS.md</code>.</li>
+        <li><code>README.md</code> is the concise maintainer entry point; keep it, <code>.env.example</code>, this page, and the contributor guide consistent when tools, configuration, or behavior changes. Automated contributors follow the contributor guide (AGENTS.md).</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
+        <li><code>plugin.yaml</code> <code>provides_tools</code> must mirror the tool table exactly; the bundled skill manual must name every tool. Both are test-pinned.</li>
         <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
-        <li>For Python behavior changes, run focused tests first, then <code>uv run pytest --cov=src/dyvine --cov-fail-under=80</code> before preparing a commit.</li>
+        <li>For Python behavior changes, run focused tests first, then <code>make coverage</code> before preparing a commit.</li>
       </ul>
     </section>
 

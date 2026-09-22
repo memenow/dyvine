@@ -20,22 +20,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # Flag the test runtime as "debug" before any ``dyvine.core.settings`` import
-# so the production-only validator does not reject the default
-# ``change-me-in-production`` sentinel values that pydantic-settings supplies
-# when no real env vars are present. Production deployments set
-# ``API_DEBUG=false`` explicitly; leaving this unset in tests used to silently
-# skip the validator. ``SECURITY_REQUIRE_API_KEY=false`` is set here too so
-# router tests do not need to embed a header in every request — the
-# auth-bypass path is exercised explicitly by dedicated tests.
+# so the composite validator does not reject the localhost database
+# default that pydantic-settings supplies when no real env vars are
+# present.
 os.environ.setdefault("API_DEBUG", "true")
-os.environ.setdefault("SECURITY_REQUIRE_API_KEY", "false")
-# Effectively disable the token-bucket middleware for the shared app:
-# buckets key on client IP and ``TestClient`` always dials from the
-# same one, so production-sized limits would 429 unrelated tests once
-# the suite's cumulative traffic exceeds the burst. Tight-limit
-# behavior is covered by ``tests/middleware/`` on purpose-built apps.
-os.environ.setdefault("API_RATE_LIMIT_PER_SECOND", "1000000")
-os.environ.setdefault("API_RATE_LIMIT_BURST", "1000000")
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
@@ -59,7 +47,7 @@ def preserve_event_loop_affinity() -> Iterator[None]:
     creates instead of raising, and pytest-asyncio suppresses that
     deprecation internally). The loop is never closed by anyone, which is
     harmless while the event-loop policy keeps referencing it — but stdlib
-    ``asyncio.run`` (used by the batch CLI entry points under test) resets
+    ``asyncio.run`` (used by operator-script entry points under test) resets
     the policy's current loop to ``None`` on close, orphaning the ambient
     loop so a later GC fails an unrelated test (or session teardown) with
     ``unclosed event loop`` unraisables. Restoring whatever was current
@@ -84,32 +72,28 @@ def preserve_event_loop_affinity() -> Iterator[None]:
 def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reset cached singletons between tests.
 
-    The autouse fixture also strips ``SECURITY_API_KEY`` and
-    ``DATABASE_URL`` from the process environment before each test runs.
-    ``get_settings`` calls ``load_dotenv`` on import, which leaks any real
-    credentials from the developer's ``.env`` into ``os.environ`` and would
-    otherwise make settings tests assert against live secrets instead of
-    the documented defaults.
+    The autouse fixture also strips ``DATABASE_URL`` from the process
+    environment before each test runs. ``get_settings`` calls
+    ``load_dotenv`` on import, which leaks any real credentials from
+    the developer's ``.env`` into ``os.environ`` and would otherwise
+    make settings tests assert against live secrets instead of the
+    documented defaults.
 
     Persistence isolation needs no work here: services take their
     repositories by injection, so unit tests use the in-memory fakes
     from ``tests.fake_repos`` while only ``tests/db/`` touches
     a real database.
     """
-    from dyvine.core.dependencies import get_service_container
     from dyvine.core.settings import get_settings
 
-    monkeypatch.delenv("SECURITY_API_KEY", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
     # ``get_settings`` is ``lru_cache``d on the module so a settings test
     # that monkeypatches an env var would otherwise see a stale Settings
-    # instance leaked from a previous test. Clearing both cached
-    # singletons keeps the per-test isolation honest.
+    # instance leaked from a previous test. Clearing the cached
+    # singleton keeps the per-test isolation honest.
     get_settings.cache_clear()
-    get_service_container.cache_clear()
     yield
     get_settings.cache_clear()
-    get_service_container.cache_clear()
 
 
 @pytest.fixture

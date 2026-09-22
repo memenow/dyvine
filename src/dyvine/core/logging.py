@@ -38,7 +38,7 @@ from .settings import settings
 # Logging context (correlation IDs and arbitrary key/value pairs) is associated
 # with the current asyncio Task / contextvars ``Context`` rather than a
 # particular logger. Using module-level variables means a correlation ID set in
-# a request middleware propagates to background tasks and to logger instances
+# a tool-call wrapper propagates to background tasks and to logger instances
 # defined in other modules, as long as those tasks inherit the same context.
 _correlation_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "dyvine_correlation_id", default=None

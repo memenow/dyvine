@@ -200,7 +200,7 @@ async def test_context_logger_uses_task_local_context() -> None:
 def test_context_logger_shares_correlation_id_across_instances() -> None:
     """Correlation IDs are shared across ``ContextLogger`` instances.
 
-    Middleware sets a single correlation ID that every logger (including
+    The caller sets a single correlation ID that every logger (including
     those instantiated by background tasks in different modules) must see,
     so the module-level ``ContextVar`` is shared across instances.
     """

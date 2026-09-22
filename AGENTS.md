@@ -4,64 +4,71 @@ Contributor guide for automated agents working on Dyvine. Human-facing
 documentation lives in `README.md` (concise entry point) and
 `docs/index.html` (full reference); this file states the working
 agreements agents must follow. Keep all three synchronized when
-commands, configuration, probes, or deployment behavior change.
+tools, configuration, or behavior change.
 
 ## Project
 
-Dyvine is a Python 3.12+ FastAPI service for async Douyin content
-downloads, persistent operation tracking in Postgres, and optional
+Dyvine is a Python 3.12+ hermes-native plugin for async Douyin content
+downloads (35 tools: users, posts, livestreams, queue, Feishu delivery,
+profiles), persistent operation tracking in Postgres, and optional
 Cloudflare R2 archival. It wraps the third-party `f2` Douyin SDK.
+There is no HTTP surface: `plugin.yaml` + `register(ctx)` is the only
+interface, distributed as a directory plugin (Git URL) and as a pip
+package (`hermes_agent.plugins` entry point).
 
 ## Commands
 
 ```bash
 uv sync --all-extras          # install dev dependencies
-make run                      # run the API (uvicorn, reload)
 make test                     # pytest
-make lint                     # ruff + mypy src/dyvine
+make coverage                 # pytest with the 80% gate
+make lint                     # ruff + mypy src/dyvine src/dyvine_hermes
 make format                   # black + isort
-uv run pytest --cov=src/dyvine --cov-fail-under=80   # coverage gate
+make doctor                   # hermes plugins doctor --ci (needs docker)
 uv run alembic upgrade head   # apply schema (same DATABASE_URL first)
-kubectl kustomize k8s/overlays/production > /dev/null  # manifest check
 ```
 
-CI (`ci.yml`) gates merges on the coverage gate, black/isort/ruff/mypy,
-an Alembic upgrade/downgrade round-trip, Kustomize renders, and a
-container scan. There is no CD pipeline and no releases: production
-ships by manual `kubectl` rollout (see `README.md` Deployment).
+CI (`ci.yml`) gates merges on pytest + coverage gate, black/isort/ruff/
+mypy, an Alembic upgrade/downgrade round-trip, and `hermes plugins
+doctor --ci` inside the hermes-agent image. Security scanning
+(`security.yml`) audits locked dependencies weekly and per-PR.
 
 ## Source Layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/dyvine/main.py` | FastAPI app, middleware, routers, probes, metrics |
-| `src/dyvine/core/` | Settings, logging, dependency container, path safety |
-| `src/dyvine/db/` | Postgres repositories, session factory, janitor, health tracker |
-| `src/dyvine/middleware/` | Token-bucket rate limiting |
-| `src/dyvine/routers/` | User, post, livestream, and watch HTTP endpoints |
-| `src/dyvine/services/` | SDK orchestration, background work, R2 storage, watch scheduling, Argus webSign signing |
-| `src/dyvine/schemas/` | Pydantic request and response models |
-| `scripts/dyvine_batch/` | Batch user-download CLI (`serial` / `concurrent`) |
+| `plugin.yaml` | Hermes manifest: tools, hooks, env, dependencies |
+| `__init__.py` | Directory-plugin entry: re-exports `register` |
+| `src/dyvine/` | Engine: settings, Postgres repos, services, schemas |
+| `src/dyvine_hermes/` | Plugin shell: `register`, tool table, lazy engine |
+| `src/dyvine_hermes/skills/` | Bundled `dyvine:dyvine-ops` skill (SOP + tool manual) |
+| `alembic/` | Operator-side schema migrations |
+| `scripts/migrate_hermes_state_to_pg.py` | One-shot legacy-state migration |
 | `tests/` | Pytest suite mirroring the source tree |
 
 ## Invariants (do not break silently)
 
-- Idle-quiet database: `DATABASE_POOL_CLASS=null` (default) holds zero
-  idle connections; read-only lookups and probes never touch the
-  stores — only real task execution opens connections
-  (pinned by `tests/test_stateless_contract.py`).
-- `/readyz` reports the last-known database state (`unknown` /
-  `available` / `unavailable` plus `operation_store_checked_at`) and
-  never probes the database itself; `unknown` counts as ready.
-- Single replicas run boot recovery plus a daily retention purge only;
-  the janitor heartbeat/sweep loop runs on multi-replica deployments
-  or an explicit `DATABASE_JANITOR_INTERVAL_SECONDS`.
-- Watch loops run on exactly one watcher replica (`WATCH_ENABLED=true`);
-  API replicas serve subscription CRUD with no loops.
-- Cluster replicas share one database, so `k8s/` uses the `queue` pool;
-  the `null` code default optimizes single processes instead.
-- Public API routes and the error envelope are stable; behavior changes
-  need a regression test first.
+- Idle-quiet plugin: importing either entry (`dyvine_hermes` or the
+  repo-root shim) performs zero network I/O and opens zero database
+  connections; the engine boots on the first tool call only
+  (pinned by `tests/test_import_time_network.py` and the doctor run,
+  which blocks sockets during registration).
+- Registry contract: every tool handler returns a JSON **string**
+  (`as_tool_handler` serializes at the boundary); dict/list returns
+  become `tool_result_contract` errors.
+- `plugin.yaml` `provides_tools` mirrors `TOOL_SPECS` exactly, and the
+  bundled skill manual names every tool (both pinned by
+  `tests/hermes/test_plugin.py`).
+- `pyproject.toml` dependencies stay in sync with `plugin.yaml`
+  `python_dependencies` (plus operator-side `alembic`): hermes
+  installs entry-point plugins from the pep-621 bounds.
+- Postgres is the only state store; tools are single-shot and
+  idempotent; periodic work is driven by hermes cron, never by
+  in-plugin loops. No resident connections, no background threads
+  that outlive a tool call except operation-scoped download tasks
+  whose state lands in Postgres first.
+- Tool results are JSON strings; error messages stay human-readable
+  and secret-free (the registry renders propagated `DyvineError`s).
 
 ## Branching and PRs
 
@@ -87,5 +94,9 @@ series as the code they describe, and open a pull request back to
   downloads, or local environment files. `.env.example` carries
   placeholder values only; copy it to `.env` (ignored) for local runs.
   `.agents/plans/` holds local working notes and stays untracked.
+- `pytest` runs with `--import-mode=importlib` because the repo root
+  must carry an `__init__.py` (hermes directory plugins require
+  `plugin.yaml` + `__init__.py` side by side); the default prepend
+  mode would shadow `src/dyvine`. Test basenames must stay unique.
 - Before finishing: run `make format`, `make lint`, and `uv run pytest`;
   for behavior changes also run the coverage gate above.

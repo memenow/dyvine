@@ -1,21 +1,14 @@
-"""Domain exceptions surfaced through the public API.
+"""Domain exceptions raised by the engine and surfaced through tools.
 
-Every service-layer failure raises a subclass of `DyvineError`. The
-`@handle_errors` decorator and the global `dyvine_error_handler` map
-each subclass to an HTTP status code:
+Every service-layer failure raises a subclass of `DyvineError` with a
+stable `error_code` (the class name) and optional structured `details`.
+Tool handlers let these propagate: the hermes registry renders them as
+tool errors, so messages must stay human-readable and secret-free.
 
-- `NotFoundError` (and friends: `UserNotFoundError`, `PostNotFoundError`,
-  `LivestreamNotFoundError`, `OperationNotFoundError`,
-  `WatchSubscriptionNotFoundError`) -> `404`.
-- `AuthenticationError` -> `401`.
-- `RateLimitError` -> `429`.
-- `ValidationError` -> `422`.
-- `ServiceError` (and subclasses: `LivestreamError`, `DownloadError`,
-  `StorageError`) -> `500`.
-
-Routers can override per-handler mappings (for example, the livestream
-router maps `LivestreamError` to `404` because "user not currently
-streaming" is a not-found condition rather than a service fault).
+Families: `NotFoundError` (missing rows/upstream objects),
+`ValidationError` (bad input: paths, arguments), `RateLimitError`
+(exhausted guardrails such as the subscription cap), and
+`ServiceError` (upstream/dependency failures, with domain subclasses).
 """
 
 from typing import Any
@@ -79,6 +72,36 @@ class WatchSubscriptionNotFoundError(NotFoundError):
     pass
 
 
+class QueueEntryNotFoundError(NotFoundError):
+    """Download-queue entry not found in the persistent store."""
+
+    pass
+
+
+class SendStatusNotFoundError(NotFoundError):
+    """Send-status row not found in the persistent store."""
+
+    pass
+
+
+class SeedAccountNotFoundError(NotFoundError):
+    """Seed account not found in the persistent store."""
+
+    pass
+
+
+class UserProfileNotFoundError(NotFoundError):
+    """Cached user profile not found in the persistent store."""
+
+    pass
+
+
+class DeliveryRoundNotFoundError(NotFoundError):
+    """Delivery round not found in the persistent store."""
+
+    pass
+
+
 class ServiceError(DyvineError):
     """Base exception for service-level errors."""
 
@@ -103,6 +126,20 @@ class StorageError(ServiceError):
     pass
 
 
+class DeliveryError(ServiceError):
+    """Raised when message/file delivery fails.
+
+    ``reason`` is one of ``too_large`` (over the channel upload cap),
+    ``empty`` (zero-byte payload), ``failed`` (terminal channel error),
+    or ``retryable`` (transient error worth one more attempt).
+    """
+
+    def __init__(self, message: str, *, reason: str = "failed") -> None:
+        """Attach a machine-readable ``reason`` to the message."""
+        super().__init__(message)
+        self.reason = reason
+
+
 class WatchDuplicateError(ServiceError):
     """A watch subscription for the subject already exists."""
 
@@ -111,12 +148,6 @@ class WatchDuplicateError(ServiceError):
 
 class ValidationError(DyvineError):
     """Request validation failed."""
-
-    pass
-
-
-class AuthenticationError(DyvineError):
-    """Authentication failed."""
 
     pass
 
