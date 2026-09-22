@@ -394,6 +394,8 @@ async def _delivery_status(args: dict[str, Any]) -> Any:
     if args.get("sec_user_id"):
         row = await engine.send_status.get_send_status_by_sec(args["sec_user_id"])
         return jsonable(row)
+    if not args.get("nickname"):
+        raise ValueError("nickname or sec_user_id is required")
     return jsonable(await engine.send_status.get_send_status(args["nickname"]))
 
 
@@ -417,9 +419,10 @@ async def _notify_send(args: dict[str, Any]) -> Any:
 
 async def _profiles_upsert(args: dict[str, Any]) -> Any:
     engine = get_engine()
-    fields = dict(args.get("fields", {}))
-    if not isinstance(fields, dict):
+    raw_fields = args.get("fields", {})
+    if not isinstance(raw_fields, dict):
         raise ValueError("fields must be an object")
+    fields = dict(raw_fields)
     return jsonable(
         await engine.profiles.upsert_profile(sec_user_id=args["sec_user_id"], **fields)
     )
