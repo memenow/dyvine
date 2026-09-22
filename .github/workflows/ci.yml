@@ -37,7 +37,7 @@ jobs:
       # ``filterwarnings = error`` lives in pytest.ini so the same rule
       # applies to local runs and command-line ``-W`` overrides do not
       # short-circuit the targeted ignores documented there.
-      run: uv run pytest --cov=src/dyvine --cov-report=xml --cov-fail-under=80
+      run: uv run pytest --cov=src/dyvine --cov=src/dyvine_hermes --cov-report=xml --cov-fail-under=80
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v7
@@ -75,7 +75,7 @@ jobs:
       run: uv run ruff check .
 
     - name: Type check with MyPy
-      run: uv run mypy src/dyvine
+      run: uv run mypy src/dyvine src/dyvine_hermes __init__.py
 
   migrations:
     name: Migration drift check
@@ -112,7 +112,7 @@ jobs:
     - name: Upgrade to head, then check for drift
       # ``alembic check`` fails when ``models.py`` and the migration
       # scripts disagree, so the baseline docstring's drift claim holds.
-      # API_DEBUG=true skips the production-secret validator; the
+      # API_DEBUG=true skips the production-placeholder validator; the
       # default DATABASE_URL already points at this service.
       env:
         API_DEBUG: "true"
@@ -120,86 +120,15 @@ jobs:
         uv run alembic upgrade head
         uv run alembic check
 
-  manifests:
-    name: Kustomize render check
+  doctor:
+    name: Hermes plugin doctor
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v7
 
-    - name: Render production overlay
-      # Placeholders (INGRESS_HOST, DB_CIDR) render as literal strings;
-      # this gate catches YAML errors and drifting JSON6902 paths, not
-      # placeholder values (a manual rollout substitutes those via the
-      # sed pipeline documented in the overlay's kustomization.yaml).
-      # ``kubectl`` ships on the runner image; no extra setup needed.
-      run: kubectl kustomize k8s/overlays/production > /dev/null
-
-    - name: Render migration job
-      run: kubectl kustomize k8s/jobs/migrate > /dev/null
-
-  container-scan:
-    name: Container Vulnerability Scan
-    # No ``needs`` gate: the scan builds the image itself and must run
-    # even when lint/typecheck is red — a vulnerable base image matters
-    # most exactly when other gates are already failing.
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v7
-
-    - name: Build Docker image for scanning
-      run: |
-        # Build the image locally (no push) so we can scan the exact
-        # artifact produced by this PR/commit. We intentionally do not
-        # authenticate to any registry here so PR-triggered runs from
-        # forks cannot access production secrets.
-        docker build -t scan-target:${{ github.sha }} .
-
-    - name: Assert no dev tooling in runtime image
-      run: |
-        # The builder stage deletes the f2-injected ``black`` binary, its
-        # dist-info, and the package directory explicitly. If that ``rm``
-        # ever fails silently (glob mismatch, path relocation in a future
-        # f2 / uv release, etc.), catch the regression here instead of
-        # shipping the binary to production.
-        docker run --rm --entrypoint /bin/sh scan-target:${{ github.sha }} \
-          -c '! test -x /app/.venv/bin/black'
-
-    - name: Scan image and enforce vulnerability budget
-      # Table output is the pass/fail gate: SARIF is lossy for ignore
-      # handling in trivy-action (observed on v0.35.0, which dropped
-      # ``.trivyignore`` for SARIF output), so a SARIF gate could
-      # re-include accepted findings and break the build. Keep the table
-      # format here (with ``exit-code: 1``) and treat the subsequent
-      # SARIF pass as observability only.
-      uses: aquasecurity/trivy-action@v0.36.0
-      with:
-        image-ref: 'scan-target:${{ github.sha }}'
-        format: 'table'
-        exit-code: '1'
-        severity: 'HIGH,CRITICAL'
-        ignore-unfixed: true
-        trivyignores: '.trivyignore'
-
-    - name: Produce SARIF for Code Scanning
-      if: always()
-      uses: aquasecurity/trivy-action@v0.36.0
-      with:
-        image-ref: 'scan-target:${{ github.sha }}'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-        exit-code: '0'
-        severity: 'HIGH,CRITICAL'
-        ignore-unfixed: true
-        trivyignores: '.trivyignore'
-
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v4
-      if: always()
-      with:
-        sarif_file: 'trivy-results.sarif'
-        category: 'trivy-container'
+    - name: Validate with the real plugin runtime
+      # No dependency install here: doctor copies the plugin tree, and a
+      # local ``.venv`` would bloat that copy for no benefit. ``latest``
+      # tracks the hermes release the catalog reviews against; the
+      # manifest's ``requires_hermes`` floor is the compatibility claim.
+      run: docker run --rm -v ${{ github.workspace }}:/plugin:ro nousresearch/hermes-agent:latest plugins doctor --ci /plugin

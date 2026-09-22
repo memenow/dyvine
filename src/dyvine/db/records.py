@@ -64,3 +64,119 @@ class WatchSubscriptionRecord:
     last_post_check: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(slots=True)
+class QueueEntryRecord:
+    """One durable download-queue row keyed by ``{round}:{sec_user_id}``."""
+
+    key: str
+    round: str
+    kind: str | None
+    nickname: str
+    sec_user_id: str
+    chat_id: str | None
+    homepage: str | None
+    mode: str
+    cutoff: str | None
+    status: str
+    operation_id: str | None
+    op_status: str | None
+    op_message: str | None
+    attempts: int
+    serial_group: str | None
+    extra: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class SendStatusRecord:
+    """Per-account delivery counters."""
+
+    nickname: str
+    sec_user_id: str | None
+    chat_id: str | None
+    batch: str | None
+    total_files: int | None
+    sent_files: int | None
+    failed_files: int | None
+    status: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class UserSendStatusRecord:
+    """Legacy per-username delivery counters (read-only)."""
+
+    id: int
+    username: str
+    local_files: int
+    sent_files: int
+    failed_files: int
+    status: str
+    failed_details: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class SeedAccountRecord:
+    """One seed-universe account with its exclusion flag."""
+
+    sec_user_id: str
+    nickname: str | None
+    source_url: str | None
+    source: str
+    batch: str | None
+    excluded: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class UserProfileRecord:
+    """Cached Douyin profile snapshot."""
+
+    sec_user_id: str
+    nickname: str | None = None
+    nickname_raw: str | None = None
+    avatar_url: str | None = None
+    signature: str | None = None
+    signature_raw: str | None = None
+    uid: str | None = None
+    short_id: str | None = None
+    unique_id: str | None = None
+    room_id: str | None = None
+    city: str | None = None
+    country: str | None = None
+    ip_location: str | None = None
+    school_name: str | None = None
+    gender: int | None = None
+    user_age: int | None = None
+    aweme_count: int | None = None
+    favoriting_count: int | None = None
+    follower_count: int | None = None
+    following_count: int | None = None
+    total_favorited: int | None = None
+    mplatform_followers_count: int | None = None
+    mix_count: int | None = None
+    live_status: int | None = None
+    is_ban: bool | None = None
+    is_block: bool | None = None
+    is_blocked: bool | None = None
+    is_star: bool | None = None
+    last_aweme_id: str | None = None
+    created_at: str = ""
+    updated_at: str = ""
+
+
+@dataclass(slots=True)
+class DeliveryRoundRecord:
+    """One delivery-round header."""
+
+    round: str
+    note: str | None
+    created_at: str
+    updated_at: str

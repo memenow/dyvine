@@ -1,6 +1,6 @@
-"""Pydantic models for the watch-mode router.
+"""Pydantic models for watch subscriptions.
 
-``WatchSubscriptionCreate`` is the request body for ``POST /watch``;
+``WatchSubscriptionCreate`` carries subscription parameters;
 ``WatchSubscriptionResponse`` and ``WatchSubscriptionList`` are the read
 models. Interval overrides are optional: when omitted the service fills in
 the configured ``DOUYIN_WATCH_*`` defaults. The bounds mirror
@@ -13,7 +13,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 # Matches the alphabet Douyin emits for sec_user_id values, mirroring the
-# livestream schema/router so a watch target validates the same way a
+# livestream schema so a watch target validates the same way a
 # livestream download target does.
 _USER_ID_PATTERN = r"^[A-Za-z0-9_\-]{6,128}$"
 

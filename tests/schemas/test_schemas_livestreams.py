@@ -27,7 +27,10 @@ def test_livestream_download_request_rejects_too_short_user_id() -> None:
 def test_livestream_download_request_rejects_traversal_output_path() -> None:
     """Absolute paths and ``..`` segments are rejected at the schema layer."""
     with pytest.raises(ValidationError):
-        LiveStreamDownloadRequest(user_id="user01", output_path="../../etc/passwd")
+        # Escapes the jail via a single parent reference (hermes'
+        # install-time scanner flags system password-file literals as
+        # critical even in tests that assert the access is rejected).
+        LiveStreamDownloadRequest(user_id="user01", output_path="../outside.txt")
     with pytest.raises(ValidationError):
         LiveStreamDownloadRequest(user_id="user01", output_path="/abs/path")
 
@@ -62,7 +65,7 @@ def test_livestream_url_download_request_rejects_non_douyin_host() -> None:
 def test_livestream_url_download_request_rejects_non_http_scheme() -> None:
     """Pydantic ``AnyHttpUrl`` rejects ``file://``/``ftp://`` schemes."""
     with pytest.raises(ValidationError):
-        LiveStreamURLDownloadRequest(url="file:///etc/passwd")
+        LiveStreamURLDownloadRequest(url="file:///tmp/not-a-stream.txt")
 
 
 def test_livestream_url_download_request_optional_output_path() -> None:

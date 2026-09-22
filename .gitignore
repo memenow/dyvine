@@ -141,13 +141,9 @@ test/data/
 tests/fixtures/data/
 
 # ==============================================================================
-# FastAPI/Web Server
+# Server runtimes (legacy; the plugin has no HTTP surface)
 # ==============================================================================
 server.log
-gunicorn.conf.py
-gunicorn.pid
-gunicorn-error.log
-gunicorn-access.log
 
 # ==============================================================================
 # Security & Credentials

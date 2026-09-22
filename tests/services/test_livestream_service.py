@@ -103,6 +103,38 @@ class TestSelectStreamUrl:
         stream_map = {"FULL_HD1": "", "HD1": "https://hd"}
         assert LivestreamService._select_stream_url(stream_map) == "https://hd"
 
+
+class TestSelectStream:
+    """Tests for label-aware stream selection with overrides."""
+
+    def test_prefers_requested_quality_case_insensitive(self) -> None:
+        """An explicit quality wins regardless of letter case."""
+        stream_map = {"FULL_HD1": "https://fullhd", "HD1": "https://hd"}
+        assert LivestreamService._select_stream(stream_map, "hd1") == (
+            "HD1",
+            "https://hd",
+        )
+
+    def test_falls_back_to_highest_when_requested_missing(self) -> None:
+        """Unknown labels degrade to the default ranking, not an error."""
+        stream_map = {"HD1": "https://hd", "SD1": "https://sd"}
+        assert LivestreamService._select_stream(stream_map, "FULL_HD1") == (
+            "HD1",
+            "https://hd",
+        )
+
+    def test_skips_empty_requested_label(self) -> None:
+        """Empty-string labels do not shadow real variants."""
+        stream_map = {"HD1": "", "SD1": "https://sd"}
+        assert LivestreamService._select_stream(stream_map, "hd1") == (
+            "SD1",
+            "https://sd",
+        )
+
+    def test_returns_none_for_empty_map(self) -> None:
+        """No variants means no selection even with a preference."""
+        assert LivestreamService._select_stream({}, "HD1") is None
+
     def test_skips_non_string_values(self) -> None:
         """Verify skips non string values."""
         stream_map: dict[str, Any] = {"FULL_HD1": 123, "HD1": "https://hd"}
@@ -706,3 +738,54 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
         if row.subject_id == "room-77" and row.operation_type == "livestream_download"
     ]
     assert len(matching) == 1
+
+
+class TestLiveQueries:
+    """Tests for live IM and following-lives queries."""
+
+    def _service(self, handler: Any) -> LivestreamService:
+        svc = object.__new__(LivestreamService)
+        svc.douyin_handler = handler
+        return svc
+
+    async def test_get_live_im_returns_dict(self) -> None:
+        """IM state normalizes through ``_to_dict``."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        fetched = MagicMock()
+        fetched._to_dict.return_value = {"room_id": "r1"}
+        handler = MagicMock()
+        handler.fetch_live_im = AsyncMock(return_value=fetched)
+        result = await self._service(handler).get_live_im("r1", "u1")
+        assert result == {"room_id": "r1"}
+        handler.fetch_live_im.assert_awaited_once_with(room_id="r1", unique_id="u1")
+
+    async def test_get_live_im_failure_wraps(self) -> None:
+        """IM errors surface as ``LivestreamError``."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        handler = MagicMock()
+        handler.fetch_live_im = AsyncMock(side_effect=RuntimeError("down"))
+        with pytest.raises(LivestreamError, match="Failed to fetch live IM"):
+            await self._service(handler).get_live_im("r1", "u1")
+
+    async def test_get_following_lives_prefers_list(self) -> None:
+        """Room lists normalize through ``_to_list``."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        fetched = MagicMock()
+        fetched._to_list.return_value = [{"room_id": "r1"}, "junk"]
+        handler = MagicMock()
+        handler.fetch_user_following_lives = AsyncMock(return_value=fetched)
+        result = await self._service(handler).get_following_lives()
+        assert result == [{"room_id": "r1"}]
+
+    async def test_get_following_lives_falls_back_to_dict(self) -> None:
+        """Dict-shaped responses read the ``rooms`` key."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        fetched = SimpleNamespace(_to_dict=lambda: {"rooms": [{"room_id": "r2"}]})
+        handler = MagicMock()
+        handler.fetch_user_following_lives = AsyncMock(return_value=fetched)
+        result = await self._service(handler).get_following_lives()
+        assert result == [{"room_id": "r2"}]

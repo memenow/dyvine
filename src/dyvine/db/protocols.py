@@ -12,13 +12,28 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from .records import OperationRecord, WatchSubscriptionRecord
+from .records import (
+    DeliveryRoundRecord,
+    OperationRecord,
+    QueueEntryRecord,
+    SeedAccountRecord,
+    SendStatusRecord,
+    UserProfileRecord,
+    UserSendStatusRecord,
+    WatchSubscriptionRecord,
+)
 
 #: Statuses no sweep or heartbeat ever touches again.
 TERMINAL_STATUSES = frozenset({"completed", "partial", "failed"})
 
 #: Statuses a task is still (or might still be) working through.
 ACTIVE_STATUSES = frozenset({"pending", "running"})
+
+#: Queue states eligible for claiming by a runner.
+QUEUE_CLAIMABLE_STATUSES = frozenset({"pending"})
+
+#: Queue states a task is still working through.
+QUEUE_ACTIVE_STATUSES = frozenset({"pending", "downloading"})
 
 
 @runtime_checkable
@@ -166,4 +181,191 @@ class WatchRepository(Protocol):
 
     async def delete_subscription(self, subscription_id: str) -> bool:
         """Delete a subscription; ``True`` when a row was removed."""
+        ...
+
+
+@runtime_checkable
+class QueueRepository(Protocol):
+    """Persistence contract for durable download-queue entries."""
+
+    async def upsert_entry(
+        self,
+        *,
+        key: str,
+        round: str,
+        nickname: str,
+        sec_user_id: str,
+        mode: str,
+        status: str,
+        kind: str | None = None,
+        chat_id: str | None = None,
+        homepage: str | None = None,
+        cutoff: str | None = None,
+        operation_id: str | None = None,
+        op_status: str | None = None,
+        op_message: str | None = None,
+        attempts: int = 0,
+        serial_group: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> QueueEntryRecord:
+        """Insert or replace the entry at ``key`` and return it."""
+        ...
+
+    async def get_entry(self, key: str) -> QueueEntryRecord:
+        """Fetch by key or raise ``QueueEntryNotFoundError``."""
+        ...
+
+    async def list_entries(
+        self,
+        *,
+        round: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[QueueEntryRecord]:
+        """List entries oldest-first, optionally filtered."""
+        ...
+
+    async def count_entries(
+        self, *, round: str | None = None, status: str | None = None
+    ) -> int:
+        """Count entries, optionally filtered."""
+        ...
+
+    async def claim_next(self, *, round: str | None = None) -> QueueEntryRecord | None:
+        """Claim the oldest ``pending`` entry, or ``None`` when empty.
+
+        The winner flips to ``downloading`` under this repository's
+        owner identity with a fresh heartbeat. Entries whose
+        ``serial_group`` already has a ``downloading`` row are skipped so
+        same-nickname accounts never run concurrently. Concurrent
+        claimers never receive the same row.
+        """
+        ...
+
+    async def update_entry(self, key: str, **fields: Any) -> QueueEntryRecord:
+        """Update allowed fields, refresh liveness, return the new state.
+
+        Unknown field names are ignored; when no known field is passed
+        the row is verified to exist and returned unchanged.
+        """
+        ...
+
+    async def release_stale(
+        self, *, stale_after_seconds: float, max_attempts: int
+    ) -> int:
+        """Requeue ``downloading`` rows whose owner stopped heartbeating.
+
+        A stale row returns to ``pending`` with ``attempts`` incremented
+        when it still has retries left, else flips to ``op_issue``.
+        Returns the number of rows touched.
+        """
+        ...
+
+
+@runtime_checkable
+class SendStatusRepository(Protocol):
+    """Persistence contract for per-account delivery counters."""
+
+    async def upsert_send_status(
+        self,
+        *,
+        nickname: str,
+        sec_user_id: str | None = None,
+        chat_id: str | None = None,
+        batch: str | None = None,
+        total_files: int | None = None,
+        sent_files: int | None = None,
+        failed_files: int | None = None,
+        status: str | None = None,
+    ) -> SendStatusRecord:
+        """Insert or replace the row for ``nickname`` and return it."""
+        ...
+
+    async def get_send_status(self, nickname: str) -> SendStatusRecord:
+        """Fetch by nickname or raise ``SendStatusNotFoundError``."""
+        ...
+
+    async def get_send_status_by_sec(self, sec_user_id: str) -> SendStatusRecord | None:
+        """Return the row for ``sec_user_id``, or ``None``."""
+        ...
+
+    async def list_send_status(
+        self, *, batch: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[SendStatusRecord]:
+        """List rows oldest-first, optionally filtered by batch."""
+        ...
+
+    async def get_user_send_status(self, username: str) -> UserSendStatusRecord:
+        """Fetch a legacy row or raise ``SendStatusNotFoundError``."""
+        ...
+
+
+@runtime_checkable
+class SeedRepository(Protocol):
+    """Persistence contract for the seed account universe."""
+
+    async def upsert_seed(
+        self,
+        *,
+        sec_user_id: str,
+        nickname: str | None = None,
+        source_url: str | None = None,
+        source: str = "seed",
+        batch: str | None = None,
+        excluded: bool = False,
+    ) -> SeedAccountRecord:
+        """Insert or replace the seed row and return it."""
+        ...
+
+    async def get_seed(self, sec_user_id: str) -> SeedAccountRecord:
+        """Fetch by ID or raise ``SeedAccountNotFoundError``."""
+        ...
+
+    async def list_seeds(
+        self, *, include_excluded: bool = False
+    ) -> list[SeedAccountRecord]:
+        """List seeds ordered by creation time."""
+        ...
+
+    async def count_seeds(self, *, include_excluded: bool = False) -> int:
+        """Count seeds, optionally including excluded rows."""
+        ...
+
+
+@runtime_checkable
+class ProfileRepository(Protocol):
+    """Persistence contract for cached Douyin profile snapshots."""
+
+    async def upsert_profile(
+        self, *, sec_user_id: str, **fields: Any
+    ) -> UserProfileRecord:
+        """Insert or patch the snapshot row and return it.
+
+        Unknown field names are ignored; patching an existing row only
+        touches the supplied columns.
+        """
+        ...
+
+    async def get_profile(self, sec_user_id: str) -> UserProfileRecord:
+        """Fetch by ID or raise ``UserProfileNotFoundError``."""
+        ...
+
+
+@runtime_checkable
+class RoundRepository(Protocol):
+    """Persistence contract for delivery-round headers."""
+
+    async def upsert_round(
+        self, *, round: str, note: str | None = None
+    ) -> DeliveryRoundRecord:
+        """Insert or touch the round header and return it."""
+        ...
+
+    async def get_round(self, round: str) -> DeliveryRoundRecord:
+        """Fetch by name or raise ``DeliveryRoundNotFoundError``."""
+        ...
+
+    async def list_rounds(self) -> list[DeliveryRoundRecord]:
+        """List rounds ordered by creation time."""
         ...

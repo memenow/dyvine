@@ -1,13 +1,12 @@
 """Composite Pydantic settings for Dyvine.
 
-The composite `Settings` aggregates six `BaseSettings` subclasses,
+The composite `Settings` aggregates five `BaseSettings` subclasses,
 each scoped by a distinct environment-variable prefix:
 
-- `APISettings` (`API_`) — server, CORS, rate limiting, and
-  multi-replica flags.
+- `RuntimeSettings` (`API_`) — debug flag. The `API_` prefix is kept
+  for environment stability (`API_DEBUG`); there is no HTTP server.
 - `DatabaseSettings` (`DATABASE_`) — Postgres URL, pool strategy,
   janitor cadence, and operation retention.
-- `SecuritySettings` (`SECURITY_`) — API key and gating flag.
 - `R2Settings` (`R2_`) — Cloudflare R2 credentials and endpoint.
 - `DouyinSettings` (`DOUYIN_`) — session cookie, headers, proxy,
   download root, livestream-specific HTTP headers, and the Argus
@@ -15,22 +14,20 @@ each scoped by a distinct environment-variable prefix:
 - `WatchSettings` (`DOUYIN_WATCH_`) — watch-mode polling cadences
   and subscription guardrails.
 
-A model-level validator (`_validate_security_in_production`) refuses
-to instantiate the container when `api.debug` is `false` and
-`security.api_key` (when `require_api_key` is on) still matches the
-placeholder `change-me-in-production` sentinel. The cross-field check
-lives on the composite class so the
-validator sees the parsed payload rather than reading `os.environ`
-directly, which used to silently disagree with `.env`-supplied
-values.
+A model-level validator (`_validate_production_placeholders`)
+refuses to instantiate the container when `runtime.debug` is `false`
+and `database.url` still matches the localhost development default.
+The cross-field check lives on the composite class so the validator
+sees the parsed payload rather than reading `os.environ` directly,
+which used to silently disagree with `.env`-supplied values.
 
 `get_settings()` is `lru_cache`d and loads `.env` at first call.
 Tests reset the cache via `tests/conftest.py::reset_singletons` so
 each test sees pristine settings.
 
-Convenience properties (`debug`, `version`, `prefix`, the legacy
-`douyin_*` accessors) keep older call sites working without forcing
-them through the nested `settings.api.*` / `settings.douyin.*`
+Convenience properties (`debug`, the legacy `douyin_*` / `r2_*`
+accessors) keep older call sites working without forcing them
+through the nested `settings.runtime.*` / `settings.douyin.*`
 addresses.
 """
 
@@ -40,87 +37,25 @@ from typing import Literal, Self
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_DEFAULT_SECRET_SENTINEL = "change-me-in-production"
 
-
-class APISettings(BaseSettings):
-    """API server configuration settings.
-
-    Contains all settings related to the FastAPI server configuration
-    including host, port, debugging, and CORS settings.
+class RuntimeSettings(BaseSettings):
+    """Runtime configuration settings.
 
     Attributes:
-        version: Application version string.
-        prefix: API URL prefix (e.g., '/api/v1').
-        project_name: Human-readable project name.
-        debug: Enable debug mode with verbose logging.
-        host: Server bind address.
-        port: Server bind port (1-65535).
-        rate_limit_per_second: API rate limiting threshold.
-        cors_origins: List of allowed CORS origins.
+        debug: Enable debug mode with verbose logging. Non-debug
+            builds must override development-default placeholders
+            (enforced by the composite validator below).
 
     Environment Variables:
-        All attributes can be configured via environment variables with
-        the 'API_' prefix (e.g., API_DEBUG, API_PORT).
-
+        API_DEBUG.
     """
 
-    version: str = Field(default="1.0.0", description="Application version string")
-    prefix: str = Field(default="/api/v1", description="API URL prefix")
-    project_name: str = Field(
-        default="Dyvine API", description="Human-readable project name"
-    )
     debug: bool = Field(
         default=False, description="Enable debug mode with verbose logging"
     )
-    host: str = Field(default="0.0.0.0", description="Server bind address")
-    port: int = Field(default=8000, ge=1, le=65535, description="Server bind port")
-    rate_limit_per_second: int = Field(
-        default=10,
-        ge=1,
-        description=(
-            "Sustained request budget per caller per second, enforced "
-            "per replica by the token-bucket middleware. Buckets key on "
-            "the X-API-Key header only when it matches the configured "
-            "key; anything else shares the client-IP bucket."
-        ),
-    )
-    rate_limit_burst: int = Field(
-        default=20,
-        ge=1,
-        description=(
-            "Maximum tolerated burst per caller before 429s. Buckets "
-            "refill at rate_limit_per_second; probes, /metrics, and / "
-            "never consume budget."
-        ),
-    )
-    multi_replica: bool = Field(
-        default=False,
-        description=(
-            "More than one API replica serves traffic behind a shared "
-            "Postgres database. Boot refuses to complete unless downloads "
-            "can survive pod boundaries: either R2 archival is configured "
-            "or ``shared_file_storage`` confirms a shared volume."
-        ),
-    )
-    shared_file_storage: bool = Field(
-        default=False,
-        description=(
-            "``DOUYIN_DOWNLOAD_ROOT`` is backed by storage every replica "
-            "can see (e.g. a ReadWriteMany volume). Only consulted when "
-            "``multi_replica`` is true and R2 is unconfigured."
-        ),
-    )
-    cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000"],
-        description=(
-            "Allowed browser origins. Defaults to localhost development; "
-            "production deployments must replace this with an explicit "
-            'allowlist via the ``API_CORS_ORIGINS`` env var. ``["*"]`` is '
-            "accepted but disables credentialed CORS automatically (see "
-            "``main.py`` middleware)."
-        ),
-    )
+    # ``API_`` stays the prefix (not ``RUNTIME_``) so existing
+    # environments and the plugin host's ``API_DEBUG`` default keep
+    # working unchanged.
     model_config = SettingsConfigDict(env_prefix="API_")
 
 
@@ -156,10 +91,9 @@ class DatabaseSettings(BaseSettings):
             (``"queue"`` only; ``"null"`` always skips the probe because
             every checkout already opens a fresh connection).
         janitor_interval_seconds: Seconds between janitor
-            heartbeat/sweep passes. ``0`` (default) is automatic: the
-            loop runs only when ``API_MULTI_REPLICA=true``; single
-            replicas keep boot recovery plus a daily retention purge
-            and otherwise never touch the database while idle.
+            heartbeat/sweep passes. ``0`` (default) disables the loop:
+            single processes keep boot recovery plus a daily retention
+            purge and otherwise never touch the database while idle.
         operation_retention_days: Terminal operation rows older than
             this are purged at boot and daily; ``0`` disables purging.
 
@@ -199,7 +133,7 @@ class DatabaseSettings(BaseSettings):
     janitor_interval_seconds: float = Field(
         default=0.0,
         ge=0.0,
-        description="Janitor heartbeat/sweep cadence (0 runs it on multi-replica only)",
+        description="Janitor heartbeat/sweep cadence (0 disables the loop)",
     )
     operation_retention_days: int = Field(
         default=30,
@@ -208,41 +142,6 @@ class DatabaseSettings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_prefix="DATABASE_")
-
-
-class SecuritySettings(BaseSettings):
-    """Security and authentication configuration settings.
-
-    Attributes:
-        api_key: API authentication key. Required in production unless
-            ``require_api_key`` is explicitly set to ``False``.
-        require_api_key: When ``True`` (the default), every router request
-            must carry the ``X-API-Key`` header set to ``api_key``.
-
-    Environment Variables:
-        SECURITY_API_KEY, SECURITY_REQUIRE_API_KEY.
-
-    Note:
-        Default values must be replaced before any production deployment.
-        The composite :class:`Settings` validator below cross-checks the
-        secret value against ``API_DEBUG`` so a non-debug build that ships
-        with the placeholder secret fails to boot.
-    """
-
-    api_key: str = Field(
-        default=_DEFAULT_SECRET_SENTINEL,
-        description="API authentication key matched against ``X-API-Key``",
-    )
-    require_api_key: bool = Field(
-        default=True,
-        description=(
-            "Reject router requests that do not present a matching "
-            "``X-API-Key`` header. Set to ``false`` only when fronting the "
-            "API with another authenticated layer (mTLS, mesh policy)."
-        ),
-    )
-
-    model_config = SettingsConfigDict(env_prefix="SECURITY_")
 
 
 class R2Settings(BaseSettings):
@@ -527,18 +426,17 @@ class WatchSettings(BaseSettings):
 class Settings(BaseSettings):
     """Composite settings container with nested configuration groups.
 
-    Aggregates `APISettings`, `DatabaseSettings`, `SecuritySettings`,
-    `R2Settings`, `DouyinSettings`, and `WatchSettings` so a single
-    import gives access to every Pydantic-validated env-driven knob the
-    application reads. The model-level `_validate_security_in_production`
-    validator refuses to instantiate when `api.debug` is False and a
-    placeholder secret remains.
+    Aggregates `RuntimeSettings`, `DatabaseSettings`, `R2Settings`,
+    `DouyinSettings`, and `WatchSettings` so a single import gives
+    access to every Pydantic-validated env-driven knob the engine
+    reads. The model-level `_validate_production_placeholders`
+    validator refuses to instantiate when `runtime.debug` is False
+    and the database URL still matches the localhost default.
 
     Attributes:
-        api: Server, CORS, rate limiting, and multi-replica flags.
+        runtime: Debug flag.
         database: Postgres URL, pool strategy, janitor cadence, and
             operation retention.
-        security: Secret + API keys and the `require_api_key` gate.
         r2: Cloudflare R2 credentials and endpoint.
         douyin: Session cookie, headers, proxy, download root,
             livestream-specific HTTP headers, and the Argus webSign
@@ -552,120 +450,68 @@ class Settings(BaseSettings):
             from dyvine.core.settings import settings
 
             if settings.debug:
-                print(f"Running {settings.project_name} v{settings.version}")
-                print(f"Listening on {settings.api.host}:{settings.api.port}")
+                print(f"Database: {settings.database.url}")
 
         Override for tests by mutating the parsed instance::
 
-            settings.api.port = 8080
+            settings.database.url = "postgresql+asyncpg://test/test"
 
         Or via env vars in `.env` / the process environment::
 
             API_DEBUG=true
-            API_PORT=8080
+            DATABASE_URL=postgresql+asyncpg://...
             DOUYIN_COOKIE=your_cookie_here
 
     """
 
     # Define nested settings as fields
-    api: APISettings = Field(default_factory=APISettings)
-    security: SecuritySettings = Field(default_factory=SecuritySettings)
+    runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     r2: R2Settings = Field(default_factory=R2Settings)
     douyin: DouyinSettings = Field(default_factory=DouyinSettings)
     watch: WatchSettings = Field(default_factory=WatchSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
-    # Root-level (unprefixed) flags. ``WATCH_ENABLED`` lives here rather
-    # than under ``DOUYIN_WATCH_`` so the API/watcher split reads as a
+    # Root-level (unprefixed) flag. ``WATCH_ENABLED`` lives here rather
+    # than under ``DOUYIN_WATCH_`` so the loop split reads as a
     # deployment concern, not a polling knob.
     watch_enabled: bool = Field(
         default=True,
         description=(
-            "Run watch-subscription loops in this process. API replicas "
-            "set ``WATCH_ENABLED=false`` (CRUD-only against shared "
-            "Postgres) while a single watcher replica runs the loops."
+            "Run watch-subscription loops in this process. Processes "
+            "that only serve CRUD set ``WATCH_ENABLED=false`` while a "
+            "single watcher process runs the loops."
         ),
     )
 
     @model_validator(mode="after")
-    def _validate_security_in_production(self) -> Self:
-        """Reject placeholder production values when ``api.debug`` is False.
+    def _validate_production_placeholders(self) -> Self:
+        """Reject the localhost database default outside debug mode.
 
         The cross-field check lives on the composite container so the
-        validator sees ``api.debug`` from the same parsed payload that
-        populated the nested models. Reading ``API_DEBUG`` straight off
-        ``os.environ`` (the previous approach) silently disagreed with
-        ``api.debug`` whenever the value lived in a ``.env`` file rather
-        than a real environment variable.
+        validator sees ``runtime.debug`` from the same parsed payload
+        that populated the nested models. Reading ``API_DEBUG``
+        straight off ``os.environ`` (the previous approach) silently
+        disagreed with the parsed value whenever it lived in a
+        ``.env`` file rather than a real environment variable.
 
-        ``api_key`` is only validated when ``require_api_key`` is on, so
-        deployments that delegate authentication to mTLS or a service
-        mesh (and therefore set ``SECURITY_REQUIRE_API_KEY=false``) do
-        not need to mint a never-used key just to satisfy a startup
-        check. ``database.url`` is always validated: the localhost
-        default is a development convenience, never a production target.
-
+        ``database.url`` is always validated: the localhost default is
+        a development convenience, never a production target.
         """
-        if self.api.debug:
+        if self.runtime.debug:
             return self
 
-        offenders: list[str] = []
-        if self.security.require_api_key and self.security.api_key in {
-            "",
-            _DEFAULT_SECRET_SENTINEL,
-        }:
-            offenders.append("security.api_key")
         if self.database.url in {"", _DEFAULT_DATABASE_URL}:
-            offenders.append("database.url")
-        if offenders:
-            joined = ", ".join(offenders)
             raise ValueError(
-                f"{joined} must be set to non-default values when API_DEBUG "
-                "is false; rotate the placeholders before deploying."
+                "database.url must be set to a non-default value when "
+                "API_DEBUG is false; rotate the placeholder before deploying."
             )
         return self
 
     # Convenience properties for frequently accessed settings
     @property
     def debug(self) -> bool:
-        """Get debug mode status from API settings."""
-        return self.api.debug
-
-    @property
-    def version(self) -> str:
-        """Get application version from API settings."""
-        return self.api.version
-
-    @property
-    def prefix(self) -> str:
-        """Get API URL prefix from API settings."""
-        return self.api.prefix
-
-    @property
-    def project_name(self) -> str:
-        """Get human-readable project name from API settings."""
-        return self.api.project_name
-
-    @property
-    def cors_origins(self) -> list[str]:
-        """Get CORS allowed origins from API settings."""
-        return self.api.cors_origins
-
-    # Backward compatibility properties for legacy code
-    @property
-    def host(self) -> str:
-        """Get server host from API settings."""
-        return self.api.host
-
-    @property
-    def port(self) -> int:
-        """Get server port from API settings."""
-        return self.api.port
-
-    @property
-    def api_key(self) -> str:
-        """Get API key from security settings."""
-        return self.security.api_key
+        """Get debug mode status from runtime settings."""
+        return self.runtime.debug
 
     @property
     def douyin_cookie(self) -> str:
@@ -751,7 +597,7 @@ def get_settings() -> Settings:
         from dyvine.core.settings import get_settings
 
         settings = get_settings()
-        print(f"Running {settings.project_name} v{settings.version}")
+        print(f"Debug: {settings.debug}")
     """
     from dotenv import load_dotenv
 

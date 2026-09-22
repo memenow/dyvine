@@ -1,10 +1,9 @@
-"""Contract: non-task paths never touch the operation/watch stores.
+"""Contract: read-only service paths never touch the operation stores.
 
 Each service below is built without an ``operation_store`` attribute,
 so any store access raises ``AttributeError`` and fails the test. This
-pins the stateless-API shape: read-only lookups and probes must work
-with upstream data alone, and only real task execution may open
-database connections.
+pins the plugin idle shape: read-only lookups must work with upstream
+data alone, and only real task execution may open database connections.
 """
 
 from __future__ import annotations

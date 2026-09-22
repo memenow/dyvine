@@ -100,9 +100,9 @@ async def test_spawn_propagates_exceptions_to_awaiters() -> None:
 async def test_spawn_after_drain_raises_and_closes_coroutine() -> None:
     """Once ``drain`` has been entered, ``spawn`` must reject new work.
 
-    Otherwise a stale callback that registers another download after the
-    lifespan started shutdown would silently leak past the executor
-    teardown that ``ServiceContainer.shutdown`` performs next.
+    Otherwise a stale callback that registers another download after
+    shutdown started would silently leak past the executor teardown
+    the host performs next.
     """
     registry = BackgroundTaskRegistry(drain_timeout=0.5)
 

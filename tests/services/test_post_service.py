@@ -288,8 +288,7 @@ async def test_get_user_posts_success() -> None:
     page = await svc.get_user_posts("user1")
     assert len(page.posts) == 1
     assert page.posts[0].aweme_id == "p1"
-    # The router wraps ``next_cursor`` into an opaque token; the
-    # service surfaces the raw upstream sentinel verbatim.
+    # The service surfaces the raw upstream sentinel verbatim.
     assert page.next_cursor == 9999
     assert page.has_more is True
 
@@ -341,8 +340,8 @@ async def test_get_user_posts_returns_none_cursor_on_stuck_upstream() -> None:
 
     Returning the synthetic value as ``next_cursor`` would invite the
     caller to re-fetch the same window forever; the service collapses
-    the case to ``next_cursor=None`` so the router renders no page
-    token and the client knows the feed is exhausted.
+    the case to ``next_cursor=None`` so the caller knows the feed is
+    exhausted.
     """
     handler = MagicMock()
     posts_filter = MagicMock()
@@ -665,7 +664,7 @@ async def test_start_bulk_download_returns_pending_response_immediately(
     persisted = await store.get_operation(response.operation_id)
     assert persisted.operation_type == "user_posts_bulk_download"
     assert persisted.status == "pending"
-    assert persisted.metadata == {"max_cursor": 42}
+    assert persisted.metadata == {"max_cursor": 42, "mode": "post"}
 
 
 # ── _run_bulk_download (async, awaited inline) ──────────────────────────
@@ -816,7 +815,7 @@ async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
         call_count = 0
 
         async def fake_fetch(
-            sec_user_id: str, cursor: int
+            sec_user_id: str, cursor: int, mode: str = "post"
         ) -> dict:  # type: ignore[override]
             """Test helper for test_run_bulk_download_breaks_on_empty_aweme_list."""
             nonlocal call_count
@@ -881,7 +880,9 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
 
         call_count = 0
 
-        async def sticky_fetch(sec_user_id: str, cursor: int) -> dict:
+        async def sticky_fetch(
+            sec_user_id: str, cursor: int, mode: str = "post"
+        ) -> dict:
             """Test helper for
             test_run_bulk_download_caps_pagination_under_sticky_cursor.
             """
@@ -970,7 +971,7 @@ async def test_run_bulk_download_stops_on_batch_error(tmp_path) -> None:
         call_count = 0
 
         async def failing_fetch(
-            sec_user_id: str, cursor: int
+            sec_user_id: str, cursor: int, mode: str = "post"
         ) -> dict:  # type: ignore[override]
             """Test helper for test_run_bulk_download_stops_on_batch_error."""
             nonlocal call_count
@@ -1038,7 +1039,9 @@ async def test_run_bulk_download_records_partial_when_batch_fails_mid_run(
 
         call_count = 0
 
-        async def flaky_fetch(sec_user_id: str, cursor: int) -> dict:
+        async def flaky_fetch(
+            sec_user_id: str, cursor: int, mode: str = "post"
+        ) -> dict:
             """Test helper for
             test_run_bulk_download_records_partial_when_batch_fails_mid_run.
             """
@@ -1115,7 +1118,9 @@ async def test_run_bulk_download_clamps_in_loop_progress_when_overcount(
 
         svc = _build_service(handler, operation_store=store)
 
-        async def overcount_fetch(sec_user_id: str, cursor: int) -> dict:
+        async def overcount_fetch(
+            sec_user_id: str, cursor: int, mode: str = "post"
+        ) -> dict:
             """Test helper for
             test_run_bulk_download_clamps_in_loop_progress_when_overcount.
             """
@@ -1402,3 +1407,302 @@ async def test_get_post_detail_interprets_create_time_as_utc(
         time.tzset()
     expected = calendar.timegm((2024, 1, 15, 10, 30, 0, 0, 0, 0))
     assert result.create_time == expected
+
+
+# ── bulk modes + single/container downloads ───────────────────────────────
+
+
+async def test_start_bulk_download_rejects_unknown_mode() -> None:
+    """Unknown modes fail before any profile lookup or operation row."""
+    handler = MagicMock()
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    with pytest.raises(ServiceError, match="Unknown bulk download mode"):
+        await svc.start_bulk_download("u1", mode="nope")
+    handler.fetch_user_profile.assert_not_called()
+    assert [row async for row in _all_operations(store)] == []
+
+
+async def test_start_bulk_download_like_mode_uses_like_type() -> None:
+    """Non-post modes persist ``user_{mode}_bulk_download`` operations."""
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    profile = MagicMock()
+    profile.nickname = "nick"
+    profile.aweme_count = 0
+    handler.fetch_user_profile = AsyncMock(return_value=profile)
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    with patch.object(posts_mod.PostService, "_run_bulk_download", new=AsyncMock()):
+        response = await svc.start_bulk_download("u1", mode="like")
+    await asyncio.sleep(0)
+    persisted = await store.get_operation(response.operation_id)
+    assert persisted.operation_type == "user_like_bulk_download"
+    assert persisted.metadata == {"max_cursor": 0, "mode": "like"}
+
+
+async def test_fetch_posts_batch_dispatches_owner_scoped() -> None:
+    """Collection/music iterators are called without ``sec_user_id``."""
+
+    class _It:
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+        async def aclose(self) -> None:
+            return None
+
+    handler = MagicMock()
+    handler.fetch_user_collection_videos = MagicMock(return_value=_It())
+    svc = _build_service(handler)
+    assert await svc._fetch_posts_batch("owner-sec", 0, "collection") == {}
+    _, kwargs = handler.fetch_user_collection_videos.call_args
+    assert kwargs == {"max_cursor": 0, "page_counts": 20}
+
+
+async def test_fetch_posts_batch_rejects_unknown_mode() -> None:
+    """Direct runner calls with a bad mode fail loudly, not silently."""
+    svc = _build_service(MagicMock())
+    with pytest.raises(ServiceError, match="Unknown bulk download mode"):
+        await svc._fetch_posts_batch("u1", 0, "nope")
+
+
+async def test_download_single_post_success(tmp_path: Any) -> None:
+    """Single posts download inline and record a completed operation."""
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    fetched = MagicMock()
+    fetched._to_dict.return_value = {
+        "aweme_id": "p1",
+        "aweme_type": 0,
+        "video": {"play_addr": {"url_list": ["http://v"]}},
+        "author": {"sec_uid": "sec-1"},
+    }
+    handler.fetch_one_video = AsyncMock(return_value=fetched)
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    user_dir = tmp_path / "sec-1"
+    user_dir.mkdir()
+
+    async def _fake_download(post: dict, post_type: Any, path: Any) -> None:
+        (path / "p1_video.mp4").write_text("x")
+
+    with (
+        patch("dyvine.services.posts.AsyncUserDB") as mock_db,
+        patch.object(
+            posts_mod.PostService,
+            "_download_post_content",
+            new=AsyncMock(side_effect=_fake_download),
+        ),
+    ):
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+        handler.get_or_add_user_data = AsyncMock(return_value=user_dir)
+        handler.kwargs = {}
+        result = await svc.download_single_post("p1")
+
+    assert result.aweme_id == "p1"
+    assert result.files == [str(user_dir / "p1_video.mp4")]
+    persisted = await store.get_operation(result.operation_id)
+    assert persisted.status == "completed"
+    assert persisted.operation_type == "single_post_download"
+
+
+async def test_download_single_post_not_found_fails_operation() -> None:
+    """Missing posts raise and leave a failed operation row behind."""
+    handler = MagicMock()
+    handler.fetch_one_video = AsyncMock(return_value=None)
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    with pytest.raises(PostNotFoundError):
+        await svc.download_single_post("ghost")
+    rows = [row async for row in _all_operations(store)]
+    assert len(rows) == 1 and rows[0].status == "failed"
+
+
+async def _all_operations(
+    store: FakeOperationRepository,
+) -> Any:
+    """Yield every operation row (test helper over the fake internals)."""
+    for record in store._rows.values():
+        yield record
+
+
+async def test_list_collects_returns_folders() -> None:
+    """Collects folders normalize through ``_to_dict``."""
+
+    class _Folder:
+        def _to_dict(self) -> dict:
+            return {"collects_id": "c1", "name": "favs"}
+
+    async def _iterator() -> Any:
+        yield _Folder()
+
+    handler = MagicMock()
+    handler.fetch_user_collects = MagicMock(return_value=_iterator())
+    svc = _build_service(handler)
+    assert await svc.list_collects() == [{"collects_id": "c1", "name": "favs"}]
+    handler.fetch_user_collects.assert_called_once_with()
+
+
+async def test_start_mix_download_schedules_container_operation() -> None:
+    """Mix scheduling persists the row and spawns the container loop."""
+    from unittest.mock import patch
+
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(MagicMock(), operation_store=store)
+    with patch.object(
+        posts_mod.PostService, "_run_container_download", new=AsyncMock()
+    ) as runner:
+        response = await svc.start_mix_download("mix-1")
+    await asyncio.sleep(0)
+    persisted = await store.get_operation(response.operation_id)
+    assert persisted.operation_type == "user_mix_bulk_download"
+    assert persisted.subject_id == "mix-1"
+    runner.assert_awaited_once()
+
+    with pytest.raises(ServiceError, match="Container id is required"):
+        await svc.start_collects_download("  ")
+
+
+async def test_run_container_download_completes(tmp_path: Any) -> None:
+    """Container pages download through the shared batch processor."""
+    from unittest.mock import patch
+
+    class _Page:
+        def _to_list(self) -> list:
+            return [{"aweme_id": "p1", "sec_user_id": "sec-1"}]
+
+        def _to_raw(self) -> dict:
+            return {"has_more": False, "max_cursor": 0}
+
+    class _Iterator:
+        def __init__(self) -> None:
+            self._done = False
+
+        async def __anext__(self) -> Any:
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return _Page()
+
+        async def aclose(self) -> None:
+            return None
+
+    handler = MagicMock()
+    handler.fetch_user_mix_videos = MagicMock(return_value=_Iterator())
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    operation = await store.create_operation(
+        operation_type="user_mix_bulk_download",
+        subject_id="mix-1",
+        status="pending",
+        message="scheduled",
+    )
+    user_dir = tmp_path / "sec-1"
+    user_dir.mkdir()
+    with (
+        patch("dyvine.services.posts.AsyncUserDB") as mock_db,
+        patch.object(
+            posts_mod.PostService,
+            "_process_posts_batch",
+            new=AsyncMock(return_value=0),
+        ) as processor,
+    ):
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+        handler.get_or_add_user_data = AsyncMock(return_value=user_dir)
+        handler.kwargs = {}
+        await svc._run_container_download(
+            operation.operation_id, "mix-1", "fetch_user_mix_videos"
+        )
+    processor.assert_awaited_once()
+    refreshed = await store.get_operation(operation.operation_id)
+    assert refreshed.status == "completed"
+    handler.fetch_user_mix_videos.assert_called_once_with(
+        "mix-1", max_cursor=0, page_counts=20
+    )
+
+
+# ── P1 query methods ────────────────────────────────────────────────────
+
+
+async def test_get_post_stats_returns_dict() -> None:
+    """Stats normalize through ``_to_dict``."""
+    handler = MagicMock()
+    stats = MagicMock()
+    stats._to_dict.return_value = {"digg_count": 10}
+    handler.fetch_post_stats = AsyncMock(return_value=stats)
+    svc = _build_service(handler)
+    assert await svc.get_post_stats("p1", aweme_type=0) == {"digg_count": 10}
+    handler.fetch_post_stats.assert_awaited_once_with(aweme_id="p1", aweme_type=0)
+
+
+async def test_get_user_feed_collects_items() -> None:
+    """Feed pages concatenate up to the requested count."""
+
+    class _Page:
+        def _to_list(self) -> list:
+            return [{"aweme_id": "p1"}, {"aweme_id": "p2"}]
+
+    async def _iterator() -> Any:
+        yield _Page()
+
+    handler = MagicMock()
+    handler.fetch_user_feed_videos = MagicMock(return_value=_iterator())
+    svc = _build_service(handler)
+    assert await svc.get_user_feed("u1", count=1) == [{"aweme_id": "p1"}]
+    _, kwargs = handler.fetch_user_feed_videos.call_args
+    assert kwargs["sec_user_id"] == "u1"
+
+
+async def test_get_related_posts_failure_wraps() -> None:
+    """Feed errors surface as ``PostServiceError``."""
+    handler = MagicMock()
+    handler.fetch_related_videos = MagicMock(side_effect=RuntimeError("down"))
+    svc = _build_service(handler)
+    with pytest.raises(ServiceError, match="Failed to fetch feed"):
+        await svc.get_related_posts("p1")
+
+
+async def test_get_friend_feed_is_owner_scoped() -> None:
+    """Friend feed passes cursor-style kwargs, no user id."""
+
+    async def _iterator() -> Any:
+        return
+        yield
+
+    handler = MagicMock()
+    handler.fetch_friend_feed_videos = MagicMock(return_value=_iterator())
+    svc = _build_service(handler)
+    assert await svc.get_friend_feed(count=5) == []
+    _, kwargs = handler.fetch_friend_feed_videos.call_args
+    assert kwargs == {"cursor": 0, "max_counts": 5}
+
+
+async def test_get_post_comments_returns_top_level() -> None:
+    """Comments drive the crawler directly and truncate to count."""
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    handler.kwargs = {"cookie": "x"}
+    svc = _build_service(handler)
+    crawler = AsyncMock()
+    crawler.fetch_post_comment = AsyncMock(
+        return_value={"comments": [{"cid": "c1"}, {"cid": "c2"}, "junk"]}
+    )
+    crawler_ctx = MagicMock()
+    crawler_ctx.__aenter__ = AsyncMock(return_value=crawler)
+    crawler_ctx.__aexit__ = AsyncMock(return_value=False)
+    with (
+        patch.object(posts_mod, "DouyinCrawler", return_value=crawler_ctx),
+        patch.object(posts_mod, "F2PostDetail") as mock_model,
+    ):
+        result = await svc.get_post_comments("p1", count=2)
+    assert result == [{"cid": "c1"}, {"cid": "c2"}]
+    mock_model.assert_called_once_with(aweme_id="p1")

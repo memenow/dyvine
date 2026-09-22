@@ -7,10 +7,10 @@ stream) and fetches the user's new posts.
 
 Design:
 
-- **One loop task per subscription.** ``DELETE /watch/{id}`` cancels
+- **One loop task per subscription.** Deleting a subscription cancels
   exactly that task; an exception in one user's loop cannot stall another.
-  Tasks are scheduled through the shared ``BackgroundTaskRegistry`` so the
-  FastAPI lifespan drains them on shutdown.
+  Tasks are scheduled through the shared ``BackgroundTaskRegistry`` so host
+  shutdown drains them.
 - **Persistence + resume.** Subscriptions live in ``WatchRepository``
   (a dedicated Postgres table), so ``resume_persisted`` can re-arm every
   enabled subscription after a restart -- something the operation store
@@ -26,9 +26,9 @@ Design:
   with the app's uptime accounting) so NTP steps cannot cause negative
   sleeps or catch-up storms. Each due-time carries +/-10% jitter so several
   subscriptions never hammer upstream in lockstep.
-- **Split-brain-free scaling.** API replicas run with ``run_loops=False``
+- **Split-brain-free scaling.** Processes run with ``run_loops=False``
   (``WATCH_ENABLED=false``): CRUD still works against shared Postgres,
-  but loops run on exactly one watcher replica, which adopts new rows
+  but loops run on exactly one watcher process, which adopts new rows
   and drops deleted ones through periodic ``reconcile_loops`` passes.
 """
 
@@ -103,10 +103,10 @@ class WatchService:
         """Initialize the watch service from injected dependencies.
 
         Args:
-            run_loops: When ``False`` (``WATCH_ENABLED=false`` on API
-                replicas) the CRUD surface keeps working against shared
-                Postgres but no watcher loop is ever started locally;
-                the dedicated watcher replica adopts new rows through
+            run_loops: When ``False`` (``WATCH_ENABLED=false``) the CRUD
+                surface keeps working against shared Postgres but no
+                watcher loop is ever started locally; the dedicated
+                watcher process adopts new rows through
                 :meth:`reconcile_loops`.
         """
         self.settings = settings
@@ -127,7 +127,7 @@ class WatchService:
         self._lock: asyncio.Lock | None = None
 
     # ------------------------------------------------------------------
-    # Public CRUD surface (called by the router)
+    # Public CRUD surface
     # ------------------------------------------------------------------
 
     async def create_subscription(
@@ -267,15 +267,15 @@ class WatchService:
         )
 
     # ------------------------------------------------------------------
-    # Lifecycle (called by ServiceContainer)
+    # Lifecycle (called by the host during startup/shutdown)
     # ------------------------------------------------------------------
 
     async def resume_persisted(self) -> int:
         """Re-arm a watcher loop for every enabled persisted subscription.
 
-        Returns the number of loops started. Called from
-        ``ServiceContainer.initialize`` after the container is marked ready.
-        A no-op returning ``0`` when this replica does not run loops.
+        Returns the number of loops started. Called from host startup
+        once dependencies are ready. A no-op returning ``0`` when this
+        process does not run loops.
         """
         if not self._run_loops:
             return 0
@@ -431,9 +431,9 @@ class WatchService:
     async def stop_all(self) -> None:
         """Cancel every watcher loop.
 
-        Called at the very start of ``ServiceContainer.shutdown`` so the
-        loops stop scheduling new downloads before the background-task
-        registry is drained.
+        Called at the very start of host shutdown so the loops stop
+        scheduling new downloads before the background-task registry
+        is drained.
         """
         for subscription_id in list(self._loops):
             await self._cancel_loop(subscription_id)

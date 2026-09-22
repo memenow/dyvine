@@ -3,7 +3,7 @@
 User-controllable strings (livestream ``output_path``, future bulk
 download targets, etc.) must never be allowed to write outside the
 configured download root. ``resolve_within_root`` enforces that
-invariant in a single place so router/schema callers cannot accidentally
+invariant in a single place so service/schema callers cannot accidentally
 build a path that escapes the jail via traversal segments or absolute
 prefixes.
 """

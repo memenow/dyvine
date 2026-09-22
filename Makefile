@@ -1,14 +1,15 @@
-.PHONY: help install dev test lint format clean run
+.PHONY: help install dev test coverage lint format doctor clean
 
 help:
 	@echo "Available commands:"
 	@echo "  install   Install dependencies"
 	@echo "  dev       Install development dependencies"
 	@echo "  test      Run tests"
+	@echo "  coverage  Run tests with the 80% coverage gate"
 	@echo "  lint      Run linting"
 	@echo "  format    Format code"
+	@echo "  doctor    Validate the plugin with hermes (needs docker)"
 	@echo "  clean     Clean temporary files"
-	@echo "  run       Run the application"
 
 install:
 	uv sync
@@ -19,13 +20,19 @@ dev:
 test:
 	uv run pytest
 
+coverage:
+	uv run pytest --cov=src/dyvine --cov=src/dyvine_hermes --cov-fail-under=80
+
 lint:
 	uv run ruff check .
-	uv run mypy src/dyvine
+	uv run mypy src/dyvine src/dyvine_hermes __init__.py
 
 format:
 	uv run black .
 	uv run isort .
+
+doctor:
+	docker run --rm -v $(PWD):/plugin:ro nousresearch/hermes-agent:latest plugins doctor --ci /plugin
 
 clean:
 	find . -type f -name "*.pyc" -delete
@@ -34,6 +41,3 @@ clean:
 	rm -rf .pytest_cache
 	rm -rf .mypy_cache
 	rm -rf .ruff_cache
-
-run:
-	PYTHONPATH=src uv run uvicorn dyvine.main:app --reload

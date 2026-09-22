@@ -1,15 +1,15 @@
 """Registry for tracking long-lived asyncio background tasks.
 
-FastAPI's ``BackgroundTasks`` runs after the response is sent but before the
-endpoint coroutine returns, so it is unsuitable for fire-and-forget downloads
-that must outlive a single request. Previously those downloads were spawned
-with bare ``asyncio.create_task`` and tracked nowhere. On a graceful shutdown
-the FastAPI lifespan tore down ``ServiceContainer`` executors before the
-tasks drained, which produced ``RuntimeError: cannot schedule new futures
-after shutdown`` inside active R2 uploads / audit writes.
+Bulk downloads outlive the single tool call that starts them, so bare
+``asyncio.create_task`` handles would be tracked nowhere: on process
+shutdown the executor pools were reaped before the tasks drained,
+which produced ``RuntimeError: cannot schedule new futures after
+shutdown`` inside active R2 uploads / audit writes.
 
-``BackgroundTaskRegistry`` centralizes spawn and drain so the lifespan can
-wait for active downloads before reaping the executor pools.
+``BackgroundTaskRegistry`` centralizes spawn and drain so shutdown
+waits for active downloads before reaping the executor pools. State
+always lands in Postgres first, so a gateway restart loses at most
+in-flight progress, never records.
 """
 
 from __future__ import annotations
@@ -26,14 +26,13 @@ logger = ContextLogger(__name__)
 
 
 class BackgroundTaskRegistry:
-    """Track long-lived ``asyncio.Task`` handles so the lifespan can drain them.
+    """Track long-lived ``asyncio.Task`` handles so shutdown can drain them.
 
     Tasks are registered via :meth:`spawn`, auto-removed from the tracking set
     on completion, and drained by :meth:`drain` during shutdown. Once
     :meth:`drain` is entered the registry is closed: subsequent
     :meth:`spawn` calls raise ``RuntimeError`` rather than silently leaking
-    work past the executor teardown that follows in
-    ``ServiceContainer.shutdown``.
+    work past the executor teardown that follows.
 
     Attributes:
         drain_timeout: Maximum seconds ``drain`` waits for tasks to finish
@@ -43,9 +42,8 @@ class BackgroundTaskRegistry:
     def __init__(self, *, drain_timeout: float = 20.0) -> None:
         """Initialize the registry with no tracked tasks.
 
-        The default fits inside uvicorn's 25s graceful-shutdown window
-        (which itself fits inside Kubernetes' 30s termination grace),
-        so a drain never gets SIGKILLed mid-flight on rollout.
+        The default fits inside a conventional 25s graceful-shutdown
+        window so a drain never gets SIGKILLed mid-flight.
         """
         self._tasks: set[asyncio.Task[Any]] = set()
         self.drain_timeout = drain_timeout
@@ -94,11 +92,10 @@ class BackgroundTaskRegistry:
         """Wait for tracked tasks to finish, cancelling anything that overruns.
 
         Returns once every tracked task has terminated -- successfully, with an
-        exception, or via cancellation. Called from
-        :meth:`ServiceContainer.shutdown` before the executor pools are torn
-        down so in-flight dispatches can resolve. The registry is marked
-        closed before awaiting so any concurrent ``spawn`` cannot add work
-        the drain would not see.
+        exception, or via cancellation. Called during host shutdown before
+        the executor pools are torn down so in-flight dispatches can
+        resolve. The registry is marked closed before awaiting so any
+        concurrent ``spawn`` cannot add work the drain would not see.
         """
         # Mark closed even when there is nothing to drain so a follow-up
         # ``spawn`` (e.g. from a stale callback) is rejected consistently.
