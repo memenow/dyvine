@@ -4,12 +4,13 @@ The :class:`DatabaseHealthTracker` records the outcome of real
 repository calls: every Postgres repository method reports success when
 the database answers (even when the answer is a domain error such as
 "not found") and failure only when the database itself is unreachable.
-The ``/readyz`` probe then reads the last-known state instead of
-opening a connection of its own, so probes never touch the database.
+Readers then consult the last-known state instead of opening a
+connection of their own, so idle health checks never touch the
+database.
 
-``"unknown"`` (no call observed yet) counts as healthy: production
-boots always run a recovery pass first, so a genuinely unreachable
-database fails startup loudly instead of lingering in this state.
+``"unknown"`` (no call observed yet) counts as healthy: a genuinely
+unreachable database fails the first real call loudly instead of
+lingering in this state.
 """
 
 from __future__ import annotations

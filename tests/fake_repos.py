@@ -10,19 +10,37 @@ real database so the two can never silently diverge.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from dyvine.core.exceptions import (
+    DeliveryRoundNotFoundError,
     OperationNotFoundError,
+    QueueEntryNotFoundError,
     RateLimitError,
+    SeedAccountNotFoundError,
+    SendStatusNotFoundError,
     ServiceError,
+    UserProfileNotFoundError,
     WatchDuplicateError,
     WatchSubscriptionNotFoundError,
 )
-from dyvine.db.protocols import ACTIVE_STATUSES, TERMINAL_STATUSES
-from dyvine.db.records import OperationRecord, WatchSubscriptionRecord
+from dyvine.db.protocols import (
+    ACTIVE_STATUSES,
+    QUEUE_CLAIMABLE_STATUSES,
+    TERMINAL_STATUSES,
+)
+from dyvine.db.records import (
+    DeliveryRoundRecord,
+    OperationRecord,
+    QueueEntryRecord,
+    SeedAccountRecord,
+    SendStatusRecord,
+    UserProfileRecord,
+    UserSendStatusRecord,
+    WatchSubscriptionRecord,
+)
 
 _OPERATION_UPDATABLE_FIELDS = frozenset(
     {
@@ -45,6 +63,58 @@ _SUBSCRIPTION_UPDATABLE_FIELDS = frozenset(
         "checkpoint",
         "last_live_check",
         "last_post_check",
+    }
+)
+
+_QUEUE_UPDATABLE_FIELDS = frozenset(
+    {
+        "kind",
+        "nickname",
+        "sec_user_id",
+        "chat_id",
+        "homepage",
+        "mode",
+        "cutoff",
+        "status",
+        "operation_id",
+        "op_status",
+        "op_message",
+        "attempts",
+        "serial_group",
+        "extra",
+    }
+)
+
+_PROFILE_COLUMNS = frozenset(
+    {
+        "nickname",
+        "nickname_raw",
+        "avatar_url",
+        "signature",
+        "signature_raw",
+        "uid",
+        "short_id",
+        "unique_id",
+        "room_id",
+        "city",
+        "country",
+        "ip_location",
+        "school_name",
+        "gender",
+        "user_age",
+        "aweme_count",
+        "favoriting_count",
+        "follower_count",
+        "following_count",
+        "total_favorited",
+        "mplatform_followers_count",
+        "mix_count",
+        "live_status",
+        "is_ban",
+        "is_block",
+        "is_blocked",
+        "is_star",
+        "last_aweme_id",
     }
 )
 
@@ -431,3 +501,496 @@ class FakeWatchRepository:
             return False
         self._by_user.pop(record.user_id, None)
         return True
+
+
+@dataclass
+class FakeQueueState:
+    """Shared backing store for multi-owner fake queue scenarios."""
+
+    rows: dict[str, QueueEntryRecord] = field(default_factory=dict)
+    owners: dict[str, str | None] = field(default_factory=dict)
+    heartbeats: dict[str, str | None] = field(default_factory=dict)
+
+
+class FakeQueueRepository:
+    """Dict-backed ``QueueRepository`` for unit tests."""
+
+    def __init__(
+        self, *, owner_id: str = "test-owner", state: FakeQueueState | None = None
+    ) -> None:
+        """Create an empty queue stamped with ``owner_id``."""
+        self._owner_id = owner_id
+        self._state = state or FakeQueueState()
+
+    @property
+    def _rows(self) -> dict[str, QueueEntryRecord]:
+        """Rows keyed by queue key."""
+        return self._state.rows
+
+    @property
+    def _owners(self) -> dict[str, str | None]:
+        """Owner identity per queue key."""
+        return self._state.owners
+
+    @property
+    def _heartbeats(self) -> dict[str, str | None]:
+        """Heartbeat stamp per queue key."""
+        return self._state.heartbeats
+
+    async def upsert_entry(
+        self,
+        *,
+        key: str,
+        round: str,
+        nickname: str,
+        sec_user_id: str,
+        mode: str,
+        status: str,
+        kind: str | None = None,
+        chat_id: str | None = None,
+        homepage: str | None = None,
+        cutoff: str | None = None,
+        operation_id: str | None = None,
+        op_status: str | None = None,
+        op_message: str | None = None,
+        attempts: int = 0,
+        serial_group: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> QueueEntryRecord:
+        """Insert or replace the entry at ``key`` and return it."""
+        stamp = _now_iso()
+        existing = self._rows.get(key)
+        record = QueueEntryRecord(
+            key=key,
+            round=round,
+            kind=kind,
+            nickname=nickname,
+            sec_user_id=sec_user_id,
+            chat_id=chat_id,
+            homepage=homepage,
+            mode=mode,
+            cutoff=cutoff,
+            status=status,
+            operation_id=operation_id,
+            op_status=op_status,
+            op_message=op_message,
+            attempts=attempts,
+            serial_group=serial_group,
+            extra=dict(extra or {}),
+            created_at=existing.created_at if existing else stamp,
+            updated_at=stamp,
+        )
+        self._rows[key] = record
+        self._owners[key] = self._owner_id
+        self._heartbeats[key] = stamp
+        return record
+
+    async def get_entry(self, key: str) -> QueueEntryRecord:
+        """Fetch by key or raise ``QueueEntryNotFoundError``."""
+        try:
+            return self._rows[key]
+        except KeyError:
+            raise QueueEntryNotFoundError(f"Queue entry {key} not found") from None
+
+    async def list_entries(
+        self,
+        *,
+        round: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[QueueEntryRecord]:
+        """List entries oldest-first, optionally filtered."""
+        rows = [
+            row
+            for row in self._rows.values()
+            if (round is None or row.round == round)
+            and (status is None or row.status == status)
+        ]
+        rows.sort(key=lambda row: (row.updated_at, row.key))
+        if offset:
+            rows = rows[offset:]
+        if limit >= 0:
+            rows = rows[:limit]
+        return rows
+
+    async def count_entries(
+        self, *, round: str | None = None, status: str | None = None
+    ) -> int:
+        """Count entries, optionally filtered."""
+        return sum(
+            1
+            for row in self._rows.values()
+            if (round is None or row.round == round)
+            and (status is None or row.status == status)
+        )
+
+    async def claim_next(self, *, round: str | None = None) -> QueueEntryRecord | None:
+        """Claim the oldest ``pending`` entry, or ``None`` when empty.
+
+        The single-process fake needs no row lock; ordering and the
+        ``serial_group`` skip mirror the SQL backend exactly.
+        """
+        busy = {
+            row.serial_group
+            for row in self._rows.values()
+            if row.status == "downloading" and row.serial_group is not None
+        }
+        candidates = [
+            row
+            for row in self._rows.values()
+            if row.status in QUEUE_CLAIMABLE_STATUSES
+            and (round is None or row.round == round)
+            and (row.serial_group is None or row.serial_group not in busy)
+        ]
+        if not candidates:
+            return None
+        winner = min(candidates, key=lambda row: (row.updated_at, row.key))
+        stamp = _now_iso()
+        claimed = QueueEntryRecord(
+            key=winner.key,
+            round=winner.round,
+            kind=winner.kind,
+            nickname=winner.nickname,
+            sec_user_id=winner.sec_user_id,
+            chat_id=winner.chat_id,
+            homepage=winner.homepage,
+            mode=winner.mode,
+            cutoff=winner.cutoff,
+            status="downloading",
+            operation_id=winner.operation_id,
+            op_status=winner.op_status,
+            op_message=winner.op_message,
+            attempts=winner.attempts,
+            serial_group=winner.serial_group,
+            extra=dict(winner.extra),
+            created_at=winner.created_at,
+            updated_at=stamp,
+        )
+        self._rows[winner.key] = claimed
+        self._owners[winner.key] = self._owner_id
+        self._heartbeats[winner.key] = stamp
+        return claimed
+
+    async def update_entry(self, key: str, **fields: Any) -> QueueEntryRecord:
+        """Update allowed fields, refresh liveness, return the new state."""
+        try:
+            current = self._rows[key]
+        except KeyError:
+            raise QueueEntryNotFoundError(f"Queue entry {key} not found") from None
+        requested = {
+            name: value
+            for name, value in fields.items()
+            if name in _QUEUE_UPDATABLE_FIELDS
+        }
+        if not requested:
+            return current
+        values: dict[str, Any] = {
+            "key": current.key,
+            "round": current.round,
+            "kind": current.kind,
+            "nickname": current.nickname,
+            "sec_user_id": current.sec_user_id,
+            "chat_id": current.chat_id,
+            "homepage": current.homepage,
+            "mode": current.mode,
+            "cutoff": current.cutoff,
+            "status": current.status,
+            "operation_id": current.operation_id,
+            "op_status": current.op_status,
+            "op_message": current.op_message,
+            "attempts": current.attempts,
+            "serial_group": current.serial_group,
+            "extra": dict(current.extra),
+            "created_at": current.created_at,
+            "updated_at": current.updated_at,
+        }
+        for name, value in requested.items():
+            values[name] = dict(value or {}) if name == "extra" else value
+        stamp = _now_iso()
+        values["updated_at"] = stamp
+        updated = QueueEntryRecord(**values)
+        self._rows[key] = updated
+        self._heartbeats[key] = stamp
+        return updated
+
+    async def release_stale(
+        self, *, stale_after_seconds: float, max_attempts: int
+    ) -> int:
+        """Requeue ``downloading`` rows whose owner stopped heartbeating."""
+        cutoff = (
+            datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
+        ).isoformat()
+        stamp = _now_iso()
+        touched = 0
+        for key, row in list(self._rows.items()):
+            heartbeat = self._heartbeats.get(key)
+            alive = heartbeat if heartbeat is not None else row.created_at
+            owner = self._owners.get(key)
+            if not (
+                row.status == "downloading"
+                and alive < cutoff
+                and owner != self._owner_id
+            ):
+                continue
+            if row.attempts >= max_attempts:
+                freed = replace(row, status="op_issue", updated_at=stamp)
+            else:
+                freed = replace(
+                    row,
+                    status="pending",
+                    attempts=row.attempts + 1,
+                    updated_at=stamp,
+                )
+            self._rows[key] = freed
+            self._heartbeats[key] = stamp
+            touched += 1
+        return touched
+
+
+class FakeSendStatusRepository:
+    """Dict-backed ``SendStatusRepository`` for unit tests."""
+
+    def __init__(self) -> None:
+        """Create empty live and legacy stores."""
+        self._rows: dict[str, SendStatusRecord] = {}
+        self._legacy: dict[str, UserSendStatusRecord] = {}
+        self._legacy_seq = 0
+
+    async def upsert_send_status(
+        self,
+        *,
+        nickname: str,
+        sec_user_id: str | None = None,
+        chat_id: str | None = None,
+        batch: str | None = None,
+        total_files: int | None = None,
+        sent_files: int | None = None,
+        failed_files: int | None = None,
+        status: str | None = None,
+    ) -> SendStatusRecord:
+        """Insert or replace the row for ``nickname`` and return it."""
+        stamp = _now_iso()
+        existing = self._rows.get(nickname)
+        record = SendStatusRecord(
+            nickname=nickname,
+            sec_user_id=sec_user_id,
+            chat_id=chat_id,
+            batch=batch,
+            total_files=total_files,
+            sent_files=sent_files,
+            failed_files=failed_files,
+            status=status,
+            created_at=existing.created_at if existing else stamp,
+            updated_at=stamp,
+        )
+        self._rows[nickname] = record
+        return record
+
+    async def get_send_status(self, nickname: str) -> SendStatusRecord:
+        """Fetch by nickname or raise ``SendStatusNotFoundError``."""
+        try:
+            return self._rows[nickname]
+        except KeyError:
+            raise SendStatusNotFoundError(
+                f"Send status for {nickname} not found"
+            ) from None
+
+    async def get_send_status_by_sec(self, sec_user_id: str) -> SendStatusRecord | None:
+        """Return the row for ``sec_user_id``, or ``None``."""
+        for row in self._rows.values():
+            if row.sec_user_id == sec_user_id:
+                return row
+        return None
+
+    async def list_send_status(
+        self, *, batch: str | None = None, limit: int = 100, offset: int = 0
+    ) -> list[SendStatusRecord]:
+        """List rows oldest-first, optionally filtered by batch."""
+        rows = [
+            row for row in self._rows.values() if batch is None or row.batch == batch
+        ]
+        rows.sort(key=lambda row: (row.updated_at, row.nickname))
+        if offset:
+            rows = rows[offset:]
+        if limit >= 0:
+            rows = rows[:limit]
+        return rows
+
+    async def get_user_send_status(self, username: str) -> UserSendStatusRecord:
+        """Fetch a legacy row or raise ``SendStatusNotFoundError``."""
+        try:
+            return self._legacy[username]
+        except KeyError:
+            raise SendStatusNotFoundError(
+                f"Send status for {username} not found"
+            ) from None
+
+    def seed_legacy(
+        self,
+        username: str,
+        *,
+        local_files: int = 0,
+        sent_files: int = 0,
+        failed_files: int = 0,
+        status: str = "pending",
+        failed_details: str = "",
+    ) -> UserSendStatusRecord:
+        """Insert a legacy row for tests (not part of the protocol)."""
+        self._legacy_seq += 1
+        stamp = _now_iso()
+        record = UserSendStatusRecord(
+            id=self._legacy_seq,
+            username=username,
+            local_files=local_files,
+            sent_files=sent_files,
+            failed_files=failed_files,
+            status=status,
+            failed_details=failed_details,
+            created_at=stamp,
+            updated_at=stamp,
+        )
+        self._legacy[username] = record
+        return record
+
+
+class FakeSeedRepository:
+    """Dict-backed ``SeedRepository`` for unit tests."""
+
+    def __init__(self) -> None:
+        """Create an empty seed store."""
+        self._rows: dict[str, SeedAccountRecord] = {}
+
+    async def upsert_seed(
+        self,
+        *,
+        sec_user_id: str,
+        nickname: str | None = None,
+        source_url: str | None = None,
+        source: str = "seed",
+        batch: str | None = None,
+        excluded: bool = False,
+    ) -> SeedAccountRecord:
+        """Insert or replace the seed row and return it."""
+        stamp = _now_iso()
+        existing = self._rows.get(sec_user_id)
+        record = SeedAccountRecord(
+            sec_user_id=sec_user_id,
+            nickname=nickname,
+            source_url=source_url,
+            source=source,
+            batch=batch,
+            excluded=excluded,
+            created_at=existing.created_at if existing else stamp,
+            updated_at=stamp,
+        )
+        self._rows[sec_user_id] = record
+        return record
+
+    async def get_seed(self, sec_user_id: str) -> SeedAccountRecord:
+        """Fetch by ID or raise ``SeedAccountNotFoundError``."""
+        try:
+            return self._rows[sec_user_id]
+        except KeyError:
+            raise SeedAccountNotFoundError(
+                f"Seed account {sec_user_id} not found"
+            ) from None
+
+    async def list_seeds(
+        self, *, include_excluded: bool = False
+    ) -> list[SeedAccountRecord]:
+        """List seeds ordered by creation time."""
+        rows = [
+            row for row in self._rows.values() if include_excluded or not row.excluded
+        ]
+        rows.sort(key=lambda row: (row.created_at, row.sec_user_id))
+        return rows
+
+    async def count_seeds(self, *, include_excluded: bool = False) -> int:
+        """Count seeds, optionally including excluded rows."""
+        return sum(
+            1 for row in self._rows.values() if include_excluded or not row.excluded
+        )
+
+
+class FakeProfileRepository:
+    """Dict-backed ``ProfileRepository`` for unit tests."""
+
+    def __init__(self) -> None:
+        """Create an empty profile store."""
+        self._rows: dict[str, UserProfileRecord] = {}
+
+    async def upsert_profile(
+        self, *, sec_user_id: str, **fields: Any
+    ) -> UserProfileRecord:
+        """Insert or patch the snapshot row and return it."""
+        known = {
+            name: value for name, value in fields.items() if name in _PROFILE_COLUMNS
+        }
+        stamp = _now_iso()
+        existing = self._rows.get(sec_user_id)
+        if existing is None:
+            record = UserProfileRecord(
+                sec_user_id=sec_user_id,
+                **known,  # type: ignore[arg-type]
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        elif not known:
+            return existing
+        else:
+            record = replace(existing, **known, updated_at=stamp)  # type: ignore[arg-type]
+        self._rows[sec_user_id] = record
+        return record
+
+    async def get_profile(self, sec_user_id: str) -> UserProfileRecord:
+        """Fetch by ID or raise ``UserProfileNotFoundError``."""
+        try:
+            return self._rows[sec_user_id]
+        except KeyError:
+            raise UserProfileNotFoundError(
+                f"User profile {sec_user_id} not found"
+            ) from None
+
+
+class FakeRoundRepository:
+    """Dict-backed ``RoundRepository`` for unit tests."""
+
+    def __init__(self) -> None:
+        """Create an empty round store."""
+        self._rows: dict[str, DeliveryRoundRecord] = {}
+
+    async def upsert_round(
+        self, *, round: str, note: str | None = None
+    ) -> DeliveryRoundRecord:
+        """Insert or touch the round header and return it."""
+        stamp = _now_iso()
+        existing = self._rows.get(round)
+        if existing is None:
+            record = DeliveryRoundRecord(
+                round=round, note=note, created_at=stamp, updated_at=stamp
+            )
+        else:
+            record = DeliveryRoundRecord(
+                round=round,
+                note=note if note is not None else existing.note,
+                created_at=existing.created_at,
+                updated_at=stamp,
+            )
+        self._rows[round] = record
+        return record
+
+    async def get_round(self, round: str) -> DeliveryRoundRecord:
+        """Fetch by name or raise ``DeliveryRoundNotFoundError``."""
+        try:
+            return self._rows[round]
+        except KeyError:
+            raise DeliveryRoundNotFoundError(
+                f"Delivery round {round} not found"
+            ) from None
+
+    async def list_rounds(self) -> list[DeliveryRoundRecord]:
+        """List rounds ordered by creation time."""
+        rows = list(self._rows.values())
+        rows.sort(key=lambda row: (row.created_at, row.round))
+        return rows
