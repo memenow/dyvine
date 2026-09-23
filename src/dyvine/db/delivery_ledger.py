@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -25,6 +26,28 @@ from .session import DatabaseSessionFactory
 
 def _stamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+# f2 saves post media as ``<create>_<desc>/<create>_<desc><slot>``, where the
+# slot suffix names the media (``_video.mp4``, ``_image_3.webp``, ...).
+_POST_CREATE_STAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}")
+
+
+def post_media_slot(relative_path: str) -> tuple[str, str] | None:
+    """Return the post creation stamp and media slot of an f2 media path.
+
+    Authors can edit a caption after a legacy send, so a re-download of the
+    same media gets a different folder and file name; the creation stamp and
+    the slot suffix stay the same. Any other path shape returns ``None`` so
+    callers match exactly instead of guessing.
+    """
+    folder, separator, name = relative_path.partition("/")
+    if not separator or "/" in name or not name.startswith(folder):
+        return None
+    stamp, slot = folder[:19], name[len(folder) :]
+    if not _POST_CREATE_STAMP.fullmatch(stamp) or not slot:
+        return None
+    return stamp, slot
 
 
 def _group_record(row: DeliveryGroupRow) -> DeliveryGroupRecord:
@@ -558,16 +581,33 @@ class PostgresDeliveryLedgerRepository:
     async def find_legacy_sent(
         self, *, sec_user_id: str, relative_path: str
     ) -> FileDeliveryRecord | None:
-        query = (
+        """Find the legacy send of this media, tolerating caption renames.
+
+        An exact account-relative path wins. Otherwise a legacy send of the
+        same post creation stamp and media slot (see ``post_media_slot``)
+        is the same media under an edited caption, so sending it again
+        would duplicate it in the group.
+        """
+        legacy_sends = (
             select(DeliveryFileRow)
             .where(DeliveryFileRow.sec_user_id == sec_user_id)
-            .where(DeliveryFileRow.relative_path == relative_path)
             .where(DeliveryFileRow.status == "legacy_confirmed_sent")
-            .limit(1)
         )
+        slot = post_media_slot(relative_path)
         async with self._sessions.session() as session:
-            row = (await session.execute(query)).scalars().first()
-            return _file_record(row) if row else None
+            exact = legacy_sends.where(
+                DeliveryFileRow.relative_path == relative_path
+            ).limit(1)
+            row = (await session.execute(exact)).scalars().first()
+            if row is not None or slot is None:
+                return _file_record(row) if row else None
+            same_post = legacy_sends.where(
+                DeliveryFileRow.relative_path.startswith(slot[0], autoescape=True)
+            ).order_by(DeliveryFileRow.relative_path)
+            for candidate in (await session.execute(same_post)).scalars():
+                if post_media_slot(candidate.relative_path) == slot:
+                    return _file_record(candidate)
+        return None
 
     async def find_legacy_permanent_failure(
         self, *, sec_user_id: str, relative_path: str

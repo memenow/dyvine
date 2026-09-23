@@ -12,6 +12,9 @@ from dyvine.db import (
     PostgresDeliveryLedgerRepository,
     PostgresQueueRepository,
 )
+from dyvine.db.delivery_ledger import post_media_slot
+
+_STAMP = "2026-09-10 12-34-56"
 
 
 @pytest.fixture
@@ -53,6 +56,55 @@ async def test_group_and_topic_intents_survive_concurrent_reservation(
     assert (
         await ledger.mark_topic_ready(first.key, "topic-1")
     ).topic_message_id == "topic-1"
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        (f"{_STAMP}_a/{_STAMP}_a_video.mp4", (_STAMP, "_video.mp4")),
+        (f"{_STAMP}_a b/{_STAMP}_a b_image_3.webp", (_STAMP, "_image_3.webp")),
+        ("clip.mp4", None),
+        (f"{_STAMP}_a/nested/{_STAMP}_a_video.mp4", None),
+        (f"{_STAMP}_a/{_STAMP}_b_video.mp4", None),
+        (f"{_STAMP}_a/{_STAMP}_a", None),
+        ("not-a-stamp_a/not-a-stamp_a_video.mp4", None),
+    ],
+)
+def test_post_media_slot_reads_only_f2_post_media_paths(
+    path: str, expected: tuple[str, str] | None
+) -> None:
+    assert post_media_slot(path) == expected
+
+
+async def test_legacy_send_matches_the_same_media_under_an_edited_caption(
+    ledger: PostgresDeliveryLedgerRepository,
+) -> None:
+    old = f"{_STAMP}_old caption/{_STAMP}_old caption_image_2.webp"
+    rows: list[dict[str, str | None]] = [
+        {
+            "round": "weekly0913",
+            "sec_user_id": "sec-1",
+            "relative_path": old,
+            "legacy_source_path": f"/old/{old}",
+            "legacy_progress_file": "/old/progress.json",
+        }
+    ]
+    assert await ledger.reserve_legacy_sent_batch(rows) == (1, 0)
+    renamed = f"{_STAMP}_new caption/{_STAMP}_new caption_image_2.webp"
+    found = await ledger.find_legacy_sent(sec_user_id="sec-1", relative_path=renamed)
+    assert found is not None and found.relative_path == old
+    for other in (
+        renamed.replace("_image_2.webp", "_image_3.webp"),
+        renamed.replace("12-34-56", "12-34-57"),
+    ):
+        assert (
+            await ledger.find_legacy_sent(sec_user_id="sec-1", relative_path=other)
+            is None
+        )
+    assert (
+        await ledger.find_legacy_sent(sec_user_id="sec-2", relative_path=renamed)
+        is None
+    )
 
 
 async def test_file_intent_and_legacy_import_are_idempotent(

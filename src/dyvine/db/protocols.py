@@ -120,7 +120,13 @@ class DeliveryLedgerRepository(Protocol):
 
     async def find_legacy_sent(
         self, *, sec_user_id: str, relative_path: str
-    ) -> FileDeliveryRecord | None: ...
+    ) -> FileDeliveryRecord | None:
+        """Legacy send of this path, or of the same post media slot.
+
+        A caption edit renames a re-downloaded file; matching the post
+        creation stamp and media slot keeps it from being sent twice.
+        """
+        ...
 
     async def find_legacy_permanent_failure(
         self, *, sec_user_id: str, relative_path: str
