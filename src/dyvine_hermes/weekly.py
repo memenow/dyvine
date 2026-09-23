@@ -149,7 +149,7 @@ async def run_once(
     now: dt.datetime | None = None,
     channel: Any = None,
 ) -> WeeklyOutcome:
-    """Advance one account within the timeout; never spawn a detached task."""
+    """Advance the current pair within the timeout; never spawn detached tasks."""
     instant = now or dt.datetime.now(tz=ZoneInfo(config.timezone))
     automatic = round_name is None
     if automatic:

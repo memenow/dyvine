@@ -95,22 +95,11 @@ checkout's overrides. [docs/index.html](docs/index.html#hermes-dependencies)
 has the commands. Repeat this after every `hermes update`, which can drop
 the added packages and disable the plugin.
 
-On the current Hermes v0.21.1 host, the plugin doctor reported that Python
-dependencies require manual installation. The cutover installed only
-missing versions pinned by `plugin.yaml` with `uv pip --no-deps` in the
-Hermes environment. The published `f2` dependency metadata conflicts with
-Hermes's core pins, so the install preserved its existing `pydantic`,
-`httpx`, and `websockets` versions. Doctor registered all 35 tools and a
-read-only profile call passed, but neither check caught the missing
-Playwright dependency `pyee==13.0.1` from `uv.lock`. The engine wires its
-request signer on first use. The initial post-list probe still returned
-HTTP 403 until that locked dependency was installed. The signer then became
-ready, a signed read-only post-list call returned four posts, and engine
-shutdown closed the signer cleanly. On a
-target host, verify the matching Playwright Chromium build and all locked
-runtime dependencies, then read one authorized `dyvine.posts.list` page
-before enabling weekly sends. A profile check and doctor alone do not
-establish post-list readiness.
+Plugin doctor and a profile call do not exercise the request signer.
+During the cutover both passed while the Playwright dependency `pyee`
+from `uv.lock` was missing, and signed post-list calls returned HTTP 403
+until it was installed. Verify the matching Chromium build and read one
+authorized `dyvine.posts.list` page before enabling weekly sends.
 
 The webSign signer needs the Chromium build matching `playwright==1.62.0`
 (revision 1234). Where the default Playwright CDN is slow, install it
@@ -196,9 +185,10 @@ automatic rounds are not opened. The required
 `DYVINE_WEEKLY_CUTOVER_ROUND` identifies the active legacy round: it and
 unfinished automatic rounds dated from the first eligible Sunday onward
 block a new automatic round. Older frozen history does not block the schedule.
-The command processes at most one account per invocation, records its
-checkpoint in Postgres, and waits for any download it starts before exiting.
-It holds the next ordered pair of accounts until both accounts in the
+The command processes at most one ordered pair of accounts per invocation:
+within its step and runtime bounds it advances both accounts of the current
+pair, records its checkpoint in Postgres, and waits for any download it
+starts before exiting. It holds the next pair until both accounts in the
 current pair have terminal outcomes.
 Other periodic work uses single-shot tools. The plugin runs no resident
 weekly loop or idle database connection.
@@ -406,8 +396,8 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
 
 For inspection, run `hermes dyvine weekly run-once --dry-run`; use
 `--round weekly-YYYY-MM-DD --dry-run` to inspect a named round. The
-non-dry-run command advances one account, with an upper bound on files and
-runtime. A new file's delivery key includes its account, account-relative path,
+non-dry-run command advances the current account pair, with an upper bound on
+files and runtime. A new file's delivery key includes its account, account-relative path,
 and content hash. The ledger retains the uploaded `file_key`, send UUID,
 and Feishu message ID. An uncertain send or unadopted legacy chat remains
 on hold for message-level reconciliation; never replay a file merely
