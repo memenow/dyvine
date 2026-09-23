@@ -174,6 +174,86 @@ def test_historical_archive_holds_unresolved_evidence(field: str, value: int) ->
     assert _assess(script, old, archive=True).status is None
 
 
+def _user_skip(round_name: str = "weekly0913") -> dict[str, Any]:
+    report = _report(round_name, "skipped_404")
+    report["resolution"] = {"action": "skip_user_ordered"}
+    return report
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "cache_only_unverified_paths",
+        "permanent_failure_paths",
+        "permanent_unresolved_paths",
+        "ambiguous_sent_paths",
+    ],
+)
+def test_user_ordered_skip_closes_active_row_without_send_evidence(
+    field: str,
+) -> None:
+    """A skip sends nothing, so unresolved send evidence cannot hold it."""
+    script = _load_script()
+    report = _user_skip()
+    report[field] = 3
+    decision = _assess(script, report)
+    assert (decision.status, decision.action) == ("skipped", "skip_user_ordered")
+    assert not decision.receipts
+
+
+def test_user_ordered_skip_requires_a_recorded_skip_in_the_active_round() -> None:
+    script = _load_script()
+    not_skipped = _report()
+    not_skipped["resolution"] = {"action": "skip_user_ordered"}
+    assert _assess(script, not_skipped).status is None
+    assert _assess(script, _user_skip("weekly0906")).status is None
+
+
+def test_user_ordered_skip_cannot_override_the_migrated_queue_state() -> None:
+    """The report alone cannot turn a row the queue did not skip into a skip."""
+    script = _load_script()
+    report = _user_skip()
+    queue = _queue(report)
+    queue.extra["legacy_queue_status"] = "op_done"
+    decision = script._assess(
+        report,
+        queue,
+        active_round="weekly0913",
+        archive_historical=False,
+        identity_ids={"sec-one"},
+        group=_group(report),
+        files=[],
+        evidence=[],
+    )
+    assert decision.status is None
+
+
+@pytest.mark.parametrize(
+    ("status", "send_uuid"),
+    [("sent", "uuid-new"), ("sending", "uuid-new"), ("legacy_confirmed_sent", "u")],
+)
+def test_user_ordered_skip_holds_accounts_with_new_send_attempts(
+    status: str, send_uuid: str
+) -> None:
+    script = _load_script()
+    report = _user_skip()
+    attempt = _file(report)
+    attempt.status = status
+    attempt.send_uuid = send_uuid
+    decision = script._assess(
+        report,
+        _queue(report),
+        active_round="weekly0913",
+        archive_historical=False,
+        identity_ids={"sec-one"},
+        group=_group(report),
+        files=[attempt],
+        evidence=[],
+    )
+    assert decision.status is None
+    assert decision.reason == "account already has new send attempts in this round"
+
+
 def test_false_legacy_op_done_cannot_become_verified_completed() -> None:
     script = _load_script()
     report = _report()

@@ -128,6 +128,34 @@ def _receipts(
     return tuple(result)
 
 
+def _user_ordered_skip(
+    round_name: str | None,
+    active_round: str,
+    old_status: str | None,
+    files: list[DeliveryFileRow],
+) -> Decision:
+    """Close an active-round row the legacy queue skipped on the user's order."""
+    if round_name != active_round:
+        return Decision(
+            None, "held", "user-ordered skips apply only to the active round"
+        )
+    if old_status != "skipped_404":
+        return Decision(None, "held", "legacy queue did not record a user-ordered skip")
+    if any(
+        item.status not in {"legacy_confirmed_sent", "permanent_failure"}
+        or item.send_uuid is not None
+        for item in files
+    ):
+        return Decision(
+            None, "held", "account already has new send attempts in this round"
+        )
+    return Decision(
+        "skipped",
+        "skip_user_ordered",
+        "legacy queue recorded a user-ordered skip for this round",
+    )
+
+
 def _assess(
     report: dict[str, Any],
     queue: DownloadQueueRow | None,
@@ -169,6 +197,10 @@ def _assess(
         or queue.extra.get("legacy_queue_status") != old_status
     ):
         return Decision(None, "held", "frozen queue identity or old status changed")
+    resolution = report.get("resolution")
+    if isinstance(resolution, dict) and resolution.get("action") == "skip_user_ordered":
+        # A skip sends nothing, so send-evidence gaps below cannot make it unsafe.
+        return _user_ordered_skip(round_name, active_round, old_status, files)
     cache_only = _count(report, "cache_only_unverified_paths")
     if cache_only != 0:
         return Decision(None, "held", "cache-only paths have no verified send outcome")
@@ -182,7 +214,6 @@ def _assess(
             "held",
             "legacy permanent failures are terminal; exclude them before release",
         )
-    resolution = report.get("resolution")
     if resolution is None:
         if (
             archive_historical
