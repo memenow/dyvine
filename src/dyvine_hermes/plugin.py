@@ -33,6 +33,24 @@ def skill_path() -> Path:
     return Path(__file__).resolve().parent / "skills" / SKILL_NAME / "SKILL.md"
 
 
+def _setup_cli(subparser: Any) -> None:
+    """Install the bounded weekly command under ``hermes dyvine``."""
+    sections = subparser.add_subparsers(dest="dyvine_section", required=True)
+    weekly = sections.add_parser("weekly", help="Run weekly delivery steps")
+    actions = weekly.add_subparsers(dest="dyvine_weekly_action", required=True)
+    run = actions.add_parser("run-once", help="Advance one checkpointed weekly step")
+    run.add_argument("--round", dest="round_name", help="Resume an existing round")
+    run.add_argument("--dry-run", action="store_true", help="Inspect without writes")
+    run.set_defaults(func=_handle_cli)
+
+
+def _handle_cli(args: Any) -> None:
+    """Boot the runner only when the operator invokes the CLI command."""
+    from dyvine_hermes.weekly import run_cli
+
+    run_cli(round_name=args.round_name, dry_run=args.dry_run)
+
+
 #: Every tool needs the database; f2-backed tools additionally need the
 #: Douyin cookie. Declared per tool (hermes surfaces these at install).
 _DB_ENV = ["DATABASE_URL"]
@@ -72,3 +90,9 @@ def register(ctx: Any) -> None:
             requires_env=requires_env,
         )
     ctx.register_skill(SKILL_NAME, skill_path(), description=SKILL_DESCRIPTION)
+    ctx.register_cli_command(
+        name="dyvine",
+        help="Run Dyvine maintenance commands",
+        setup_fn=_setup_cli,
+        handler_fn=_handle_cli,
+    )

@@ -83,6 +83,7 @@ class QueueService:
         mode: str,
         cutoff: str | None = None,
         note: str | None = None,
+        excluded_nicknames: set[str] | None = None,
     ) -> int:
         """Enqueue every non-excluded seed into ``round_name`` once.
 
@@ -92,8 +93,17 @@ class QueueService:
         """
         await self.ensure_round(round_name, note)
         seeds = await self._seeds.list_seeds(include_excluded=False)
+        excluded = excluded_nicknames or set()
+        existing_secs = {
+            row.sec_user_id
+            for row in await self._queue.list_entries(round=round_name, limit=-1)
+        }
         created = 0
         for seed in seeds:
+            if seed.nickname and seed.nickname in excluded:
+                continue
+            if seed.sec_user_id in existing_secs:
+                continue
             key = f"{round_name}:{seed.sec_user_id}"
             try:
                 await self._queue.get_entry(key)
@@ -109,12 +119,15 @@ class QueueService:
                 status="pending",
                 cutoff=cutoff,
             )
+            existing_secs.add(seed.sec_user_id)
             created += 1
         return created
 
-    async def claim_next(self, *, round: str | None = None) -> QueueEntryRecord | None:
-        """Claim the oldest pending entry (serial-group aware)."""
-        return await self._queue.claim_next(round=round)
+    async def claim_next(
+        self, *, round: str | None = None, keys: set[str] | None = None
+    ) -> QueueEntryRecord | None:
+        """Claim the oldest pending entry in the allowed batch."""
+        return await self._queue.claim_next(round=round, keys=keys)
 
     async def report_progress(self, key: str, **fields: Any) -> QueueEntryRecord:
         """Patch a claimed entry (status/checkpoint/counters) and return it."""
@@ -161,9 +174,15 @@ class QueueService:
         return total
 
     async def release_stale(
-        self, *, stale_after_seconds: float, max_attempts: int
+        self,
+        *,
+        stale_after_seconds: float,
+        max_attempts: int,
+        round: str | None = None,
     ) -> int:
         """Requeue entries whose claimer stopped heartbeating."""
         return await self._queue.release_stale(
-            stale_after_seconds=stale_after_seconds, max_attempts=max_attempts
+            stale_after_seconds=stale_after_seconds,
+            max_attempts=max_attempts,
+            round=round,
         )

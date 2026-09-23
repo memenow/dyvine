@@ -39,6 +39,8 @@ class Engine:
     queue: Any
     profiles: Any
     send_status: Any = None
+    delivery_ledger: Any = None
+    websign_provider: Any = None
 
 
 _ENGINE: Engine | None = None
@@ -47,6 +49,44 @@ _ENGINE: Engine | None = None
 def _ensure_plugin_env() -> None:
     """Default the plugin host into debug mode (verbose logging)."""
     os.environ.setdefault("API_DEBUG", "true")
+
+
+def _install_websign(douyin_settings: Any) -> Any:
+    """Install f2 signing after its handler loads, without starting Chromium."""
+    if not douyin_settings.websign_enabled:
+        return None
+    from dyvine.services.websign import (
+        WebSignProvider,
+        install_fetch_retry,
+        install_websign_patch,
+    )
+
+    provider = WebSignProvider(
+        page_url=douyin_settings.websign_page_url,
+        user_agent=douyin_settings.user_agent,
+        init_timeout_seconds=douyin_settings.websign_init_timeout_seconds,
+        sign_timeout_seconds=douyin_settings.websign_sign_timeout_seconds,
+    )
+    try:
+        install_websign_patch(provider)
+        if douyin_settings.websign_retry_once:
+            install_fetch_retry(provider)
+    except BaseException:
+        _stop_websign(provider)
+        raise
+    return provider
+
+
+def _stop_websign(provider: Any) -> None:
+    """Restore f2 methods before releasing the signer session."""
+    if provider is None:
+        return
+    from dyvine.services.websign import uninstall_websign_patch
+
+    try:
+        uninstall_websign_patch()
+    finally:
+        provider.close()
 
 
 def get_engine() -> Engine:
@@ -62,6 +102,7 @@ def get_engine() -> Engine:
 
     from dyvine.core.background import BackgroundTaskRegistry
     from dyvine.core.settings import settings
+    from dyvine.db.delivery_ledger import PostgresDeliveryLedgerRepository
     from dyvine.db.postgres import (
         PostgresOperationRepository,
         PostgresProfileRepository,
@@ -80,19 +121,6 @@ def get_engine() -> Engine:
     from dyvine.services.users import UserService
 
     owner_id = f"hermes-{uuid.uuid4().hex[:12]}"
-    sessions = DatabaseSessionFactory(
-        settings.database.url,
-        pool_class=settings.database.pool_class,
-        pool_size=settings.database.pool_size,
-    )
-    operations = PostgresOperationRepository(sessions, owner_id=owner_id)
-    watch = PostgresWatchRepository(sessions)
-    queue_repo = PostgresQueueRepository(sessions, owner_id=owner_id)
-    send_repo = PostgresSendStatusRepository(sessions)
-    seed_repo = PostgresSeedRepository(sessions)
-    profile_repo = PostgresProfileRepository(sessions)
-    round_repo = PostgresRoundRepository(sessions)
-
     douyin_config = {
         "headers": settings.douyin.headers,
         "proxies": settings.douyin.proxies,
@@ -114,37 +142,57 @@ def get_engine() -> Engine:
         "page_counts": 100,
     }
     handler = DouyinHandler(douyin_config)
-    tasks = BackgroundTaskRegistry()
-    users = UserService(operation_store=operations, task_registry=tasks)
-    posts = PostService(
-        handler=handler, operation_store=operations, task_registry=tasks
-    )
-    livestreams = LivestreamService(
-        douyin_handler=handler,
-        user_service=users,
-        operation_store=operations,
-        task_registry=tasks,
-    )
-    queue = QueueService(queue=queue_repo, seeds=seed_repo, rounds=round_repo)
-    profiles = ProfileService(profiles=profile_repo)
+    websign_provider = _install_websign(settings.douyin)
+    try:
+        sessions = DatabaseSessionFactory(
+            settings.database.url,
+            pool_class=settings.database.pool_class,
+            pool_size=settings.database.pool_size,
+        )
+        operations = PostgresOperationRepository(sessions, owner_id=owner_id)
+        watch = PostgresWatchRepository(sessions)
+        queue_repo = PostgresQueueRepository(sessions, owner_id=owner_id)
+        send_repo = PostgresSendStatusRepository(sessions)
+        seed_repo = PostgresSeedRepository(sessions)
+        profile_repo = PostgresProfileRepository(sessions)
+        round_repo = PostgresRoundRepository(sessions)
+        delivery_ledger = PostgresDeliveryLedgerRepository(sessions)
+        tasks = BackgroundTaskRegistry()
+        users = UserService(operation_store=operations, task_registry=tasks)
+        posts = PostService(
+            handler=handler, operation_store=operations, task_registry=tasks
+        )
+        livestreams = LivestreamService(
+            douyin_handler=handler,
+            user_service=users,
+            operation_store=operations,
+            task_registry=tasks,
+        )
+        queue = QueueService(queue=queue_repo, seeds=seed_repo, rounds=round_repo)
+        profiles = ProfileService(profiles=profile_repo)
 
-    _ENGINE = Engine(
-        owner_id=owner_id,
-        sessions=sessions,
-        operations=operations,
-        watch=watch,
-        queue_repo=queue_repo,
-        send_repo=send_repo,
-        seed_repo=seed_repo,
-        profile_repo=profile_repo,
-        round_repo=round_repo,
-        users=users,
-        posts=posts,
-        livestreams=livestreams,
-        queue=queue,
-        profiles=profiles,
-        send_status=send_repo,
-    )
+        _ENGINE = Engine(
+            owner_id=owner_id,
+            sessions=sessions,
+            operations=operations,
+            watch=watch,
+            queue_repo=queue_repo,
+            send_repo=send_repo,
+            seed_repo=seed_repo,
+            profile_repo=profile_repo,
+            round_repo=round_repo,
+            users=users,
+            posts=posts,
+            livestreams=livestreams,
+            queue=queue,
+            profiles=profiles,
+            send_status=send_repo,
+            delivery_ledger=delivery_ledger,
+            websign_provider=websign_provider,
+        )
+    except BaseException:
+        _stop_websign(websign_provider)
+        raise
     return _ENGINE
 
 
@@ -154,4 +202,7 @@ async def close_engine() -> None:
     engine, _ENGINE = _ENGINE, None
     if engine is None:
         return
-    await engine.sessions.aclose()
+    try:
+        await engine.sessions.aclose()
+    finally:
+        _stop_websign(engine.websign_provider)

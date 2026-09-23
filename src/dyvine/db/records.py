@@ -180,3 +180,65 @@ class DeliveryRoundRecord:
     note: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(slots=True)
+class DeliveryGroupRecord:
+    """One group's externally visible creation and topic checkpoints."""
+
+    key: str
+    round: str
+    sec_user_id: str
+    nickname: str
+    create_name: str
+    owner_open_id: str | None
+    status: str
+    create_uuid: str | None
+    create_started_at: str | None
+    chat_id: str | None
+    topic_status: str
+    topic_uuid: str | None
+    topic_started_at: str | None
+    topic_message_id: str | None
+    avatar_url: str | None
+    avatar_key: str | None
+    legacy_source_file: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class FileDeliveryRecord:
+    """A file's stable identity and exact Feishu request checkpoint."""
+
+    media_id: str
+    round: str
+    sec_user_id: str
+    relative_path: str
+    content_sha256: str | None
+    chat_id: str | None
+    parent_id: str | None
+    status: str
+    file_key: str | None
+    send_uuid: str | None
+    send_started_at: str | None
+    message_id: str | None
+    legacy_source_path: str | None
+    legacy_progress_file: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(slots=True)
+class LegacyEvidenceRecord:
+    """Legacy send path that cannot safely become an automatic send."""
+
+    evidence_id: str
+    source_file: str
+    legacy_path: str
+    legacy_state: str
+    nickname: str | None
+    sec_user_id: str | None
+    reason: str
+    created_at: str
+    updated_at: str

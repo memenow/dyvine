@@ -108,7 +108,7 @@
         <li><a href="#quick-start">Quick Start</a></li>
         <li><a href="#configuration">Configuration</a></li>
         <li><a href="#tool-reference">Tool Reference</a></li>
-        <li><a href="#queue-delivery">Queue &amp; Delivery SOP</a></li>
+        <li><a href="#queue-delivery">Weekly Delivery &amp; Migration</a></li>
         <li><a href="#watch-mode">Watch Mode</a></li>
         <li><a href="#operations">Operations</a></li>
         <li><a href="#development">Development</a></li>
@@ -143,7 +143,7 @@
           <tr><td>Posts</td><td>Per-post detail, paginated listing, comments, stats, feeds, and bulk download (post/like/collection/music/mix/collects).</td></tr>
           <tr><td>Livestreams</td><td>Room download at the highest available quality, live IM, followed-room listing.</td></tr>
           <tr><td>Queue &amp; rounds</td><td>Seed import, idempotent enqueue, serial-group-aware claims, heartbeats, round headers.</td></tr>
-          <tr><td>Delivery</td><td>Per-account Feishu group delivery, delivery counters, hermes-native notify for other channels.</td></tr>
+          <tr><td>Delivery</td><td>Per-account Feishu group delivery, per-file send ledger, delivery counters, hermes-native notify for other channels.</td></tr>
           <tr><td>Profiles &amp; ops</td><td>Cached profile snapshots and generic operation polling.</td></tr>
           <tr><td>Watch</td><td>Subscriptions that auto-download a user's new posts and record livestreams on configurable polling cadences.</td></tr>
         </tbody>
@@ -174,6 +174,27 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
       </div>
       <p>Apply the schema once before first use (operator-side, from a repo checkout with the same <code>DATABASE_URL</code>):</p>
       <pre><code>uv run alembic upgrade head</code></pre>
+      <p>
+        On the current Hermes v0.21.1 host, the plugin doctor reported that
+        Python dependencies require manual installation. The cutover
+        installed only missing versions pinned by <code>plugin.yaml</code>
+        using <code>uv pip --no-deps</code> in the Hermes environment. The
+        published <code>f2</code> dependency metadata conflicts with Hermes's
+        core pins, so the install preserved its existing
+        <code>pydantic</code>, <code>httpx</code>, and
+        <code>websockets</code> versions. Doctor registered all 35 tools and
+        a read-only profile call passed, but neither check caught the missing
+        Playwright dependency <code>pyee==13.0.1</code> from the lockfile.
+        The engine wires its request signer on first use. The initial
+        post-list probe still returned HTTP 403 until that locked dependency
+        was installed. The signer then became ready, a signed read-only
+        post-list call returned four posts, and engine shutdown closed the
+        signer cleanly. On a target host, verify matching
+        Playwright Chromium and all locked runtime dependencies, then read
+        one authorized <code>dyvine.posts.list</code> page before enabling
+        weekly sends. A profile check and doctor alone do not establish
+        post-list readiness.
+      </p>
     </section>
 
     <section id="quick-start">
@@ -220,6 +241,7 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
           <tr><td><code>DATABASE_</code></td><td>Postgres URL, pool strategy (<code>null</code>/<code>queue</code>) and sizing, janitor cadence, operation retention.</td></tr>
           <tr><td><code>DOUYIN_</code></td><td>Cookie, headers, proxy, download root, livestream headers, local-retention mode, Argus webSign session.</td></tr>
           <tr><td><code>DOUYIN_WATCH_</code></td><td>Watch polling cadences, subscription cap, dedupe window, backfill flag.</td></tr>
+          <tr><td><code>DYVINE_WEEKLY_</code></td><td>Weekly timezone, first automatic Sunday, active cutover round, Feishu group policy, and owner open ID.</td></tr>
           <tr><td><code>R2_</code></td><td>Cloudflare R2 account, key, bucket, and endpoint.</td></tr>
           <tr><td>(none)</td><td><code>WATCH_ENABLED</code>: run watch loops in this process.</td></tr>
         </tbody>
@@ -247,7 +269,8 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>DOUYIN_WEBSIGN_SIGN_TIMEOUT_SECONDS</code>), and re-signs once with a fresh session
         when it observes an Argus block (<code>DOUYIN_WEBSIGN_RETRY_ONCE</code>), and fails fast
         (backing off) after repeated signer failures. The host must
-        provide a matching Chromium build (<code>playwright install chromium</code>); without it the
+        provide a matching Chromium build (<code>uv run playwright install chromium</code>
+        from a checkout); without it the
         builders return unsigned URLs exactly as before, so unaffected endpoints keep working while
         gated ones fail as HTTP 403. Set <code>DOUYIN_WEBSIGN_ENABLED=false</code> only as a kill-switch.
       </p>
@@ -330,7 +353,7 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
           <tr><td><code>dyvine.queue.release</code></td><td>Requeue entries whose claimer stopped heartbeating.</td></tr>
           <tr><td><code>dyvine.rounds.create</code></td><td>Create a delivery round header (idempotent).</td></tr>
           <tr><td><code>dyvine.rounds.list</code></td><td>List delivery rounds in creation order.</td></tr>
-          <tr><td><code>dyvine.delivery.send_account</code></td><td>Deliver one account's pending media files to its Feishu group.</td></tr>
+          <tr><td><code>dyvine.delivery.send_account</code></td><td>Deliver one account's pending media files with a verified group/topic and file ledger; pass <code>round</code> and <code>sec_user_id</code> when identity could be ambiguous.</td></tr>
           <tr><td><code>dyvine.delivery.status</code></td><td>Read delivery counters by nickname (or sec_user_id).</td></tr>
           <tr><td><code>dyvine.notify.send</code></td><td>Send a message via hermes-native channels (non-Feishu).</td></tr>
           <tr><td><code>dyvine.profiles.upsert</code></td><td>Insert or patch a cached profile snapshot.</td></tr>
@@ -376,25 +399,247 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
     </section>
 
     <section id="queue-delivery">
-      <h2>Queue &amp; Delivery SOP</h2>
+      <h2>Weekly Delivery &amp; Migration</h2>
       <p>
         The bundled <code>dyvine:dyvine-ops</code> skill carries the full
         batch-delivery SOP. The durable rules, condensed:
       </p>
       <ul>
         <li>Never send a bare text probe: the first message in a delivery group is always the author's profile link + nickname.</li>
-        <li>Always deliver to a NEW group with the recipient as <code>owner_id</code> (an <code>open_id</code> starting with <code>ou_</code> — never a plain <code>user_id</code>); never reuse an old group; dissolve superseded groups via <code>DELETE /im/v1/chats/{chat_id}</code>.</li>
-        <li>Paired batches: two accounts per batch; the previous batch must be fully delivered AND verified before local files are cleaned and the next batch starts.</li>
-        <li>Prefilters never retry: files over 30 MB are permanent failures (Feishu <code>234006</code>); 0-byte files are deleted locally (Feishu <code>234010</code>) and reported as incomplete posts.</li>
-        <li>Backfill dedupe: re-runs pass <code>already_sent</code> (exact paths from ALL history rounds) and <code>known_permanent</code>; a built group with zero delivered files (0/0) must be backfilled, never left.</li>
-        <li>Same-nickname accounts (distinct <code>sec_user_id</code>s) run strictly serially: download directories and progress keys are nickname-based.</li>
+        <li>Use <code>DYVINE_WEEKLY_GROUP_POLICY=reuse_existing</code> in every round. A returning account is identified by stable <code>sec_user_id</code> and reuses one Postgres-verified historical chat and topic; only a new account gets a new group with the recipient's <code>ou_</code> open ID as <code>owner_id</code>.</li>
+        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner advances one account per invocation; do not clean local files until delivery is reconciled.</li>
+        <li>The durable sender records 0-byte files and files above its 29 MiB upload cap as permanent failures. It leaves local media in place for reconciliation.</li>
+        <li>Backfill dedupe uses file-level ledger records and confirmed historical messages, not nickname counters. A <code>0/0</code> summary is not evidence that no media was missed.</li>
+        <li>Run same-nickname accounts (distinct <code>sec_user_id</code>s) serially during backfill: legacy download directories and progress keys were nickname-based.</li>
         <li>Batch URL input: regex-extract <code>v.douyin.com</code> links from pasted share texts and resolve each with <code>dyvine.users.resolve</code>.</li>
         <li>Leak scan orders each account's latest operation by <code>created_at</code>. Concentrated mass failures usually mean an expired <code>DOUYIN_COOKIE</code>; scattered <code>interrupted</code> after a refresh means Douyin-side volume throttling — converge over multiple rounds.</li>
       </ul>
+      <h3>Weekly runner</h3>
       <p>
-        Periodic work is driven by hermes cron calling single-shot tools; the plugin
-        runs no resident loops and holds no connections while idle.
+        <code>hermes dyvine weekly run-once</code> advances at most one account
+        within a bounded runtime and file count. It waits for the download
+        started by that invocation and saves its checkpoint to Postgres before
+        exiting. It does not advance to the next ordered pair of accounts
+        until both current accounts have terminal outcomes. With no
+        <code>--round</code>, it creates a
+        <code>weekly-YYYY-MM-DD</code> round at or after Sunday 08:00 in
+        <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>, using the previous
+        Sunday 08:00 as the incremental cutoff. The required
+        <code>DYVINE_WEEKLY_FIRST_AUTO_DATE</code> is the first eligible
+        Sunday (<code>YYYY-MM-DD</code>); earlier automatic rounds are not
+        opened. The required
+        <code>DYVINE_WEEKLY_CUTOVER_ROUND</code> names the active legacy round.
+        It and unfinished automatic rounds dated from the first eligible
+        Sunday onward block a new automatic round. Older frozen rounds
+        remain available for reconciliation without
+        blocking the schedule. <code>--round</code> selects an existing
+        round without the schedule guard; <code>--dry-run</code> inspects the
+        next candidate without queue or delivery writes.
       </p>
+      <pre><code>hermes dyvine weekly run-once --dry-run
+hermes dyvine weekly run-once --round weekly-YYYY-MM-DD --dry-run
+hermes dyvine weekly run-once --round weekly-YYYY-MM-DD</code></pre>
+      <p>
+        Configure <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>,
+        <code>DYVINE_WEEKLY_FIRST_AUTO_DATE</code> (the first intended
+        automatic Sunday),
+        <code>DYVINE_WEEKLY_CUTOVER_ROUND</code> (the active legacy round),
+        <code>DYVINE_WEEKLY_GROUP_POLICY=reuse_existing</code>,
+        and
+        <code>DYVINE_WEEKLY_OWNER_OPEN_ID</code> (a recipient
+        <code>ou_</code> ID) in the Hermes runtime environment. The runner
+        uses <code>2026-09-27</code> and a privately configured active
+        legacy round for this cutover; these are deployment values, not
+        project defaults. It
+        also reads <code>DATABASE_URL</code>, <code>DOUYIN_COOKIE</code>,
+        <code>FEISHU_APP_ID</code>, <code>FEISHU_APP_SECRET</code>, and
+        <code>DOUYIN_DOWNLOAD_ROOT</code>. The plugin declares Playwright as
+        a dependency; install its matching Chromium browser on the host.
+        The CLI rejects an unset or unknown group policy. In the frozen
+        cutover inventory, 1,619 of 1,631 accounts present in multiple
+        rounds reused one chat. Returning accounts with missing or conflicting chat or
+        topic evidence remain on hold for manual reconciliation.
+      </p>
+      <h3>Legacy disk-state migration</h3>
+      <ol>
+        <li>Pause the old weekly cron and its auto-restart path at an account boundary. Record the queue, weekly progress files, local media, group IDs, and Feishu messages from the same frozen point.</li>
+        <li>Keep the original download directory mounted at the same path. Apply <code>uv run alembic upgrade head</code> against the intended RDS database.</li>
+        <li>Read the migration dry-run counts and issues before importing the frozen files. The database URL comes from <code>DATABASE_URL</code>, not a command argument.</li>
+        <li>Stage the legacy per-file send progress and write a private reconciliation report. Review it, then import the frozen source without <code>--dry-run</code>. Exit code 1 means historical paths need review; exit code 2 means a source or configuration error. This importer records path evidence; it does not adopt groups.</li>
+        <li>Preview legacy group adoption for the active round and review each live Feishu chat/topic result. Apply only the verified results, then audit the full chat and topic-thread history, including zero-file groups.</li>
+        <li>Reconcile imported weekly entries against file-level media and Feishu message IDs. Entries found only in weekly progress files stay <code>needs_reconciliation</code> and cannot be claimed until verified. Preserve the legacy files and media through acceptance.</li>
+      </ol>
+      <pre><code>PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
+  --state-dir &lt;legacy-state-dir&gt; --seed-path &lt;legacy-seed-users.json&gt; \
+  --weekly-glob '&lt;legacy-weekly-progress-glob&gt;' \
+  --users-db &lt;legacy-douyin-users.db&gt; --dry-run
+
+PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
+  --state-dir &lt;legacy-state-dir&gt; --seed-path &lt;legacy-seed-users.json&gt; \
+  --weekly-glob '&lt;legacy-weekly-progress-glob&gt;' \
+  --users-db &lt;legacy-douyin-users.db&gt;</code></pre>
+      <pre><code>PYTHONPATH=src uv run python scripts/import_legacy_send_progress.py \
+  --state-dir &lt;legacy-state-dir&gt; --seed-path &lt;legacy-seed-users.json&gt; \
+  --progress-glob '&lt;legacy-state-dir&gt;/send_progress_weekly*.json' \
+  --download-root &lt;legacy-download-root&gt; \
+  --work-db &lt;private-staging.sqlite3&gt; \
+  --reconcile-output &lt;private-reconciliation.jsonl&gt; --dry-run</code></pre>
+      <p>
+        The importer inserts by natural key without replacing existing rows,
+        so reruns can validate the same frozen source. The progress import's
+        dry run writes a local staging database and JSONL but does not write
+        RDS. If the frozen source includes <code>permanent_failures.json</code>
+        or <code>report_sent_index.json</code>, add
+        <code>--permanent-failures PATH</code> or <code>--sent-index PATH</code>
+        to both the dry run and write run. Start a new <code>--work-db</code>
+        before adding either source to a previous staging run. Unambiguous,
+        conflict-free permanent failures enter the ledger to prevent a
+        repeat attempt; cache-only sent-index paths remain unverified audit
+        evidence and do not count as delivered. Only sent paths with a unique
+        nickname-to-account mapping and no collision become
+        <code>legacy_confirmed_sent</code>; failed and
+        ambiguous paths remain audit evidence, and queue entries stay
+        blocked. A migration report or nickname-level send counter does not
+        prove individual delivery. New file ledger records key a media item
+        by account, account-relative path, and
+        content hash; it retains the upload <code>file_key</code>, send UUID,
+        and Feishu message ID. A file reply goes into the verified topic
+        thread. Unknown group, topic, or file-send outcomes remain on hold
+        after their safe UUID retry windows for message-level reconciliation;
+        do not replay solely because a summary count is missing. Confirmed
+        historical files suppress automatic resend. Only confirmed unsent
+        files are candidates for backfill.
+      </p>
+      <p>
+        Run <code>adopt_legacy_groups.py</code> first as a read-only preview
+        for the active round. It checks chats and topics against live Feishu
+        and writes a private report. After reviewing every result, rerun with
+        <code>--resume --apply</code>; apply rechecks Feishu before
+        idempotently inserting verified group and topic records in Postgres.
+        The command never creates a Feishu group, topic, or message. Keep
+        <code>DATABASE_URL</code> and
+        <code>DYVINE_WEEKLY_OWNER_OPEN_ID</code> in the environment rather
+        than command arguments.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
+  --queue-path &lt;legacy-state-dir&gt;/download_queue.json \
+  --work-db &lt;private-staging.sqlite3&gt; --round &lt;active-round&gt; \
+  --output &lt;private-group-review.jsonl&gt;
+
+PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
+  --queue-path &lt;legacy-state-dir&gt;/download_queue.json \
+  --work-db &lt;private-staging.sqlite3&gt; --round &lt;active-round&gt; \
+  --output &lt;private-group-review.jsonl&gt; --resume --apply</code></pre>
+      <p>
+        For absent legacy topic keys, explicitly add
+        <code>--discover-missing-topics</code> with <code>--round</code> and
+        use a separate journal. The read-only preview scans complete chat
+        history for exactly one app-authored profile root. The resumed apply
+        rechecks that history before adopting the discovered topic.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
+  --queue-path &lt;legacy-state-dir&gt;/download_queue.json \
+  --work-db &lt;private-staging.sqlite3&gt; --round &lt;active-round&gt; \
+  --discover-missing-topics --output &lt;private-discovery-review.jsonl&gt;
+
+PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
+  --queue-path &lt;legacy-state-dir&gt;/download_queue.json \
+  --work-db &lt;private-staging.sqlite3&gt; --round &lt;active-round&gt; \
+  --discover-missing-topics --output &lt;private-discovery-review.jsonl&gt; \
+  --resume --apply</code></pre>
+      <p>
+        Next, <code>audit_feishu_delivery.py</code> reads the active round's
+        full chat and topic-thread history, including groups with zero file
+        messages. It reads Postgres and Feishu, writes a private
+        <code>0600</code> JSONL, and sends no messages or database writes.
+        Use <code>--resume</code> after an interruption.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/audit_feishu_delivery.py \
+  --legacy-report &lt;private-reconciliation.jsonl&gt; --round &lt;active-round&gt; \
+  --output &lt;private-feishu-audit.jsonl&gt;</code></pre>
+      <p>
+        A supplemental audit can select exact queue keys with
+        <code>--keys-file</code> and <code>--round</code>. Use a separate output
+        journal and an operator-owned regular <code>0600</code> UTF-8 file
+        containing one complete round-prefixed key per line. Every key must
+        occur in the selected round's evidence. The supplemental audit does
+        not modify the original full-round journal or write to Postgres.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/audit_feishu_delivery.py \
+  --legacy-report &lt;private-reconciliation.jsonl&gt; --round &lt;active-round&gt; \
+  --keys-file &lt;private-queue-keys.txt&gt; \
+  --output &lt;private-supplemental-audit.jsonl&gt;</code></pre>
+      <p>
+        Frozen legacy records have no reliable topic linkage or per-file
+        Feishu receipt IDs, and source media may no longer be on disk. A
+        one-time group-level attestation compares the complete app-sent
+        Feishu file-name multiset and count with all imported historical
+        paths for one stable account. <code>propose_group_attested.py</code>
+        adds <code>release_pending_group_attested</code> only for fully
+        matching groups; all other rows stay on hold. The proposal writes a
+        new private JSONL without changing Postgres.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_group_attested.py \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --feishu-audit &lt;private-feishu-audit.jsonl&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-group-attested-proposal.jsonl&gt;</code></pre>
+      <p>
+        Preview the proposal with <code>apply_queue_reconciliation.py</code>,
+        the unchanged source report, the complete Feishu audit, and the
+        same staging database. Review held reasons, <code>plan_sha256</code>,
+        and <code>expected_count</code>. Apply with those exact preview
+        values only; this releases eligible pending queue entries without
+        inventing per-file receipts or sending Feishu messages.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
+  --report &lt;private-group-attested-proposal.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --audit-source-report &lt;private-reconciliation.jsonl&gt; \
+  --feishu-audit &lt;private-feishu-audit.jsonl&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --output &lt;private-reconciliation-preview.json&gt;
+
+PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
+  --report &lt;private-group-attested-proposal.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --audit-source-report &lt;private-reconciliation.jsonl&gt; \
+  --feishu-audit &lt;private-feishu-audit.jsonl&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --output &lt;private-reconciliation-apply.json&gt; \
+  --apply --expect-plan-sha256 &lt;preview-plan-sha256&gt; \
+  --expected-count &lt;preview-expected-count&gt;</code></pre>
+      <p>
+        <code>dyvine.delivery.send_account</code> uses the same ledger. Supply
+        <code>round</code> and <code>sec_user_id</code> to identify an account
+        directly. If they are omitted, the tool requires a unique matching
+        queue entry; an unverified legacy chat/topic or legacy skip-path list
+        causes a closed failure until reconciled.
+      </p>
+      <h3>Cron cutover</h3>
+      <p>
+        Install <code>scripts/dyvine_weekly_run_once.sh</code> as
+        <code>~/.hermes/scripts/dyvine-weekly.sh</code> for the Hermes user
+        (on the current root-run host, <code>/root/.hermes/scripts/</code>).
+        Create a single Hermes no-agent cron that ticks every 10 minutes; the
+        runner, not the cron timezone, enforces the original Sunday 08:00
+        business time. Keep both old and new cron jobs paused until group
+        adoption, the complete Feishu audit, and the exact-digest queue
+        reconciliation plan have been reviewed, one read-only post-list
+        page succeeds, and
+        <code>DYVINE_WEEKLY_GROUP_POLICY=reuse_existing</code> is configured.
+        Then resume only the new job and retire the old
+        <code>0 8 * * 0</code> sender. The wrapper keeps
+        routine cron output off the delivery channel.
+      </p>
+      <pre><code>install -D -m 700 scripts/dyvine_weekly_run_once.sh \
+  "$HOME/.hermes/scripts/dyvine-weekly.sh"
+hermes cron create '*/10 * * * *' --no-agent --script dyvine-weekly.sh \
+  --deliver local --name dyvine-weekly --paused \
+  --paused-reason 'cutover verification'
+
+hermes cron resume &lt;new-job-id&gt;</code></pre>
     </section>
 
     <section id="watch-mode">
@@ -447,7 +692,7 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       <h3>Persistent State Store</h3>
       <p>
         <code>src/dyvine/db/postgres.py</code> persists operations, queue entries,
-        seeds, send status, profiles, rounds, and watch subscriptions in Postgres
+        seeds, send status, delivery ledger records, profiles, rounds, and watch subscriptions in Postgres
         (SQLAlchemy 2.0 async over asyncpg), connecting to <code>DATABASE_URL</code>.
         The schema is versioned by Alembic: run <code>uv run alembic upgrade head</code>
         before tools run against a new revision.

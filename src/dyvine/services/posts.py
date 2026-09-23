@@ -929,6 +929,63 @@ class PostService:
             error_details=None,
         )
 
+    async def download_bulk_inline(
+        self,
+        sec_user_id: str,
+        *,
+        operation_id: str,
+        max_cursor: int = 0,
+        mode: str = "post",
+    ) -> BulkDownloadResponse:
+        """Await a full bulk download against a caller-persisted operation.
+
+        The weekly runner persists ``operation_id`` on its queue row before
+        calling this method, so a process exit never loses the operation
+        reference. No background task is created. ``max_cursor`` may be a
+        cursor recorded after a fully processed earlier page.
+        """
+        if mode not in BULK_FETCHERS:
+            raise PostServiceError(f"Unknown bulk download mode: {mode}")
+        operation = await self.operation_store.get_operation(operation_id)
+        expected_type = (
+            "user_posts_bulk_download"
+            if mode == "post"
+            else f"user_{mode}_bulk_download"
+        )
+        if (
+            operation.operation_type != expected_type
+            or operation.subject_id != sec_user_id
+            or operation.status != "pending"
+        ):
+            raise PostServiceError(
+                "Bulk operation does not match the requested download"
+            )
+        try:
+            profile = await self.handler.fetch_user_profile(sec_user_id)
+            if not profile or not getattr(profile, "nickname", None):
+                raise UserNotFoundError(f"User not found: {sec_user_id}")
+            await self._run_bulk_download(
+                operation_id, sec_user_id, max_cursor, mode=mode, profile=profile
+            )
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await self.operation_store.update_operation(
+                    operation_id,
+                    status="failed",
+                    message="Inline bulk download cancelled",
+                    error="cancelled",
+                )
+            raise
+        except Exception:
+            await self.operation_store.update_operation(
+                operation_id,
+                status="failed",
+                message="Inline bulk download failed",
+                error="download failed",
+            )
+            raise
+        return await self.get_bulk_download_status(operation_id)
+
     async def _run_bulk_download(
         self,
         operation_id: str,
@@ -960,6 +1017,8 @@ class PostService:
         batch_errored = False
         batch_error_message: str | None = None
         failed_count = 0
+        resume_cursor: int | None = max_cursor
+        cursor_stalled = False
 
         aweme_count = getattr(profile, "aweme_count", 0)
         total_posts = aweme_count if isinstance(aweme_count, int) else 0
@@ -1048,6 +1107,8 @@ class PostService:
                         sec_user_id, current_cursor, mode
                     )
                     if not posts:
+                        resume_cursor = None
+                        cursor_stalled = total_posts > sum(download_stats.values())
                         break
 
                     # Defensive break matching the ``iterated`` sentinel PR #37
@@ -1058,6 +1119,8 @@ class PostService:
                     # ``aweme_list`` as end-of-feed.
                     aweme_list = posts.get("aweme_list") or []
                     if not aweme_list:
+                        resume_cursor = None
+                        cursor_stalled = bool(posts.get("has_more"))
                         logger.info(
                             "Upstream returned empty batch; ending pagination",
                             extra={
@@ -1072,6 +1135,16 @@ class PostService:
                     )
                     failed_count += batch_failures
                     total_downloaded = sum(download_stats.values())
+                    has_more = posts.get("has_more", False)
+                    next_cursor = posts.get("max_cursor", 0)
+                    cursor_stalled = bool(
+                        has_more and (not next_cursor or next_cursor == current_cursor)
+                    )
+                    resume_cursor = (
+                        next_cursor
+                        if has_more and next_cursor and next_cursor != current_cursor
+                        else None
+                    )
 
                     progress: float | None
                     if total_posts > 0:
@@ -1089,6 +1162,8 @@ class PostService:
                             "download_path": download_path,
                             "total_posts": total_posts,
                             "failed_count": failed_count,
+                            "resume_cursor": resume_cursor,
+                            "cursor_stalled": cursor_stalled,
                         },
                     }
                     if progress is not None:
@@ -1098,9 +1173,6 @@ class PostService:
                     )
 
                     # Handle pagination
-                    has_more = posts.get("has_more", False)
-                    next_cursor = posts.get("max_cursor", 0)
-
                     if not has_more or not next_cursor:
                         break
 
@@ -1157,6 +1229,8 @@ class PostService:
                     "download_path": download_path,
                     "total_posts": total_posts,
                     "failed_count": failed_count,
+                    "resume_cursor": resume_cursor,
+                    "cursor_stalled": cursor_stalled,
                 },
             )
             return
@@ -1180,6 +1254,8 @@ class PostService:
                     "download_path": download_path,
                     "total_posts": total_posts,
                     "failed_count": failed_count,
+                    "resume_cursor": resume_cursor,
+                    "cursor_stalled": cursor_stalled,
                 },
             )
             return
@@ -1241,6 +1317,8 @@ class PostService:
                 "download_path": download_path,
                 "total_posts": total_posts,
                 "failed_count": failed_count,
+                "resume_cursor": resume_cursor,
+                "cursor_stalled": cursor_stalled,
             },
         )
 
@@ -1306,6 +1384,7 @@ class PostService:
         since_aweme_id: str | None = None,
         known_aweme_ids: set[str] | None = None,
         subscription_id: str | None = None,
+        operation_id: str | None = None,
     ) -> IncrementalDownloadResult:
         """Download only the posts newer than the caller's checkpoint.
 
@@ -1330,6 +1409,8 @@ class PostService:
                 authoritative dedupe set (membership, not ordering).
             subscription_id: Optional watch subscription id stamped into the
                 operation metadata for correlation.
+            operation_id: Optional pending operation already persisted by a
+                caller that also records the ID on its own queue row.
 
         Returns:
             IncrementalDownloadResult: counts plus the newly downloaded
@@ -1341,23 +1422,66 @@ class PostService:
         """
         known = set(known_aweme_ids or set())
 
+        operation = None
+        if operation_id is not None:
+            operation = await self.operation_store.get_operation(operation_id)
+            if (
+                operation.operation_type != "user_posts_incremental_download"
+                or operation.subject_id != sec_user_id
+                or operation.status != "pending"
+            ):
+                raise PostServiceError(
+                    "Incremental operation does not match the requested download"
+                )
+
         try:
             profile = await self.handler.fetch_user_profile(sec_user_id)
         except UserNotFoundError:
+            if operation is not None:
+                await self.operation_store.update_operation(
+                    operation.operation_id,
+                    status="failed",
+                    message="Incremental download profile unavailable",
+                    error="user not found",
+                )
             raise
         except Exception as e:
+            if operation is not None:
+                await self.operation_store.update_operation(
+                    operation.operation_id,
+                    status="failed",
+                    message="Incremental download profile lookup failed",
+                    error="profile lookup failed",
+                )
             raise PostServiceError(f"Failed to validate user profile: {str(e)}") from e
         if not profile or not getattr(profile, "nickname", None):
+            if operation is not None:
+                await self.operation_store.update_operation(
+                    operation.operation_id,
+                    status="failed",
+                    message="Incremental download profile unavailable",
+                    error="user not found",
+                )
             raise UserNotFoundError(f"User not found: {sec_user_id}")
 
-        operation = await self.operation_store.create_operation(
-            operation_type="user_posts_incremental_download",
-            subject_id=sec_user_id,
-            status="running",
-            message="Incremental download in progress",
-            progress=0.0,
-            metadata={"subscription_id": subscription_id} if subscription_id else {},
-        )
+        if operation is None:
+            operation = await self.operation_store.create_operation(
+                operation_type="user_posts_incremental_download",
+                subject_id=sec_user_id,
+                status="running",
+                message="Incremental download in progress",
+                progress=0.0,
+                metadata=(
+                    {"subscription_id": subscription_id} if subscription_id else {}
+                ),
+            )
+        else:
+            operation = await self.operation_store.update_operation(
+                operation.operation_id,
+                status="running",
+                message="Incremental download in progress",
+                progress=0.0,
+            )
         operation_id = operation.operation_id
 
         try:
@@ -1430,6 +1554,7 @@ class PostService:
             download_path=download_path,
             metadata={
                 "subscription_id": subscription_id,
+                "since_aweme_id": since_aweme_id,
                 "new_count": new_count,
                 "failed_count": failed_count,
                 "truncated": truncated,

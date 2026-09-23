@@ -58,6 +58,38 @@ async def test_enqueue_round_is_idempotent() -> None:
     assert (await svc.get_entry("r1:s1")).status == "op_done"
 
 
+async def test_enqueue_round_keeps_legacy_nickname_exclusions() -> None:
+    """A newly seeded account with a historically excluded name stays out."""
+    svc, queue, _, _ = _service()
+    await svc.import_seeds(
+        [
+            {"sec_user_id": "s1", "nickname": "Excluded"},
+            {"sec_user_id": "s2", "nickname": "Included"},
+        ]
+    )
+    created = await svc.enqueue_round(
+        "r1", mode="incremental", excluded_nicknames={"Excluded"}
+    )
+    assert created == 1
+    assert [row.sec_user_id for row in await queue.list_entries(round="r1")] == ["s2"]
+
+
+async def test_enqueue_round_does_not_duplicate_legacy_key_for_same_account() -> None:
+    """A noncanonical historical key still owns its round/account slot."""
+    svc, queue, _, _ = _service()
+    await svc.import_seeds([{"sec_user_id": "s1", "nickname": "Account"}])
+    await queue.upsert_entry(
+        key="legacy-key",
+        round="r1",
+        nickname="Account",
+        sec_user_id="s1",
+        mode="incremental",
+        status="needs_reconciliation",
+    )
+    assert await svc.enqueue_round("r1", mode="incremental") == 0
+    assert [row.key for row in await queue.list_entries(round="r1")] == ["legacy-key"]
+
+
 async def test_claim_and_status_tally() -> None:
     """Claims pop oldest-first; tallies group the open status set."""
     svc, _, _, _ = _service()

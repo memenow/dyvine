@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fake_repos import FakeOperationRepository
 
-from dyvine.core.exceptions import OperationNotFoundError, UserNotFoundError
+from dyvine.core.exceptions import (
+    OperationNotFoundError,
+    ServiceError,
+    UserNotFoundError,
+)
 from dyvine.services import posts as posts_module
 from dyvine.services.posts import PostService
 
@@ -137,6 +141,45 @@ async def test_download_new_posts_marks_operation_failed_on_cancel(
 
     assert captured.get("status") == "failed"
     assert "cancelled" in str(captured.get("message", "")).lower()
+
+
+async def test_download_new_posts_uses_caller_persisted_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _make_service()
+    service.handler.fetch_user_profile = AsyncMock(
+        return_value=MagicMock(nickname="someone")
+    )
+    service.handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/u"))
+    monkeypatch.setattr(posts_module, "AsyncUserDB", _FakeUserDB)
+    monkeypatch.setattr(
+        posts_module, "relative_to_download_root", lambda _path: "users/user01"
+    )
+    service._collect_new_posts = AsyncMock(return_value=(["post-1"], 0, False))  # type: ignore[method-assign]
+    saved = await service.operation_store.create_operation(
+        operation_type="user_posts_incremental_download",
+        subject_id="user01",
+        status="pending",
+        message="scheduled",
+    )
+    result = await service.download_new_posts("user01", operation_id=saved.operation_id)
+    assert result.operation_id == saved.operation_id
+    assert (await service.operation_store.get_operation(saved.operation_id)).status == (
+        "completed"
+    )
+
+
+async def test_download_new_posts_rejects_wrong_persisted_operation() -> None:
+    service = _make_service()
+    saved = await service.operation_store.create_operation(
+        operation_type="user_posts_incremental_download",
+        subject_id="someone-else",
+        status="pending",
+        message="scheduled",
+    )
+    with pytest.raises(ServiceError, match="does not match"):
+        await service.download_new_posts("user01", operation_id=saved.operation_id)
+    service.handler.fetch_user_profile.assert_not_called()
 
 
 async def test_collect_new_posts_warns_on_max_page_fallback(

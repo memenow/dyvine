@@ -1,25 +1,9 @@
-"""Delivery channels: Feishu groups first, hermes-native for the rest.
+"""Feishu transport and ledger-backed delivery, plus Hermes notifications.
 
-:class:`FeishuGroupChannel` ports the proven
-``send_per_account_polling.py`` rules (August 2026 production) into an
-async, transport-injectable service:
-
-- group description (author/homepage/cutoff) set BEFORE any file (SOP)
-- media scan limited to ``MEDIA_EXTS``; 0-byte files deleted (Feishu
-  error 234010); files over ``MAX_UPLOAD`` skipped (error 234006)
-- over-long upload names truncated to ``stem[:40] + ext`` (Feishu 40009)
-- tenant token refreshed once on ``99991663`` / invalid-token errors
-- topic post message created (or a caller-supplied starter reused) and
-  every file sent as a threaded reply with ``RATE_SECONDS`` pacing
-- failures mentioning 234006/234010 join the permanent-failure set
-
-Credentials come from the hermes default (``~/.hermes/.env``, the same
-file ``run_batch_wrapper.py`` reads), falling back to process
-environment. They never touch the repository, Postgres, or logs.
-
-:func:`send_via_hermes` covers every other channel by shelling out to
-``hermes send`` (exit 0 ok, 1 delivery error, 2 usage error), so this
-package never grows a second channel implementation.
+Credentials come from the Hermes environment and never enter Postgres
+or logs. Durable group, topic, and file effects live in
+``delivery_durable``; this module exposes the transport and channel
+interface. ``send_via_hermes`` uses the gateway's other channels.
 """
 
 from __future__ import annotations
@@ -35,17 +19,13 @@ import httpx
 
 from ..core.exceptions import DeliveryError
 from ..core.logging import ContextLogger
+from ..db.protocols import DeliveryLedgerRepository
+from ..db.records import DeliveryGroupRecord, FileDeliveryRecord
 
 logger = ContextLogger(__name__)
 
-#: Feishu upload cap is 30MB; pre-skip at 29MB like the sender script.
-MAX_UPLOAD_BYTES = 29 * 1024 * 1024
-
 #: Extensions the sender ever ships.
 MEDIA_EXTS = frozenset({".mp4", ".webp", ".jpg", ".jpeg", ".png"})
-
-#: Pacing between file sends (anti-throttle, matches the sender).
-RATE_SECONDS = 1.0
 
 #: Upload names longer than this are truncated to stem[:40] + ext.
 LONG_NAME_CHARS = 50
@@ -53,10 +33,10 @@ TRUNCATED_STEM_CHARS = 40
 
 #: Token endpoint + IM base (Feishu open platform).
 _TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-_IM_FILES_URL = "https://open.feishu.cn/open-apis/im/v1/files"
 _IM_MESSAGES_URL = (
     "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
 )
+_IM_REPLY_URL = "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply"
 
 #: Hermes default env file carrying FEISHU_APP_ID / FEISHU_APP_SECRET.
 _HERMES_ENV_PATH = Path.home() / ".hermes" / ".env"
@@ -84,6 +64,7 @@ class FeishuTransport(Protocol):
         file_name: str,
         file_path: Path,
         fields: dict[str, str] | None = None,
+        file_field: str = "file",
         timeout: float = 300.0,
     ) -> dict[str, Any]:
         """POST a multipart file upload and return the decoded response."""
@@ -155,12 +136,13 @@ class HttpxFeishuTransport:
         file_name: str,
         file_path: Path,
         fields: dict[str, str] | None = None,
+        file_field: str = "file",
         timeout: float = 300.0,
     ) -> dict[str, Any]:
         """POST a multipart file upload and return the decoded response."""
         with file_path.open("rb") as handle:
             content = handle.read()
-        files = {"file": (file_name, content, "application/octet-stream")}
+        files = {file_field: (file_name, content, "application/octet-stream")}
         return await self._request(
             "POST",
             url,
@@ -308,6 +290,77 @@ class FeishuGroupChannel:
         self._transport = transport or HttpxFeishuTransport()
         self._token: str | None = None
 
+    async def ensure_group(
+        self,
+        *,
+        ledger: DeliveryLedgerRepository,
+        round: str,
+        sec_user_id: str,
+        nickname: str,
+        owner_open_id: str,
+        avatar_url: str | None = None,
+    ) -> DeliveryGroupRecord:
+        """Create or reuse a checkpointed group for one round/account."""
+        from .delivery_durable import ensure_group
+
+        return await ensure_group(
+            self,
+            ledger=ledger,
+            round=round,
+            sec_user_id=sec_user_id,
+            nickname=nickname,
+            owner_open_id=owner_open_id,
+            avatar_url=avatar_url,
+        )
+
+    async def ensure_topic(
+        self,
+        *,
+        ledger: DeliveryLedgerRepository,
+        round: str,
+        sec_user_id: str,
+        chat_id: str,
+        nickname: str,
+        homepage: str,
+    ) -> DeliveryGroupRecord:
+        """Create or reuse the checkpointed profile topic."""
+        from .delivery_durable import ensure_topic
+
+        return await ensure_topic(
+            self,
+            ledger=ledger,
+            round=round,
+            sec_user_id=sec_user_id,
+            chat_id=chat_id,
+            nickname=nickname,
+            homepage=homepage,
+        )
+
+    async def deliver_file(
+        self,
+        *,
+        ledger: DeliveryLedgerRepository,
+        round: str,
+        sec_user_id: str,
+        user_dir: Path,
+        file_path: Path,
+        chat_id: str,
+        parent_id: str,
+    ) -> FileDeliveryRecord:
+        """Deliver a media file with durable pre-send intent."""
+        from .delivery_durable import deliver_file
+
+        return await deliver_file(
+            self,
+            ledger=ledger,
+            round=round,
+            sec_user_id=sec_user_id,
+            user_dir=user_dir,
+            file_path=file_path,
+            chat_id=chat_id,
+            parent_id=parent_id,
+        )
+
     async def _auth_token(self) -> str:
         if self._token is None:
             data = await self._transport.post_json(
@@ -370,27 +423,6 @@ class FeishuGroupChannel:
                 extra={"chat_id": chat_id, "error": str(error)},
             )
 
-    async def create_topic(self, *, chat_id: str, nickname: str, homepage: str) -> str:
-        """Post the topic starter message; return its message id."""
-        content = {
-            "zh_cn": {
-                "title": f"👤 {nickname}",
-                "content": [
-                    [
-                        {"tag": "text", "text": "抖音主页：", "style": ["bold"]},
-                        {"tag": "a", "text": nickname, "href": homepage},
-                    ]
-                ],
-            }
-        }
-        data, error = await self._send_message(chat_id, "post", content, parent_id=None)
-        if error is not None:
-            raise DeliveryError(f"Feishu topic failed: {error}", reason="retryable")
-        message_id = (data or {}).get("message_id", "")
-        if not message_id or not isinstance(message_id, str):
-            raise DeliveryError("Feishu topic returned no id", reason="retryable")
-        return message_id
-
     async def _send_message(
         self,
         chat_id: str,
@@ -398,31 +430,36 @@ class FeishuGroupChannel:
         content: dict[str, Any],
         *,
         parent_id: str | None,
+        request_uuid: str,
     ) -> tuple[dict[str, Any] | None, Any]:
         """Send one message; refresh the token once on auth errors."""
         import json as _json
 
         payload: dict[str, Any] = {
-            "receive_id": chat_id,
             "msg_type": msg_type,
             "content": _json.dumps(content, ensure_ascii=False),
         }
         if parent_id:
-            payload["parent_id"] = parent_id
+            url = _IM_REPLY_URL.format(message_id=parent_id)
+            payload["reply_in_thread"] = True
+        else:
+            url = _IM_MESSAGES_URL
+            payload["receive_id"] = chat_id
+        payload["uuid"] = request_uuid
         token = await self._auth_token()
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
         data = await self._transport.post_json(
-            _IM_MESSAGES_URL, headers=headers, payload=payload, timeout=120.0
+            url, headers=headers, payload=payload, timeout=120.0
         )
         if data.get("code") != 0:
             if self._is_token_error(data):
                 token = await self._refresh_token()
                 headers["Authorization"] = f"Bearer {token}"
                 data = await self._transport.post_json(
-                    _IM_MESSAGES_URL,
+                    url,
                     headers=headers,
                     payload=payload,
                     timeout=120.0,
@@ -430,97 +467,6 @@ class FeishuGroupChannel:
             if data.get("code") != 0:
                 return None, data
         return data.get("data") or {}, None
-
-    async def send_file(
-        self, *, file_path: Path, chat_id: str, parent_id: str | None
-    ) -> tuple[bool, Any]:
-        """Upload one file and send it as a (threaded) message."""
-        token = await self._auth_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        data = await self._transport.post_file(
-            _IM_FILES_URL,
-            headers=headers,
-            file_name=upload_file_name(file_path),
-            file_path=file_path,
-            fields={"file_type": "stream", "file_name": upload_file_name(file_path)},
-        )
-        if data.get("code") != 0:
-            if self._is_token_error(data):
-                token = await self._refresh_token()
-                headers = {"Authorization": f"Bearer {token}"}
-                data = await self._transport.post_file(
-                    _IM_FILES_URL,
-                    headers=headers,
-                    file_name=upload_file_name(file_path),
-                    file_path=file_path,
-                    fields={
-                        "file_type": "stream",
-                        "file_name": upload_file_name(file_path),
-                    },
-                )
-            if data.get("code") != 0:
-                return False, data
-        file_key = (data.get("data") or {}).get("file_key") or ""
-        if not file_key:
-            return False, {"code": -1, "msg": "missing file_key"}
-        _, error = await self._send_message(
-            chat_id, "file", {"file_key": file_key}, parent_id=parent_id
-        )
-        if error is not None:
-            return False, error
-        return True, None
-
-    def plan_files(
-        self,
-        *,
-        user_dir: Path,
-        cutoff: datetime | None = None,
-        already_sent: set[str] | None = None,
-        already_failed: set[str] | None = None,
-        known_permanent: set[str] | None = None,
-    ) -> tuple[list[Path], list[str], int, int]:
-        """Filter scanned media into (to_send, new_permanent, skipped, zero).
-
-        0-byte files are deleted on sight (Feishu 234010); oversize
-        files join the permanent set without being touched. Files at
-        or before ``cutoff`` (or with unparseable dates) are skipped
-        for incremental runs. Returns the send list plus the new
-        permanent paths, the skipped-old count, and the zero-deleted
-        count.
-        """
-        sent = already_sent or set()
-        failed = already_failed or set()
-        permanent = set(known_permanent or set())
-        to_send: list[Path] = []
-        new_permanent: list[str] = []
-        skipped_old = 0
-        zero_deleted = 0
-        for path in scan_media_files(user_dir):
-            text = str(path)
-            if text in sent or text in failed or text in permanent:
-                continue
-            try:
-                size = path.stat().st_size
-            except OSError:
-                continue
-            if size == 0:
-                try:
-                    path.unlink()
-                    zero_deleted += 1
-                except OSError:
-                    pass
-                new_permanent.append(text)
-                continue
-            if size > MAX_UPLOAD_BYTES:
-                new_permanent.append(text)
-                continue
-            if cutoff is not None:
-                posted = post_datetime_from_path(path, user_dir)
-                if posted is None or posted <= cutoff:
-                    skipped_old += 1
-                    continue
-            to_send.append(path)
-        return to_send, new_permanent, skipped_old, zero_deleted
 
     async def send_account(
         self,
@@ -534,55 +480,35 @@ class FeishuGroupChannel:
         already_sent: set[str] | None = None,
         already_failed: set[str] | None = None,
         known_permanent: set[str] | None = None,
+        ledger: DeliveryLedgerRepository | None = None,
+        round: str | None = None,
+        sec_user_id: str | None = None,
     ) -> AccountDelivery:
-        """Deliver one account's pending files; return the counters.
+        """Deliver through the ledger, rejecting unverified legacy path lists."""
+        from .delivery_durable import send_account_durable
 
-        Sets the group description first (SOP), then creates (or
-        reuses) the topic starter and sends every planned file as a
-        threaded reply. Persistence is the caller's job: the result
-        carries everything a ``send_status`` upsert needs.
-        """
-        result = AccountDelivery(nickname=nickname, chat_id=chat_id)
-        if not user_dir.is_dir():
-            result.note = "no_local_dir"
-            return result
-        await self.set_group_description(
-            chat_id=chat_id, nickname=nickname, homepage=homepage
-        )
-        to_send, new_permanent, skipped_old, zero_deleted = self.plan_files(
+        if ledger is None or not round or not sec_user_id:
+            raise DeliveryError(
+                "Delivery ledger, round, and sec_user_id are required",
+                reason="failed",
+            )
+        if already_sent or already_failed or known_permanent:
+            raise DeliveryError(
+                "Legacy path lists require import into the delivery ledger first",
+                reason="failed",
+            )
+        return await send_account_durable(
+            self,
+            ledger=ledger,
+            round=round,
+            sec_user_id=sec_user_id,
+            nickname=nickname,
+            chat_id=chat_id,
+            homepage=homepage,
             user_dir=user_dir,
             cutoff=cutoff,
-            already_sent=already_sent,
-            already_failed=already_failed,
-            known_permanent=known_permanent,
+            starter_message_id=starter_message_id,
         )
-        result.total_files = len(to_send)
-        result.skipped_old = skipped_old
-        result.zero_deleted = zero_deleted
-        result.permanent_failures = list(new_permanent)
-        starter = starter_message_id
-        if starter is None:
-            starter = await self.create_topic(
-                chat_id=chat_id, nickname=nickname, homepage=homepage
-            )
-        result.starter_message_id = starter
-        for file_path in sorted(to_send):
-            try:
-                ok, error = await self.send_file(
-                    file_path=file_path, chat_id=chat_id, parent_id=starter
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad file skips on
-                ok, error = False, str(exc)
-            if ok:
-                result.sent_files += 1
-            else:
-                text = str(error)
-                result.failed_files += 1
-                result.failed_paths.append(str(file_path))
-                if "234006" in text or "234010" in text:
-                    result.permanent_failures.append(str(file_path))
-            await asyncio.sleep(RATE_SECONDS)
-        return result
 
 
 @dataclass(slots=True)

@@ -16,22 +16,21 @@ rules in this file are the durable part — they still apply.
 
 1. **Never send a bare text probe.** The first message in a delivery
    group is always the author's profile link + nickname.
-2. **Always deliver to a group.** When the user says "send to group"
-   or asks for SOP delivery, create a NEW group and send there;
-   never send files into the current 1:1 session.
-3. **Never reuse an old group.** Every run creates a fresh group with
-   the recipient as `owner_id`.
-4. **Dissolve superseded groups.** Dissolve old groups via
-   `DELETE /im/v1/chats/{chat_id}` (works for groups this flow
-   created even when the user is owner — do not assume missing
-   permission). Verify dissolution by `data.chat_status ==
-   "dissolved"` (the GET does not 404); tell the user to dissolve
-   manually only when the API refuses.
+2. **Always deliver to a group.** Never send files into the current
+   1:1 session. Reuse the existing verified group and topic for a known
+   account; create a group only for a genuinely new account.
+3. **Keep group identity stable.** Match historical groups by the
+   stable `sec_user_id`, not nickname alone. Hold an account for review
+   if its group or topic cannot be uniquely verified.
+4. **Preserve historical groups.** Do not dissolve groups as routine
+   cleanup during migration or backfill. A separate, explicit request
+   and delivery audit are required before removing one.
 5. **Paired batches.** Two accounts per batch: the previous batch must
    be fully delivered AND verified before local files are cleaned and
    the next batch starts.
-6. **When unsure, keep sending.** Uncertainty means continue delivery,
-   not pause for questions.
+6. **When unsure, hold that account.** Ambiguous historical sends,
+   missing receipts, or conflicting destinations require reconciliation
+   before any retry; a matching filename alone is not proof of delivery.
 7. **Every delivery account is recorded.** Any account confirmed as a
    delivery account is immediately upserted via
    `dyvine.queue.import_seeds` (`[{sec_user_id, nickname,
