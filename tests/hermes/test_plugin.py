@@ -297,7 +297,12 @@ def test_get_engine_builds_offline_and_caches() -> None:
 
 
 def test_root_shim_exposes_register() -> None:
-    """The repo-root ``__init__.py`` re-exports ``register``."""
+    """The repo-root ``__init__.py`` re-exports ``register``.
+
+    Loaded as a package (hermes, or pytest claiming ``dyvine``), the
+    shim prepends the engine tree to ``__path__`` so ``dyvine.*``
+    submodules resolve to ``src/dyvine``.
+    """
     root = _repo_root()
     spec = importlib.util.spec_from_file_location(
         "dyvine_plugin_root", root / "__init__.py"
@@ -306,6 +311,29 @@ def test_root_shim_exposes_register() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(module.register)
+    assert module.__path__ == [str(root / "src" / "dyvine"), str(root)]
+
+
+def test_root_shim_imports_as_plain_module() -> None:
+    """The shim also loads as a non-package module (no ``__path__``).
+
+    pytest's importlib mode imports the root ``__init__.py`` as a plain
+    ``__init__`` module when the checkout directory name is not a valid
+    identifier (``dyvine-main``, hyphenated worktree names); a bare
+    ``__path__`` reference there failed every test's setup.
+    """
+    root = _repo_root()
+    spec = importlib.util.spec_from_file_location(
+        "dyvine_plugin_root_module",
+        root / "__init__.py",
+        submodule_search_locations=None,
+    )
+    assert spec is not None and spec.loader is not None
+    assert spec.submodule_search_locations is None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert callable(module.register)
+    assert not hasattr(module, "__path__")
 
 
 def test_jsonable_converts_service_shapes() -> None:
