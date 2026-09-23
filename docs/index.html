@@ -96,7 +96,7 @@
         <span class="pill">Hermes plugin</span>
         <span class="pill">Postgres state store</span>
         <span class="pill">Cloudflare R2 optional</span>
-        <span class="pill">Last reviewed: 2026-09-22</span>
+        <span class="pill">Last reviewed: 2026-09-23</span>
       </div>
     </header>
 
@@ -174,6 +174,67 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
       </div>
       <p>Apply the schema once before first use (operator-side, from a repo checkout with the same <code>DATABASE_URL</code>):</p>
       <pre><code>uv run alembic upgrade head</code></pre>
+      <h3 id="hermes-dependencies">Hermes dependency resolution</h3>
+      <p>
+        Hermes resolves a directory plugin's <code>pyproject.toml</code>
+        <code>[project].dependencies</code> (<code>plugin.yaml</code>
+        <code>python_dependencies</code> only when there is no <code>pyproject.toml</code>)
+        against the pins of its own environment. Dyvine's floors admit those pins (core
+        <code>python-dotenv==1.2.2</code>, bedrock extra <code>boto3==1.42.89</code>;
+        test-pinned), but <code>f2</code> 0.0.1.7 publishes <code>==</code> pins
+        (<code>httpx==0.27.2</code>, <code>pydantic==2.9.*</code>, <code>websockets&lt;13</code>,
+        <code>protobuf==5.28.3</code>, ...), so <code>hermes plugins enable dyvine</code> still
+        reports "No solution found". The lockfile lifts those pins with
+        <code>[tool.uv] override-dependencies</code>, which Hermes does not read, and the plugin
+        runs on the Hermes versions of the shared packages.
+      </p>
+      <p>
+        Install the locked packages that the Hermes venv lacks, without their dependencies, and
+        leave every package Hermes already has at its version. Run the commands from a checkout
+        at the deployed revision; <code>HERMES_PY</code> is the interpreter of the venv that runs
+        <code>hermes</code>:
+      </p>
+      <pre><code>HERMES_PY=/path/to/hermes-agent/venv/bin/python
+uv export --frozen --no-dev --no-emit-project --no-hashes --no-header \
+  --no-annotate -o dyvine-locked.txt
+"$HERMES_PY" - dyvine-locked.txt &gt; dyvine-missing.txt &lt;&lt;'EOF'
+import re, sys
+from importlib.metadata import PackageNotFoundError, version
+for line in open(sys.argv[1]):
+    req = line.strip()
+    if not req or req.startswith("#"):
+        continue
+    try:
+        version(re.split(r"[\s;=&lt;&gt;!~\[]", req, maxsplit=1)[0])
+    except PackageNotFoundError:
+        print(req)
+EOF
+uv pip install --no-config --python "$HERMES_PY" --no-deps -r dyvine-missing.txt</code></pre>
+      <p>
+        <code>--no-config</code> stops uv from applying the checkout's
+        <code>[tool.uv] override-dependencies</code>, which would replace some locked pins with
+        open floors. Repeat these steps after every <code>hermes update</code>: the update can
+        drop the added packages and disable the plugin. Afterwards, confirm with
+        <code>hermes plugins list</code> that dyvine is enabled, restart the gateway
+        (<code>hermes gateway restart</code>), and make one signed read-only call such as
+        <code>dyvine.posts.list</code>.
+      </p>
+      <h3 id="chromium">Chromium for the webSign signer</h3>
+      <p>
+        <code>playwright==1.62.0</code> expects Chromium revision 1234 (Chrome for Testing
+        151.0.7922.34). Install it as the user that runs the Hermes gateway, with the same
+        <code>PLAYWRIGHT_BROWSERS_PATH</code> if the gateway sets one. Where the default
+        Playwright CDN is slow, point <code>PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST</code> at a mirror
+        that serves the same path layout, for example npmmirror:
+      </p>
+      <pre><code>PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright \
+  "$HERMES_PY" -m playwright install chromium</code></pre>
+      <p>
+        The variable covers every <code>chromium*</code> download and takes precedence over
+        <code>PLAYWRIGHT_DOWNLOAD_HOST</code>. On linux x64 the signer's build is fetched from
+        <code>&lt;host&gt;/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip</code>, so a local
+        HTTP server that serves the official Chrome for Testing zip under that path works too.
+      </p>
     </section>
 
     <section id="quick-start">
@@ -247,7 +308,8 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>DOUYIN_WEBSIGN_SIGN_TIMEOUT_SECONDS</code>), and re-signs once with a fresh session
         when it observes an Argus block (<code>DOUYIN_WEBSIGN_RETRY_ONCE</code>), and fails fast
         (backing off) after repeated signer failures. The host must
-        provide a matching Chromium build (<code>playwright install chromium</code>); without it the
+        provide a matching Chromium build (<code>playwright install chromium</code>; see
+        <a href="#chromium">Chromium for the webSign signer</a>); without it the
         builders return unsigned URLs exactly as before, so unaffected endpoints keep working while
         gated ones fail as HTTP 403. Set <code>DOUYIN_WEBSIGN_ENABLED=false</code> only as a kill-switch.
       </p>
@@ -537,6 +599,7 @@ make doctor        # hermes plugins doctor --ci (needs docker)</code></pre>
         <li><code>README.md</code> is the concise maintainer entry point; keep it, <code>.env.example</code>, this page, and the contributor guide consistent when tools, configuration, or behavior changes. Automated contributors follow the contributor guide (AGENTS.md).</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
         <li><code>plugin.yaml</code> <code>provides_tools</code> must mirror the tool table exactly; the bundled skill manual must name every tool. Both are test-pinned.</li>
+        <li>Dependency floors in <code>pyproject.toml</code> and <code>plugin.yaml</code> must admit the Hermes pins (<code>python-dotenv==1.2.2</code>, bedrock <code>boto3==1.42.89</code>); never raise one past a Hermes pin. This is test-pinned.</li>
         <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
         <li>For Python behavior changes, run focused tests first, then <code>make coverage</code> before preparing a commit.</li>
       </ul>

@@ -74,6 +74,31 @@ checkout with the same `DATABASE_URL`):
 uv run alembic upgrade head
 ```
 
+### Hermes dependency resolution
+
+Hermes resolves a directory plugin's `pyproject.toml`
+`[project].dependencies` (`plugin.yaml` `python_dependencies` only when
+there is no `pyproject.toml`) against the pins of its own environment.
+Dyvine's floors admit those pins (core `python-dotenv==1.2.2`, bedrock
+extra `boto3==1.42.89`), but `f2` 0.0.1.7 publishes `==` pins
+(`httpx==0.27.2`, `pydantic==2.9.*`, `websockets<13`,
+`protobuf==5.28.3`, ...), so `hermes plugins enable dyvine` still
+reports "No solution found". The lockfile lifts those pins with
+`[tool.uv] override-dependencies`, which Hermes does not read, and the
+plugin runs on the Hermes versions of the shared packages.
+
+Install the locked packages missing from the Hermes venv with
+`uv pip install --no-config --no-deps` and leave the packages Hermes
+already has at their versions; `--no-config` keeps uv from applying the
+checkout's overrides. [docs/index.html](docs/index.html#hermes-dependencies)
+has the commands. Repeat this after every `hermes update`, which can drop
+the added packages and disable the plugin.
+
+The webSign signer needs the Chromium build matching `playwright==1.62.0`
+(revision 1234). Where the default Playwright CDN is slow, install it
+from a mirror by setting `PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`, for example
+to `https://cdn.npmmirror.com/binaries/playwright`.
+
 ## Quick Start (development)
 
 Install dependencies:
