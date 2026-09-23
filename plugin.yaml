@@ -47,9 +47,11 @@ kind: standalone
 license: Apache-2.0
 # Every third-party package imported by the tool path (get_engine
 # closure, verified by an import-hook trace — not just the direct
-# imports). Bounds mirror pyproject.toml, except floors relaxed for
-# loose installers: pydantic accepts the hermes pin, and httpx admits
-# f2 0.0.1.7's ``==0.27.2`` pin (our usage works on both surfaces).
+# imports). Bounds mirror pyproject.toml, whose dependencies hermes
+# resolves in preference to this list. Floors admit loose installers'
+# pins: pydantic, python-dotenv, and boto3 accept the hermes pins, and
+# httpx admits f2 0.0.1.7's ``==0.27.2`` pin (our usage works on both
+# surfaces).
 # alembic is intentionally absent: migrations run operator-side from
 # a repo checkout (``uv run alembic upgrade head``), never in the
 # gateway host.
@@ -60,7 +62,7 @@ python_dependencies:
   - pydantic>=2,<3
   - pydantic-settings>=2.15.0,<3.0.0
   - httpx>=0.27.2,<1.0.0
-  - boto3>=1.43.89,<2.0.0
+  - boto3>=1.42.89,<2.0.0
   - prometheus-client>=0.26.0,<1.0.0
   - psutil>=7.2.2,<8.0.0
-  - python-dotenv>=1.2.3,<2.0.0
+  - python-dotenv>=1.2.2,<2.0.0

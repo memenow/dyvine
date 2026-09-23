@@ -44,12 +44,19 @@ dependencies = [
     # development lockfile to 0.28+. Dyvine's own httpx usage is
     # compatible with both surfaces.
     "httpx>=0.27.2,<1.0.0",
-    "python-dotenv>=1.2.3,<2.0.0",
+    # ``python-dotenv`` and ``boto3`` floors admit the Hermes Agent pins
+    # (core ``python-dotenv==1.2.2``, bedrock extra ``boto3==1.42.89``).
+    # Hermes resolves a directory plugin's ``[project].dependencies``
+    # together with its own pins: ``hermes plugins enable`` refuses an
+    # unresolvable union, and ``hermes update`` disables a plugin whose
+    # union stops resolving. Never raise a floor past a Hermes pin
+    # (test-pinned in ``tests/hermes/test_plugin.py``).
+    "python-dotenv>=1.2.2,<2.0.0",
 
     # External integrations. ``f2`` is an especially low-maintenance
     # upstream and pins many of its own deps with ``==``, so we tightly
     # constrain it; widen the bound only after a deliberate test pass.
-    "boto3>=1.43.89,<2.0.0",
+    "boto3>=1.42.89,<2.0.0",
     "f2>=0.0.1.7,<0.0.2",
     # Headless-Chromium signing session for the Argus webSign layer.
     # Pinned exactly: the wheel and the browser build are a validated

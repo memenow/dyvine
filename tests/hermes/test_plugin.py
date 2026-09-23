@@ -88,6 +88,36 @@ def test_manifest_dependencies_pinned_and_complete() -> None:
     }
 
 
+# Versions the Hermes Agent venv pins (core ``python-dotenv``, bedrock
+# extra ``boto3``). Hermes resolves the plugin's declared dependencies
+# together with them and refuses, or on ``hermes update`` disables, a
+# plugin whose union has no solution.
+_HERMES_PINS = {"boto3": "1.42.89", "python-dotenv": "1.2.2"}
+
+
+@pytest.mark.parametrize("dist", sorted(_HERMES_PINS))
+def test_dependency_floors_admit_hermes_pins(dist: str) -> None:
+    """Both declared dependency lists accept the Hermes-pinned version."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    root = _repo_root()
+    declared = {
+        "pyproject.toml": tomllib.loads((root / "pyproject.toml").read_text())[
+            "project"
+        ]["dependencies"],
+        "plugin.yaml": yaml.safe_load((root / "plugin.yaml").read_text())[
+            "python_dependencies"
+        ],
+    }
+    for source, requirements in declared.items():
+        (req,) = [r for r in map(Requirement, requirements) if r.name == dist]
+        assert req.specifier.contains(
+            _HERMES_PINS[dist]
+        ), f"{source}: {req} rejects the Hermes pin {dist}=={_HERMES_PINS[dist]}"
+
+
 def test_register_registers_every_tool_async() -> None:
     """Every spec registers once, async, on the dyvine toolset."""
     ctx = FakeContext()

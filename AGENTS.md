@@ -62,6 +62,12 @@ doctor --ci` inside the hermes-agent image. Security scanning
 - `pyproject.toml` dependencies stay in sync with `plugin.yaml`
   `python_dependencies` (plus operator-side `alembic`): hermes
   installs entry-point plugins from the pep-621 bounds.
+- Dependency floors admit the Hermes Agent pins (core
+  `python-dotenv==1.2.2`, bedrock extra `boto3==1.42.89`; pinned by
+  `tests/hermes/test_plugin.py`). Hermes resolves a directory plugin's
+  `pyproject.toml` `[project].dependencies` against its own pins,
+  refuses a union with no solution, and `hermes update` disables such a
+  plugin. Never raise a floor past a Hermes pin.
 - Postgres is the only state store; tools are single-shot and
   idempotent; periodic work is driven by hermes cron, never by
   in-plugin loops. No resident connections, no background threads
@@ -69,6 +75,19 @@ doctor --ci` inside the hermes-agent image. Security scanning
   whose state lands in Postgres first.
 - Tool results are JSON strings; error messages stay human-readable
   and secret-free (the registry renders propagated `DyvineError`s).
+
+## Deployment Notes
+
+- `f2` 0.0.1.7 publishes `==` pins (`httpx==0.27.2`, `pydantic==2.9.*`,
+  `websockets<13`, `protobuf==5.28.3`, ...), so the Hermes resolver
+  still refuses the install; `[tool.uv] override-dependencies` lifts
+  them for uv only. Operators install the locked packages missing from
+  the Hermes venv with `uv pip install --no-config --no-deps` and must
+  repeat it after every `hermes update` (commands in
+  `docs/index.html#hermes-dependencies`).
+- `playwright==1.62.0` needs Chromium revision 1234. Hosts with a slow
+  Playwright CDN install it from a mirror by setting
+  `PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST` (`docs/index.html#chromium`).
 
 ## Branching and PRs
 
