@@ -1019,6 +1019,24 @@ async def test_queue_claim_never_double_issues(
     assert await owner_a.claim_next() is None
 
 
+async def test_queue_claim_filter_is_atomic_and_cannot_take_next_batch(
+    backend: BackendContext,
+) -> None:
+    """Concurrent workers stay within the selected account pair."""
+    owner_a = backend.make_queue("owner-a")
+    owner_b = backend.make_queue("owner-b")
+    for key in ("pair-a", "pair-b", "next-a"):
+        await owner_a.upsert_entry(**_queue_kwargs(key))
+    allowed = {"pair-a", "pair-b"}
+    claimed = await asyncio.gather(
+        owner_a.claim_next(keys=allowed),
+        owner_b.claim_next(keys=allowed),
+        owner_a.claim_next(keys=allowed),
+    )
+    assert {row.key for row in claimed if row is not None} == allowed
+    assert (await owner_a.get_entry("next-a")).status == "pending"
+
+
 async def test_queue_update_merges_and_ignores_unknown(
     backend: BackendContext,
 ) -> None:
@@ -1066,6 +1084,29 @@ async def test_queue_release_stale_requeues_with_backoff(
     assert freed.status == "pending"
     assert freed.attempts == 1
     assert freed.updated_at > OLD_STAMP
+
+
+async def test_queue_release_stale_only_touches_selected_round(
+    backend: BackendContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A weekly runner does not mutate frozen work in another round."""
+    owner_a = backend.make_queue("owner-a")
+    owner_b = backend.make_queue("owner-b")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        await owner_a.upsert_entry(**_queue_kwargs("old-r1", round="round-1"))
+        await owner_a.upsert_entry(**_queue_kwargs("old-r2", round="round-2"))
+        await owner_a.claim_next(round="round-1")
+        await owner_a.claim_next(round="round-2")
+        await owner_a.update_entry("old-r1", op_message="working")
+        await owner_a.update_entry("old-r2", op_message="working")
+    assert (
+        await owner_b.release_stale(
+            stale_after_seconds=60.0, max_attempts=8, round="round-1"
+        )
+        == 1
+    )
+    assert (await owner_a.get_entry("old-r1")).status == "pending"
+    assert (await owner_a.get_entry("old-r2")).status == "downloading"
 
 
 async def test_queue_release_stale_exhausts_and_spares(

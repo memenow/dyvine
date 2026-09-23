@@ -130,116 +130,18 @@ async def test_set_group_description_warn_only_on_failure() -> None:
     )
 
 
-async def test_send_file_refreshes_token_once() -> None:
-    """99991663 triggers exactly one token refresh + retry."""
-    transport = FakeTransport()
-    transport.upload_script.append({"code": 99991663, "msg": "token"})
-    channel = _channel(transport)
-    transport.post_script.append({"code": 0, "tenant_access_token": "token-2"})
-    ok, error = await channel.send_file(
-        file_path=Path("x.mp4"), chat_id="chat-1", parent_id="mid-0"
-    )
-    assert ok is True and error is None
-    token_posts = [call for call in transport.posts if "auth" in call["url"]]
-    assert len(token_posts) == 2
-
-
-async def test_create_topic_failure_raises_retryable() -> None:
-    """Topic errors raise with the retryable reason."""
+async def test_send_account_requires_ledger_before_network(tmp_path: Path) -> None:
+    """The former direct sender cannot bypass the durable ledger."""
     transport = FakeTransport()
     channel = _channel(transport)
-    transport.post_script.append({"code": 500, "msg": "down"})
-    with pytest.raises(DeliveryError) as excinfo:
-        await channel.create_topic(chat_id="chat-1", nickname="n", homepage="https://h")
-    assert excinfo.value.reason == "retryable"
-
-
-async def test_plan_files_filters_and_deletes(tmp_path: Path) -> None:
-    """Zero-byte deleted, oversize permanent, old skipped, sent skipped."""
-    user_dir = tmp_path / "nick"
-    old_dir = user_dir / "2026-08-01 10-00-00_old"
-    new_dir = user_dir / "2026-08-10 10-00-00_new"
-    old_dir.mkdir(parents=True)
-    new_dir.mkdir(parents=True)
-    (old_dir / "a.mp4").write_bytes(b"x")
-    fresh = new_dir / "b.mp4"
-    fresh.write_bytes(b"x")
-    zero = new_dir / "z.mp4"
-    zero.write_bytes(b"")
-    big = new_dir / "big.mp4"
-    big.write_bytes(b"x")
-    channel = _channel()
-    to_send, new_perm, skipped, zero_deleted = channel.plan_files(
-        user_dir=user_dir,
-        cutoff=datetime(2026, 8, 5),
-        already_sent={str(fresh)},
-        known_permanent={str(big)},
-    )
-    assert to_send == []
-    assert skipped == 1
-    assert zero_deleted == 1
-    assert not zero.exists()
-    assert str(zero) in new_perm
-
-
-async def test_send_account_full_flow(tmp_path: Path) -> None:
-    """One account delivers end to end with sender-compatible counters."""
-    transport = FakeTransport()
-    channel = _channel(transport)
-    user_dir = tmp_path / "nick"
-    post_dir = user_dir / "2026-08-10 10-00-00_post"
-    post_dir.mkdir(parents=True)
-    (post_dir / "a.mp4").write_bytes(b"x")
-    (post_dir / "b.mp4").write_bytes(b"y")
-    result = await channel.send_account(
-        nickname="nick",
-        chat_id="chat-1",
-        homepage="https://h",
-        user_dir=user_dir,
-    )
-    assert result.total_files == 2
-    assert result.sent_files == 2
-    assert result.failed_files == 0
-    assert result.status == "completed"
-    assert result.starter_message_id == "mid-1"
-    # Description first, then topic post, then one message per file.
-    assert len(transport.puts) == 1
-    assert len(transport.uploads) == 2
-
-
-async def test_send_account_missing_dir_reports_no_local(tmp_path: Path) -> None:
-    """Missing user dirs report ``no_local`` without any network use."""
-    transport = FakeTransport()
-    channel = _channel(transport)
-    result = await channel.send_account(
-        nickname="nick",
-        chat_id="chat-1",
-        homepage="https://h",
-        user_dir=tmp_path / "ghost",
-    )
-    assert result.status == "no_local"
+    with pytest.raises(DeliveryError, match="ledger"):
+        await channel.send_account(
+            nickname="nick",
+            chat_id="chat-1",
+            homepage="https://h",
+            user_dir=tmp_path / "ghost",
+        )
     assert transport.puts == [] and transport.posts == []
-
-
-async def test_send_account_marks_234006_permanent(tmp_path: Path) -> None:
-    """Feishu 234006 failures join the permanent set."""
-    transport = FakeTransport()
-    transport.upload_script.append({"code": 234006, "msg": "too large"})
-    channel = _channel(transport)
-    user_dir = tmp_path / "nick"
-    post_dir = user_dir / "2026-08-10 10-00-00_post"
-    post_dir.mkdir(parents=True)
-    victim = post_dir / "a.mp4"
-    victim.write_bytes(b"x")
-    result = await channel.send_account(
-        nickname="nick",
-        chat_id="chat-1",
-        homepage="https://h",
-        user_dir=user_dir,
-    )
-    assert result.failed_files == 1
-    assert result.status == "partial"
-    assert result.permanent_failures == [str(victim)]
 
 
 def test_credentials_prefer_hermes_file(

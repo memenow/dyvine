@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,11 @@ class FakeContext:
         """Create an empty registration log."""
         self.calls: list[dict[str, Any]] = []
         self.skills: list[dict[str, Any]] = []
+        self.cli_commands: list[dict[str, Any]] = []
+
+    def register_cli_command(self, **kwargs: Any) -> None:
+        """Record a Hermes plugin CLI registration."""
+        self.cli_commands.append(kwargs)
 
     def register_skill(self, name: str, path: Path, **kwargs: Any) -> None:
         """Record one skill registration."""
@@ -65,7 +71,7 @@ def test_manifest_dependencies_pinned_and_complete() -> None:
     """Every runtime dep declared, each with an upper bound.
 
     ``hermes plugins doctor`` warns on unpinned entries; the set below
-    is the import-hook-traced ``get_engine`` closure (plus ``alembic``
+    includes lazy browser signing dependencies (plus ``alembic``
     deliberately excluded — migrations run operator-side).
     """
     import re
@@ -76,6 +82,7 @@ def test_manifest_dependencies_pinned_and_complete() -> None:
     dists = {re.split(r"[<>=!~\[;\s]", req, maxsplit=1)[0].strip() for req in deps}
     assert dists == {
         "f2",
+        "playwright",
         "sqlalchemy",
         "asyncpg",
         "pydantic",
@@ -181,6 +188,25 @@ def test_register_registers_bundled_skill() -> None:
     assert skill["description"]
 
 
+def test_register_exposes_weekly_cli_without_booting_engine() -> None:
+    """The registered argparse tree accepts the exact cron command."""
+    import argparse
+
+    ctx = FakeContext()
+    register(ctx)  # type: ignore[arg-type]
+    assert len(ctx.cli_commands) == 1
+    (command,) = ctx.cli_commands
+    assert command["name"] == "dyvine"
+    parser = argparse.ArgumentParser()
+    command["setup_fn"](parser)
+    parsed = parser.parse_args(
+        ["weekly", "run-once", "--round", "weekly0913", "--dry-run"]
+    )
+    assert parsed.round_name == "weekly0913"
+    assert parsed.dry_run is True
+    assert parsed.func is command["handler_fn"]
+
+
 def test_skill_manual_covers_every_tool() -> None:
     """The bundled manual names every registered tool (no drift)."""
     from dyvine_hermes.plugin import skill_path
@@ -231,8 +257,18 @@ def _stub_engine() -> Any:
         posts=_AsyncStub({"ok": True}),
         livestreams=_AsyncStub({"ok": True}),
         queue=_AsyncStub({"ok": True}),
+        queue_repo=SimpleNamespace(
+            list_entries=_AsyncStub(
+                [
+                    SimpleNamespace(
+                        chat_id="x", nickname="x", round="r1", sec_user_id="s1"
+                    )
+                ]
+            ).list_entries
+        ),
         profiles=_AsyncStub({"ok": True}),
         send_status=_AsyncStub({"ok": True}),
+        delivery_ledger=_AsyncStub(set()),
         operations=_AsyncStub({"ok": True}),
         round_repo=_AsyncStub([{"round": "r1"}]),
     )
@@ -323,7 +359,7 @@ def test_get_engine_builds_offline_and_caches() -> None:
         assert engine.livestreams is not None
         assert engine.queue is not None
     finally:
-        context_mod._ENGINE = None
+        asyncio.run(context_mod.close_engine())
 
 
 def test_root_shim_exposes_register() -> None:

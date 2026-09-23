@@ -10,10 +10,14 @@ verify method presence.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from .records import (
+    DeliveryGroupRecord,
     DeliveryRoundRecord,
+    FileDeliveryRecord,
+    LegacyEvidenceRecord,
     OperationRecord,
     QueueEntryRecord,
     SeedAccountRecord,
@@ -22,6 +26,151 @@ from .records import (
     UserSendStatusRecord,
     WatchSubscriptionRecord,
 )
+
+
+@runtime_checkable
+class DeliveryLedgerRepository(Protocol):
+    """Atomic checkpoints around Feishu group, topic, and file writes."""
+
+    async def reserve_group(
+        self,
+        *,
+        round: str,
+        sec_user_id: str,
+        nickname: str,
+        owner_open_id: str,
+        avatar_url: str | None = None,
+    ) -> DeliveryGroupRecord: ...
+
+    async def import_legacy_group_topic(
+        self,
+        *,
+        round: str,
+        sec_user_id: str,
+        nickname: str,
+        chat_id: str,
+        topic_message_id: str,
+        source_file: str,
+    ) -> DeliveryGroupRecord: ...
+
+    async def adopt_prior_verified_group_for_round(
+        self,
+        *,
+        round: str,
+        sec_user_id: str,
+        nickname: str,
+        owner_open_id: str,
+    ) -> DeliveryGroupRecord | None: ...
+
+    async def get_group(
+        self, *, round: str, sec_user_id: str
+    ) -> DeliveryGroupRecord | None: ...
+
+    async def mark_group_ready(self, key: str, chat_id: str) -> DeliveryGroupRecord: ...
+
+    async def mark_group_review(self, key: str) -> DeliveryGroupRecord: ...
+
+    async def rotate_group_uuid(
+        self, key: str, create_name: str
+    ) -> DeliveryGroupRecord: ...
+
+    async def begin_topic(self, key: str) -> DeliveryGroupRecord: ...
+
+    async def mark_topic_ready(
+        self, key: str, message_id: str
+    ) -> DeliveryGroupRecord: ...
+
+    async def mark_topic_review(self, key: str) -> DeliveryGroupRecord: ...
+
+    async def set_avatar_key(self, key: str, image_key: str) -> DeliveryGroupRecord: ...
+
+    async def reserve_file(
+        self,
+        *,
+        media_id: str,
+        round: str,
+        sec_user_id: str,
+        relative_path: str,
+        content_sha256: str,
+        chat_id: str,
+        parent_id: str,
+    ) -> FileDeliveryRecord: ...
+
+    async def get_file(self, media_id: str) -> FileDeliveryRecord | None: ...
+
+    async def reserve_legacy_sent(
+        self,
+        *,
+        round: str,
+        sec_user_id: str,
+        relative_path: str,
+        chat_id: str | None = None,
+        parent_id: str | None = None,
+        legacy_source_path: str | None = None,
+        legacy_progress_file: str | None = None,
+    ) -> FileDeliveryRecord: ...
+
+    async def reserve_legacy_sent_batch(
+        self, rows: Sequence[dict[str, str | None]]
+    ) -> tuple[int, int]: ...
+
+    async def reserve_legacy_permanent_failure_batch(
+        self, rows: Sequence[dict[str, str | None]]
+    ) -> tuple[int, int]: ...
+
+    async def find_legacy_sent(
+        self, *, sec_user_id: str, relative_path: str
+    ) -> FileDeliveryRecord | None: ...
+
+    async def find_legacy_permanent_failure(
+        self, *, sec_user_id: str, relative_path: str
+    ) -> FileDeliveryRecord | None: ...
+
+    async def find_legacy_unverified_hold(
+        self, *, legacy_path: str
+    ) -> LegacyEvidenceRecord | None: ...
+
+    async def upsert_legacy_evidence(
+        self,
+        *,
+        source_file: str,
+        legacy_path: str,
+        legacy_state: str,
+        nickname: str | None,
+        sec_user_id: str | None,
+        reason: str,
+    ) -> LegacyEvidenceRecord: ...
+
+    async def upsert_legacy_evidence_batch(
+        self, rows: Sequence[dict[str, str | None]]
+    ) -> tuple[int, int]: ...
+
+    async def upsert_excluded_nickname(self, *, nickname: str, source: str) -> None: ...
+
+    async def list_excluded_nicknames(self) -> set[str]: ...
+
+    async def list_files(
+        self,
+        *,
+        sec_user_id: str | None = None,
+        round: str | None = None,
+        status: str | None = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> list[FileDeliveryRecord]: ...
+
+    async def set_file_key(
+        self, media_id: str, file_key: str
+    ) -> FileDeliveryRecord: ...
+
+    async def begin_send(self, media_id: str) -> FileDeliveryRecord: ...
+
+    async def mark_sent(self, media_id: str, message_id: str) -> FileDeliveryRecord: ...
+
+    async def mark_file_review(self, media_id: str) -> FileDeliveryRecord: ...
+
+    async def mark_permanent_failure(self, media_id: str) -> FileDeliveryRecord: ...
+
 
 #: Statuses no sweep or heartbeat ever touches again.
 TERMINAL_STATUSES = frozenset({"completed", "partial", "failed"})
@@ -232,14 +381,17 @@ class QueueRepository(Protocol):
         """Count entries, optionally filtered."""
         ...
 
-    async def claim_next(self, *, round: str | None = None) -> QueueEntryRecord | None:
+    async def claim_next(
+        self, *, round: str | None = None, keys: set[str] | None = None
+    ) -> QueueEntryRecord | None:
         """Claim the oldest ``pending`` entry, or ``None`` when empty.
 
         The winner flips to ``downloading`` under this repository's
         owner identity with a fresh heartbeat. Entries whose
         ``serial_group`` already has a ``downloading`` row are skipped so
         same-nickname accounts never run concurrently. Concurrent
-        claimers never receive the same row.
+        claimers never receive the same row. ``keys`` restricts the
+        eligible set for verified two-account batches.
         """
         ...
 
@@ -252,7 +404,11 @@ class QueueRepository(Protocol):
         ...
 
     async def release_stale(
-        self, *, stale_after_seconds: float, max_attempts: int
+        self,
+        *,
+        stale_after_seconds: float,
+        max_attempts: int,
+        round: str | None = None,
     ) -> int:
         """Requeue ``downloading`` rows whose owner stopped heartbeating.
 

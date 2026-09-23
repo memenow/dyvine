@@ -243,3 +243,95 @@ class DeliveryRoundRow(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class DeliveryGroupRow(Base):
+    """One Feishu group and topic for a round/account pair."""
+
+    __tablename__ = "delivery_groups"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    round: Mapped[str] = mapped_column("round", Text, nullable=False)
+    sec_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    nickname: Mapped[str] = mapped_column(Text, nullable=False)
+    create_name: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_open_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    create_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    create_started_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chat_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    topic_status: Mapped[str] = mapped_column(Text, nullable=False)
+    topic_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    topic_started_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    topic_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    avatar_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legacy_source_file: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("idx_delivery_groups_round_status", "round", "status"),
+        Index("idx_delivery_groups_chat", "chat_id"),
+    )
+
+
+class DeliveryFileRow(Base):
+    """A stable media identity and its sole automatic Feishu send attempt."""
+
+    __tablename__ = "delivery_files"
+
+    media_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    round: Mapped[str] = mapped_column("round", Text, nullable=False)
+    sec_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    relative_path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chat_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    file_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    send_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    send_started_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legacy_source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    legacy_progress_file: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("idx_delivery_files_sec_status", "sec_user_id", "status"),
+        Index("idx_delivery_files_sec_path", "sec_user_id", "relative_path"),
+        Index("idx_delivery_files_round_status", "round", "status"),
+    )
+
+
+class DeliveryLegacyEvidenceRow(Base):
+    """Unresolved legacy evidence; this table never drives auto-delivery."""
+
+    __tablename__ = "delivery_legacy_evidence"
+
+    evidence_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    source_file: Mapped[str] = mapped_column(Text, nullable=False)
+    legacy_path: Mapped[str] = mapped_column(Text, nullable=False)
+    legacy_state: Mapped[str] = mapped_column(Text, nullable=False)
+    nickname: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sec_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("idx_delivery_legacy_evidence_state", "legacy_state"),
+        Index("idx_delivery_legacy_evidence_sec", "sec_user_id"),
+        Index("idx_delivery_legacy_evidence_path_state", "legacy_path", "legacy_state"),
+    )
+
+
+class LegacyExcludedNicknameRow(Base):
+    """Legacy nickname-level exclusions, including future seed accounts."""
+
+    __tablename__ = "legacy_excluded_nicknames"
+
+    nickname: Mapped[str] = mapped_column(Text, primary_key=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(Text, nullable=False)

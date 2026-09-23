@@ -625,7 +625,9 @@ class FakeQueueRepository:
             and (status is None or row.status == status)
         )
 
-    async def claim_next(self, *, round: str | None = None) -> QueueEntryRecord | None:
+    async def claim_next(
+        self, *, round: str | None = None, keys: set[str] | None = None
+    ) -> QueueEntryRecord | None:
         """Claim the oldest ``pending`` entry, or ``None`` when empty.
 
         The single-process fake needs no row lock; ordering and the
@@ -641,6 +643,7 @@ class FakeQueueRepository:
             for row in self._rows.values()
             if row.status in QUEUE_CLAIMABLE_STATUSES
             and (round is None or row.round == round)
+            and (keys is None or row.key in keys)
             and (row.serial_group is None or row.serial_group not in busy)
         ]
         if not candidates:
@@ -715,7 +718,11 @@ class FakeQueueRepository:
         return updated
 
     async def release_stale(
-        self, *, stale_after_seconds: float, max_attempts: int
+        self,
+        *,
+        stale_after_seconds: float,
+        max_attempts: int,
+        round: str | None = None,
     ) -> int:
         """Requeue ``downloading`` rows whose owner stopped heartbeating."""
         cutoff = (
@@ -729,6 +736,7 @@ class FakeQueueRepository:
             owner = self._owners.get(key)
             if not (
                 row.status == "downloading"
+                and (round is None or row.round == round)
                 and alive < cutoff
                 and owner != self._owner_id
             ):

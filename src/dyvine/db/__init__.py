@@ -13,6 +13,7 @@ database.
 
 from __future__ import annotations
 
+from .delivery_ledger import PostgresDeliveryLedgerRepository
 from .health import DatabaseHealthTracker, HealthStatus
 from .janitor import (
     HEARTBEAT_INTERVAL_SECONDS,
@@ -22,8 +23,12 @@ from .janitor import (
 )
 from .models import (
     Base,
+    DeliveryFileRow,
+    DeliveryGroupRow,
+    DeliveryLegacyEvidenceRow,
     DeliveryRoundRow,
     DownloadQueueRow,
+    LegacyExcludedNicknameRow,
     OperationRow,
     SeedAccountRow,
     SendStatusRow,
@@ -45,6 +50,7 @@ from .protocols import (
     QUEUE_ACTIVE_STATUSES,
     QUEUE_CLAIMABLE_STATUSES,
     TERMINAL_STATUSES,
+    DeliveryLedgerRepository,
     OperationRepository,
     ProfileRepository,
     QueueRepository,
@@ -54,7 +60,10 @@ from .protocols import (
     WatchRepository,
 )
 from .records import (
+    DeliveryGroupRecord,
     DeliveryRoundRecord,
+    FileDeliveryRecord,
+    LegacyEvidenceRecord,
     OperationRecord,
     QueueEntryRecord,
     SeedAccountRecord,
@@ -74,16 +83,25 @@ __all__ = [
     "ORPHAN_STALE_AFTER_SECONDS",
     "PURGE_INTERVAL_SECONDS",
     "Base",
+    "DeliveryFileRow",
+    "DeliveryGroupRecord",
+    "DeliveryGroupRow",
+    "DeliveryLegacyEvidenceRow",
+    "LegacyExcludedNicknameRow",
+    "DeliveryLedgerRepository",
     "DatabaseHealthTracker",
     "DatabaseSessionFactory",
     "DeliveryRoundRecord",
     "DeliveryRoundRow",
+    "FileDeliveryRecord",
+    "LegacyEvidenceRecord",
     "DownloadQueueRow",
     "HealthStatus",
     "OperationRecord",
     "OperationRepository",
     "OperationRow",
     "PostgresOperationRepository",
+    "PostgresDeliveryLedgerRepository",
     "PostgresProfileRepository",
     "PostgresQueueRepository",
     "PostgresRoundRepository",

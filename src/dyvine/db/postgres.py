@@ -909,12 +909,15 @@ class PostgresQueueRepository:
         return int(total or 0)
 
     @_tracked
-    async def claim_next(self, *, round: str | None = None) -> QueueEntryRecord | None:
+    async def claim_next(
+        self, *, round: str | None = None, keys: set[str] | None = None
+    ) -> QueueEntryRecord | None:
         """Claim the oldest ``pending`` entry, or ``None`` when empty.
 
         The scan locks one row with ``FOR UPDATE SKIP LOCKED`` so
         concurrent claimers never collide; entries whose
         ``serial_group`` already has a ``downloading`` row are skipped.
+        The optional key filter is evaluated inside the locked scan.
         """
         async with self._sessions.session() as session:
             async with session.begin():
@@ -938,6 +941,8 @@ class PostgresQueueRepository:
                 )
                 if round is not None:
                     statement = statement.where(DownloadQueueRow.round == round)
+                if keys is not None:
+                    statement = statement.where(DownloadQueueRow.key.in_(keys))
                 row = (await session.execute(statement)).scalars().first()
                 if row is None:
                     return None
@@ -975,7 +980,11 @@ class PostgresQueueRepository:
 
     @_tracked
     async def release_stale(
-        self, *, stale_after_seconds: float, max_attempts: int
+        self,
+        *,
+        stale_after_seconds: float,
+        max_attempts: int,
+        round: str | None = None,
     ) -> int:
         """Requeue ``downloading`` rows whose owner stopped heartbeating.
 
@@ -1005,6 +1014,8 @@ class PostgresQueueRepository:
                 | (DownloadQueueRow.owner_id != self._owner_id)
             )
         )
+        if round is not None:
+            statement = statement.where(DownloadQueueRow.round == round)
         async with self._sessions.session() as session:
             async with session.begin():
                 rows = (await session.execute(statement)).scalars().all()

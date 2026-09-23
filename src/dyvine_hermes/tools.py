@@ -277,11 +277,13 @@ async def _queue_import_seeds(args: dict[str, Any]) -> Any:
 
 async def _queue_enqueue(args: dict[str, Any]) -> Any:
     engine = get_engine()
+    excluded = await engine.delivery_ledger.list_excluded_nicknames()
     created = await engine.queue.enqueue_round(
         args["round"],
         mode=args["mode"],
         cutoff=args.get("cutoff"),
         note=args.get("note"),
+        excluded_nicknames=excluded,
     )
     return {"round": args["round"], "created": created}
 
@@ -345,7 +347,9 @@ async def _rounds_list(args: dict[str, Any]) -> Any:
 
 
 async def _delivery_send_account(args: dict[str, Any]) -> Any:
+    from dyvine.core.exceptions import DeliveryError
     from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
+    from dyvine.services.delivery_durable import send_account_durable
 
     engine = get_engine()
     parsed_cutoff = None
@@ -361,24 +365,50 @@ async def _delivery_send_account(args: dict[str, Any]) -> Any:
                     continue
             if parsed_cutoff is not None:
                 break
+    if any(
+        args.get(name) for name in ("already_sent", "already_failed", "known_permanent")
+    ):
+        raise DeliveryError(
+            "Legacy path lists require import into the delivery ledger first",
+            reason="failed",
+        )
+    round_name = args.get("round")
+    sec_user_id = args.get("sec_user_id")
+    if not round_name or not sec_user_id:
+        candidates = [
+            row
+            for row in await engine.queue_repo.list_entries(limit=-1)
+            if row.chat_id == args["chat_id"]
+            and row.nickname == args["nickname"]
+            and (not round_name or row.round == round_name)
+            and (not sec_user_id or row.sec_user_id == sec_user_id)
+        ]
+        if len(candidates) != 1:
+            raise DeliveryError(
+                "Specify round and sec_user_id for unambiguous delivery",
+                reason="failed",
+            )
+        round_name = candidates[0].round
+        sec_user_id = candidates[0].sec_user_id
     channel = FeishuGroupChannel(FeishuCredentials.from_hermes_default())
-    result = await channel.send_account(
+    result = await send_account_durable(
+        channel,
+        ledger=engine.delivery_ledger,
+        round=round_name,
+        sec_user_id=sec_user_id,
         nickname=args["nickname"],
         chat_id=args["chat_id"],
         homepage=args["homepage"],
         user_dir=Path(args["user_dir"]),
         cutoff=parsed_cutoff,
         starter_message_id=args.get("starter_message_id"),
-        already_sent=set(args.get("already_sent", [])),
-        already_failed=set(args.get("already_failed", [])),
-        known_permanent=set(args.get("known_permanent", [])),
     )
     # Persist the counters next to the queue state, mirroring the
     # sender's upsert (DELETE-then-INSERT semantics preserved by the
     # repository upsert keyed on nickname).
     await engine.send_status.upsert_send_status(
         nickname=result.nickname,
-        sec_user_id=args.get("sec_user_id"),
+        sec_user_id=sec_user_id,
         chat_id=result.chat_id,
         batch=args.get("batch", "batch"),
         total_files=result.total_files,
@@ -741,6 +771,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                 "sec_user_id": _string("sec", "Sec id for status rows"),
                 "cutoff": _string("cutoff", "Incremental cutoff (optional)"),
                 "batch": _string("batch", "Batch label (default batch)"),
+                "round": _string("round", "Delivery round for ledger identity"),
                 "starter_message_id": _string("mid", "Reuse topic (optional)"),
                 "already_sent": {
                     "type": "array",

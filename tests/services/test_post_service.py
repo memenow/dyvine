@@ -838,6 +838,9 @@ async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
 
     refreshed = await svc.get_bulk_download_status(operation.operation_id)
     assert refreshed.total_downloaded == 0
+    assert (await store.get_operation(operation.operation_id)).metadata[
+        "cursor_stalled"
+    ] is True
 
 
 @pytest.mark.asyncio
@@ -927,6 +930,9 @@ async def test_run_bulk_download_caps_pagination_under_sticky_cursor(
     # termination, not the stats.
     assert refreshed.total_downloaded == 0
     assert refreshed.status == DownloadStatus.FAILED
+    assert (await store.get_operation(operation.operation_id)).metadata[
+        "cursor_stalled"
+    ] is True
     # The loop hit the ``max_pages`` cap (no exception was raised), so the
     # operation must not carry a spurious ``error`` string.
     assert refreshed.error_details is None
