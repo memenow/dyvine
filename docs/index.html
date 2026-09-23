@@ -659,6 +659,31 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
   --apply --expect-plan-sha256 &lt;preview-plan-sha256&gt; \
   --expected-count &lt;preview-expected-count&gt;</code></pre>
       <p>
+        The legacy queue records <code>skipped_404</code> for accounts the user
+        ordered skipped for a round: the group is kept and nothing is sent. No
+        other action can close such a row in the active round, so it would
+        block every automatic round. <code>propose_user_ordered_skips.py</code>
+        writes a private JSONL holding only those rows, each with
+        <code>skip_user_ordered</code>. Preview and apply it the same way; no
+        audit inputs are needed. The policy re-checks each row's migrated queue
+        status and holds any account with a new send attempt; applied rows
+        become <code>skipped</code>.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_user_ordered_skips.py \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-user-skip-proposal.jsonl&gt;
+
+PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
+  --report &lt;private-user-skip-proposal.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-user-skip-preview.json&gt;</code></pre>
+      <p>
+        Apply by rerunning the preview command with <code>--apply</code>, the
+        preview's <code>plan_sha256</code> as <code>--expect-plan-sha256</code>,
+        and its <code>expected_count</code> as <code>--expected-count</code>.
+      </p>
+      <p>
         <code>dyvine.delivery.send_account</code> uses the same ledger. Supply
         <code>round</code> and <code>sec_user_id</code> to identify an account
         directly. If they are omitted, the tool requires a unique matching

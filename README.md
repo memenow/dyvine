@@ -394,6 +394,31 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
   --expected-count <preview-expected-count>
 ```
 
+The legacy queue records `skipped_404` for accounts the user ordered skipped
+for a round: the group is kept and nothing is sent. No other action can close
+such a row in the active round, so it would block every automatic round.
+`propose_user_ordered_skips.py` writes a private JSONL holding only those
+rows, each with `skip_user_ordered`. Preview and apply it the same way; no
+audit inputs are needed. The policy re-checks each row's migrated queue
+status and holds any account with a new send attempt; applied rows become
+`skipped`.
+
+```bash
+PYTHONPATH=src uv run python scripts/propose_user_ordered_skips.py \
+  --source-report <private-reconciliation.jsonl> \
+  --active-round <active-round> \
+  --output <private-user-skip-proposal.jsonl>
+
+PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
+  --report <private-user-skip-proposal.jsonl> \
+  --active-round <active-round> \
+  --output <private-user-skip-preview.json>
+```
+
+Apply by rerunning the preview command with `--apply`, the preview's
+`plan_sha256` as `--expect-plan-sha256`, and its `expected_count` as
+`--expected-count`.
+
 For inspection, run `hermes dyvine weekly run-once --dry-run`; use
 `--round weekly-YYYY-MM-DD --dry-run` to inspect a named round. The
 non-dry-run command advances the current account pair, with an upper bound on
