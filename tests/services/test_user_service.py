@@ -1423,6 +1423,10 @@ async def _invoke_get_following(service: UserService) -> None:
     await service.get_following("u1")
 
 
+async def _invoke_get_followers(service: UserService) -> None:
+    await service.get_followers("u1")
+
+
 async def _invoke_get_login_identity(service: UserService) -> None:
     await service.get_login_identity()
 
@@ -1449,20 +1453,29 @@ async def _invoke_process_download(service: UserService) -> None:
     [
         _invoke_get_user_info,
         _invoke_get_following,
+        _invoke_get_followers,
         _invoke_get_login_identity,
         _invoke_process_download,
     ],
-    ids=["get_user_info", "get_following", "get_login_identity", "process_download"],
+    ids=[
+        "get_user_info",
+        "get_following",
+        "get_followers",
+        "get_login_identity",
+        "process_download",
+    ],
 )
-async def test_handler_kwargs_forward_configured_proxies(
+async def test_handler_kwargs_satisfy_f2_constructor_contract(
     monkeypatch: pytest.MonkeyPatch,
     invoke: Callable[[UserService], Awaitable[None]],
 ) -> None:
-    """Every ``DouyinHandler`` the service builds carries ``proxies``.
+    """Every ``DouyinHandler`` the service builds gets kwargs f2 accepts.
 
     f2 reads only the plural ``proxies`` mapping and silently ignores a
     singular ``proxy`` key, so ``DOUYIN_PROXY_*`` reaches the SDK only
-    through ``proxies``.
+    through ``proxies``. Its constructor also merges the cookie into
+    ``headers``, so a payload without ``headers`` raises ``TypeError``
+    before any request is sent.
     """
     from dyvine.services import users as users_mod
 
@@ -1493,11 +1506,15 @@ async def test_handler_kwargs_forward_configured_proxies(
         """Records constructor kwargs; answers every fetch these paths make."""
 
         def __init__(self, kwargs: dict[str, Any]) -> None:
+            # Mirrors the merge f2 0.0.1.7 ``BaseDownloader.__init__`` runs
+            # while ``DouyinHandler`` is constructed.
+            self.headers = kwargs.get("headers") | {"Cookie": kwargs["cookie"]}
             captured.append(kwargs)
 
         fetch_user_profile = AsyncMock(return_value=profile)
         fetch_query_user = AsyncMock(return_value=identity)
         fetch_user_following = staticmethod(_no_pages)
+        fetch_user_follower = staticmethod(_no_pages)
 
     monkeypatch.setattr(users_mod, "DouyinHandler", RecordingHandler)
 
@@ -1507,6 +1524,38 @@ async def test_handler_kwargs_forward_configured_proxies(
     for kwargs in captured:
         assert kwargs["proxies"] == _PROXIES
         assert "proxy" not in kwargs
+        assert kwargs["headers"] == {
+            "User-Agent": settings.douyin.user_agent,
+            "Referer": settings.douyin.referer,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invoke", "message"),
+    [
+        (_invoke_get_following, "Failed to fetch following list"),
+        (_invoke_get_followers, "Failed to fetch follower list"),
+        (_invoke_get_login_identity, "Failed to query login identity"),
+    ],
+    ids=["get_following", "get_followers", "get_login_identity"],
+)
+async def test_handler_construction_failure_raises_user_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+    invoke: Callable[[UserService], Awaitable[None]],
+    message: str,
+) -> None:
+    """A ``DouyinHandler`` that fails to construct surfaces as ``UserServiceError``."""
+    from dyvine.services import users as users_mod
+
+    class FailingHandler:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            raise TypeError("handler construction failed")
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FailingHandler)
+
+    with pytest.raises(ServiceError, match=message):
+        await invoke(UserService(FakeOperationRepository()))
 
 
 @pytest.mark.asyncio

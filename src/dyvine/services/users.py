@@ -365,11 +365,16 @@ class UserService:
         handler_kwargs = {
             "url": f"https://www.douyin.com/user/{user_id}",
             "cookie": settings.douyin_cookie,
+            "headers": {
+                "User-Agent": settings.douyin_user_agent,
+                "Referer": settings.douyin_referer,
+            },
             "proxies": settings.douyin_proxies,
             "mode": "post",
         }
-        handler = DouyinHandler(handler_kwargs)
+        handler: DouyinHandler | None = None
         try:
+            handler = DouyinHandler(handler_kwargs)
             iterator = getattr(handler, fetcher_name)(
                 sec_user_id=user_id, count=min(max(count, 1), 200)
             )
@@ -395,7 +400,8 @@ class UserService:
             )
             raise UserServiceError(f"Failed to fetch {kind} list: {str(e)}") from e
         finally:
-            await _safely_close_handler(handler)
+            if handler is not None:
+                await _safely_close_handler(handler)
 
     async def get_login_identity(self) -> dict[str, Any]:
         """Return the identity the configured cookie authenticates as.
@@ -404,14 +410,23 @@ class UserService:
         current login session belongs to. Useful as a cookie-health
         check before running owner-scoped modes (collection, music,
         collects).
+
+        Raises:
+            UserServiceError: If the handler cannot be built or the
+                upstream query fails.
         """
         handler_kwargs = {
             "cookie": settings.douyin_cookie,
+            "headers": {
+                "User-Agent": settings.douyin_user_agent,
+                "Referer": settings.douyin_referer,
+            },
             "proxies": settings.douyin_proxies,
             "mode": "post",
         }
-        handler = DouyinHandler(handler_kwargs)
+        handler: DouyinHandler | None = None
         try:
+            handler = DouyinHandler(handler_kwargs)
             result = await handler.fetch_query_user()
             to_dict = getattr(result, "_to_dict", None)
             if callable(to_dict):
@@ -426,7 +441,8 @@ class UserService:
             logger.exception("Failed to query login identity")
             raise UserServiceError(f"Failed to query login identity: {str(e)}") from e
         finally:
-            await _safely_close_handler(handler)
+            if handler is not None:
+                await _safely_close_handler(handler)
 
     async def resolve_share_url(
         self, url: str, *, client: httpx.AsyncClient | None = None
