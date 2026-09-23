@@ -13,6 +13,12 @@ collection (any ``__init__.py`` beside the test tree becomes a
 ``src/dyvine``. Pointing the package path at ``src/dyvine`` keeps
 the canonical single spelling (``dyvine.*``) working no matter
 which loader claims the ``dyvine`` name first.
+
+pytest's importlib mode only resolves the root as a package when the
+checkout directory name is a valid identifier. Elsewhere
+(``dyvine-main``, hyphenated worktree names) it imports this file as
+a plain ``__init__`` module: that module has no ``__path__`` and
+cannot shadow the engine, so the extension is skipped.
 """
 
 from __future__ import annotations
@@ -25,10 +31,12 @@ _SRC = _ROOT / "src"
 
 # Resolve ``dyvine.*`` submodules to the engine tree. Prepend (not
 # replace) so sibling-plugin imports keep working if hermes ever
-# places helper modules beside this file.
+# places helper modules beside this file. Only package loads define
+# ``__path__``; a plain-module load has nothing to extend.
 _ENGINE = str(_SRC / "dyvine")
-if _ENGINE not in __path__:  # type: ignore[name-defined]
-    __path__.insert(0, _ENGINE)  # type: ignore[name-defined]
+_PACKAGE_PATH: list[str] | None = globals().get("__path__")
+if _PACKAGE_PATH is not None and _ENGINE not in _PACKAGE_PATH:
+    _PACKAGE_PATH.insert(0, _ENGINE)
 
 try:
     import dyvine_hermes.plugin  # noqa: F401

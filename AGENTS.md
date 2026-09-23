@@ -98,5 +98,9 @@ series as the code they describe, and open a pull request back to
   must carry an `__init__.py` (hermes directory plugins require
   `plugin.yaml` + `__init__.py` side by side); the default prepend
   mode would shadow `src/dyvine`. Test basenames must stay unique.
+  When the checkout directory name is not a valid identifier
+  (hyphenated clones or worktrees), pytest imports the root shim as a
+  plain `__init__` module with no `__path__`, so the shim must keep
+  working without one (pinned by `tests/hermes/test_plugin.py`).
 - Before finishing: run `make format`, `make lint`, and `uv run pytest`;
   for behavior changes also run the coverage gate above.
