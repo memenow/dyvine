@@ -220,25 +220,11 @@ uv pip install --no-config --python "$HERMES_PY" --no-deps -r dyvine-missing.txt
         <code>dyvine.posts.list</code>.
       </p>
       <p>
-        On the current Hermes v0.21.1 host, the plugin doctor reported that
-        Python dependencies require manual installation. The cutover
-        installed only missing versions pinned by <code>plugin.yaml</code>
-        using <code>uv pip --no-deps</code> in the Hermes environment. The
-        published <code>f2</code> dependency metadata conflicts with Hermes's
-        core pins, so the install preserved its existing
-        <code>pydantic</code>, <code>httpx</code>, and
-        <code>websockets</code> versions. Doctor registered all 35 tools and
-        a read-only profile call passed, but neither check caught the missing
-        Playwright dependency <code>pyee==13.0.1</code> from the lockfile.
-        The engine wires its request signer on first use. The initial
-        post-list probe still returned HTTP 403 until that locked dependency
-        was installed. The signer then became ready, a signed read-only
-        post-list call returned four posts, and engine shutdown closed the
-        signer cleanly. On a target host, verify matching
-        Playwright Chromium and all locked runtime dependencies, then read
-        one authorized <code>dyvine.posts.list</code> page before enabling
-        weekly sends. A profile check and doctor alone do not establish
-        post-list readiness.
+        Plugin doctor and a profile call do not exercise the request signer. During the
+        cutover both passed while the Playwright dependency <code>pyee</code> from
+        <code>uv.lock</code> was missing, and signed post-list calls returned HTTP 403 until
+        it was installed. Verify the matching Chromium build and read one authorized
+        <code>dyvine.posts.list</code> page before enabling weekly sends.
       </p>
       <h3 id="chromium">Chromium for the webSign signer</h3>
       <p>
@@ -468,7 +454,7 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       <ul>
         <li>Never send a bare text probe: the first message in a delivery group is always the author's profile link + nickname.</li>
         <li>Use <code>DYVINE_WEEKLY_GROUP_POLICY=reuse_existing</code> in every round. A returning account is identified by stable <code>sec_user_id</code> and reuses one Postgres-verified historical chat and topic; only a new account gets a new group with the recipient's <code>ou_</code> open ID as <code>owner_id</code>.</li>
-        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner advances one account per invocation; do not clean local files until delivery is reconciled.</li>
+        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner advances at most one pair per invocation; do not clean local files until delivery is reconciled.</li>
         <li>The durable sender records 0-byte files and files above its 29 MiB upload cap as permanent failures. It leaves local media in place for reconciliation.</li>
         <li>Backfill dedupe uses file-level ledger records and confirmed historical messages, not nickname counters. A <code>0/0</code> summary is not evidence that no media was missed.</li>
         <li>Run same-nickname accounts (distinct <code>sec_user_id</code>s) serially during backfill: legacy download directories and progress keys were nickname-based.</li>
@@ -477,11 +463,12 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       </ul>
       <h3>Weekly runner</h3>
       <p>
-        <code>hermes dyvine weekly run-once</code> advances at most one account
-        within a bounded runtime and file count. It waits for the download
-        started by that invocation and saves its checkpoint to Postgres before
-        exiting. It does not advance to the next ordered pair of accounts
-        until both current accounts have terminal outcomes. With no
+        <code>hermes dyvine weekly run-once</code> advances at most one ordered
+        pair of accounts (both accounts of the current pair) within a bounded
+        runtime and file count. It waits for every download started by that
+        invocation and saves its checkpoint to Postgres before exiting. It
+        does not advance to the next pair until both current accounts have
+        terminal outcomes. With no
         <code>--round</code>, it creates a
         <code>weekly-YYYY-MM-DD</code> round at or after Sunday 08:00 in
         <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>, using the previous
