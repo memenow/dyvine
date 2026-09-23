@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -1404,6 +1405,108 @@ async def test_get_login_identity_success(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
     service = UserService(FakeOperationRepository())
     assert await service.get_login_identity() == payload
+
+
+# Distinct URLs per scheme prove both settings flow through, rather than
+# one value copied into both slots.
+_PROXIES = {
+    "http://": "http://proxy.test:8080",
+    "https://": "http://proxy.test:8443",
+}
+
+
+async def _invoke_get_user_info(service: UserService) -> None:
+    await service.get_user_info("u1")
+
+
+async def _invoke_get_following(service: UserService) -> None:
+    await service.get_following("u1")
+
+
+async def _invoke_get_login_identity(service: UserService) -> None:
+    await service.get_login_identity()
+
+
+async def _invoke_process_download(service: UserService) -> None:
+    operation = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="u1",
+        status="pending",
+        message="scheduled",
+    )
+    await service._process_download(
+        operation.operation_id,
+        user_id="u1",
+        include_posts=True,
+        include_likes=False,
+        max_items=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        _invoke_get_user_info,
+        _invoke_get_following,
+        _invoke_get_login_identity,
+        _invoke_process_download,
+    ],
+    ids=["get_user_info", "get_following", "get_login_identity", "process_download"],
+)
+async def test_handler_kwargs_forward_configured_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+    invoke: Callable[[UserService], Awaitable[None]],
+) -> None:
+    """Every ``DouyinHandler`` the service builds carries ``proxies``.
+
+    f2 reads only the plural ``proxies`` mapping and silently ignores a
+    singular ``proxy`` key, so ``DOUYIN_PROXY_*`` reaches the SDK only
+    through ``proxies``.
+    """
+    from dyvine.services import users as users_mod
+
+    monkeypatch.setattr(settings.douyin, "proxy_http", _PROXIES["http://"])
+    monkeypatch.setattr(settings.douyin, "proxy_https", _PROXIES["https://"])
+
+    profile = MagicMock()
+    profile.nickname = "proxied"
+    profile.avatar_url = None
+    profile.signature = ""
+    profile.following_count = 0
+    profile.follower_count = 0
+    profile.total_favorited = 0
+    profile.room_id = None
+    profile.aweme_count = 0
+    profile._to_raw.return_value = {"user": {}}
+
+    identity = MagicMock()
+    identity._to_dict.return_value = {}
+
+    async def _no_pages(**_kwargs: Any) -> AsyncIterator[Any]:
+        for page in ():
+            yield page
+
+    captured: list[dict[str, Any]] = []
+
+    class RecordingHandler:
+        """Records constructor kwargs; answers every fetch these paths make."""
+
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            captured.append(kwargs)
+
+        fetch_user_profile = AsyncMock(return_value=profile)
+        fetch_query_user = AsyncMock(return_value=identity)
+        fetch_user_following = staticmethod(_no_pages)
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", RecordingHandler)
+
+    await invoke(UserService(FakeOperationRepository()))
+
+    assert captured, "expected the service to build a DouyinHandler"
+    for kwargs in captured:
+        assert kwargs["proxies"] == _PROXIES
+        assert "proxy" not in kwargs
 
 
 @pytest.mark.asyncio

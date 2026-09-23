@@ -287,7 +287,7 @@ class UserService:
                 "User-Agent": settings.douyin_user_agent,
                 "Referer": settings.douyin_referer,
             },
-            "proxy": settings.douyin_proxy_http,
+            "proxies": settings.douyin_proxies,
             "mode": "post",
         }
 
@@ -365,7 +365,7 @@ class UserService:
         handler_kwargs = {
             "url": f"https://www.douyin.com/user/{user_id}",
             "cookie": settings.douyin_cookie,
-            "proxy": settings.douyin_proxy_http,
+            "proxies": settings.douyin_proxies,
             "mode": "post",
         }
         handler = DouyinHandler(handler_kwargs)
@@ -407,7 +407,7 @@ class UserService:
         """
         handler_kwargs = {
             "cookie": settings.douyin_cookie,
-            "proxy": settings.douyin_proxy_http,
+            "proxies": settings.douyin_proxies,
             "mode": "post",
         }
         handler = DouyinHandler(handler_kwargs)
@@ -602,7 +602,7 @@ class UserService:
                 "User-Agent": settings.douyin_user_agent,
                 "Referer": settings.douyin_referer,
             },
-            "proxy": settings.douyin_proxy_http,
+            "proxies": settings.douyin_proxies,
             "download_path": str(temp_dir),
             "max_counts": max_items,
             # ``download_favorite`` only means "also fetch likes" when the
