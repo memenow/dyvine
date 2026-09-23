@@ -563,16 +563,6 @@ class Settings(BaseSettings):
         """Get R2 endpoint from R2 settings."""
         return self.r2.endpoint
 
-    @property
-    def douyin_proxy_http(self) -> str | None:
-        """Get HTTP proxy from Douyin settings."""
-        return self.douyin.proxy_http
-
-    @property
-    def douyin_proxy_https(self) -> str | None:
-        """Get HTTPS proxy from Douyin settings."""
-        return self.douyin.proxy_https
-
     # No ``case_sensitive`` here: pydantic-settings matches env names
     # against field names exactly when it is set, which would require a
     # lowercase ``watch_enabled`` variable for the root flag below. Each
