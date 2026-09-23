@@ -424,7 +424,10 @@ For inspection, run `hermes dyvine weekly run-once --dry-run`; use
 non-dry-run command advances the current account pair, with an upper bound on
 files and runtime. A new file's delivery key includes its account, account-relative path,
 and content hash. The ledger retains the uploaded `file_key`, send UUID,
-and Feishu message ID. An uncertain send or unadopted legacy chat remains
+and Feishu message ID. A legacy send covers a re-downloaded file with the
+same account-relative path, or with the same post creation stamp and media
+slot (`_video.mp4`, `_image_3.webp`, ...) when a caption edit renamed it,
+so the file is not sent twice. An uncertain send or unadopted legacy chat remains
 on hold for message-level reconciliation; never replay a file merely
 because a summary counter or operation ID is missing.
 The `dyvine.delivery.send_account` tool also uses this ledger: pass `round`

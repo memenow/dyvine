@@ -551,8 +551,11 @@ PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
         prove individual delivery. New file ledger records key a media item
         by account, account-relative path, and
         content hash; it retains the upload <code>file_key</code>, send UUID,
-        and Feishu message ID. A file reply goes into the verified topic
-        thread. Unknown group, topic, or file-send outcomes remain on hold
+        and Feishu message ID. A legacy send covers a re-downloaded file with
+        the same account-relative path, or with the same post creation stamp
+        and media slot (<code>_video.mp4</code>, <code>_image_3.webp</code>,
+        ...) when a caption edit renamed it, so the file is not sent twice.
+        A file reply goes into the verified topic thread. Unknown group, topic, or file-send outcomes remain on hold
         after their safe UUID retry windows for message-level reconciliation;
         do not replay solely because a summary count is missing. Confirmed
         historical files suppress automatic resend. Only confirmed unsent
