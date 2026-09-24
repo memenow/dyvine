@@ -468,7 +468,10 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
         runtime and file count. It waits for every download started by that
         invocation and saves its checkpoint to Postgres before exiting. It
         does not advance to the next pair until both current accounts have
-        terminal outcomes. With no
+        terminal outcomes. An incremental download stops at the queue cutoff:
+        media posted at or before it is neither downloaded nor sent, so a first
+        run without a saved anchor fetches only the round's window, not the
+        account's whole feed. With no
         <code>--round</code>, it creates a
         <code>weekly-YYYY-MM-DD</code> round at or after Sunday 08:00 in
         <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>, using the previous

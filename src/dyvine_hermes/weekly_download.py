@@ -9,7 +9,7 @@ from typing import Any
 
 from dyvine.services.delivery import MEDIA_EXTS
 
-from .weekly_state import _checkpoint, _path_within_root, patch_queue
+from .weekly_state import _checkpoint, _path_within_root, entry_cutoff, patch_queue
 from .weekly_types import WeeklyConfig
 
 
@@ -148,6 +148,9 @@ async def download_entry(
             entry.sec_user_id,
             since_aweme_id=since,
             operation_id=operation.operation_id,
+            # Delivery never sends media posted at or before the cutoff, so
+            # a fresh re-download must not walk the whole history to reach it.
+            posted_after=entry_cutoff(entry, config.timezone),
         ),
         timeout=remaining,
     )

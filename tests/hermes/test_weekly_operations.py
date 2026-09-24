@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -76,7 +76,11 @@ async def test_empty_cutover_directory_ignores_old_incremental_zero_result(
     )
 
     async def complete(
-        sec_user_id: str, *, since_aweme_id: str | None, operation_id: str
+        sec_user_id: str,
+        *,
+        since_aweme_id: str | None,
+        operation_id: str,
+        posted_after: datetime | None = None,
     ) -> IncrementalDownloadResult:
         assert operation_id != previous.operation_id
         assert since_aweme_id is None
@@ -152,7 +156,11 @@ async def test_attested_incremental_rechecks_nonempty_dir_without_old_anchor(
     engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
 
     async def complete(
-        sec_user_id: str, *, since_aweme_id: str | None, operation_id: str
+        sec_user_id: str,
+        *,
+        since_aweme_id: str | None,
+        operation_id: str,
+        posted_after: datetime | None = None,
     ) -> IncrementalDownloadResult:
         assert sec_user_id == "sec_1"
         assert since_aweme_id is None
@@ -319,6 +327,7 @@ async def test_incremental_operation_is_persisted_before_download(
         *,
         since_aweme_id: str | None,
         operation_id: str,
+        posted_after: datetime | None = None,
     ) -> IncrementalDownloadResult:
         saved = await repo.get_entry("weekly0913:sec_1")
         assert saved.operation_id == operation_id
@@ -336,3 +345,50 @@ async def test_incremental_operation_is_persisted_before_download(
     )
     assert outcome.status == "completed"
     engine.posts.download_new_posts.assert_awaited_once()
+
+
+async def test_incremental_download_is_bounded_by_the_queue_cutoff(
+    tmp_path: Path,
+) -> None:
+    """The runner hands delivery's cutoff to the download, in its timezone."""
+    (tmp_path / "Account").mkdir()
+    repo = FakeQueueRepository()
+    engine = _engine(repo)
+    await repo.upsert_entry(
+        key="weekly0913:sec_1",
+        round="weekly0913",
+        nickname="Account",
+        sec_user_id="sec_1",
+        mode="incremental",
+        status="pending",
+        cutoff="2026-09-06T00:00:00Z",
+        extra={},
+    )
+    seen: dict[str, object] = {}
+
+    async def complete(
+        sec_user_id: str,
+        *,
+        since_aweme_id: str | None,
+        operation_id: str,
+        posted_after: datetime | None = None,
+    ) -> IncrementalDownloadResult:
+        seen["posted_after"] = posted_after
+        await engine.operations.update_operation(
+            operation_id,
+            status="completed",
+            message="No new posts found",
+            download_path="Account",
+            metadata={"new_count": 0, "failed_count": 0},
+        )
+        return IncrementalDownloadResult(
+            operation_id=operation_id,
+            new_count=0,
+            newest_aweme_id=None,
+            seen_aweme_ids=[],
+            failed_count=0,
+        )
+
+    engine.posts.download_new_posts = AsyncMock(side_effect=complete)
+    await run_once(engine=engine, config=_config(tmp_path), round_name="weekly0913")
+    assert seen["posted_after"] == datetime(2026, 9, 6, 8, 0)

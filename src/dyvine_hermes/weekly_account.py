@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from dyvine.services.delivery import (
     FeishuCredentials,
@@ -17,19 +15,10 @@ from dyvine.services.delivery import (
 from dyvine.services.delivery_durable import media_identity
 
 from .weekly_download import download_entry
-from .weekly_state import _checkpoint, _path_within_root, patch_queue
+from .weekly_state import _checkpoint, _path_within_root, entry_cutoff, patch_queue
 from .weekly_types import WeeklyConfig, WeeklyOutcome
 
 MAX_FILES_PER_RUN = 20
-
-
-def _cutoff(entry: Any, timezone: str) -> datetime | None:
-    if not entry.cutoff:
-        return None
-    parsed = datetime.fromisoformat(entry.cutoff.replace("Z", "+00:00"))
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(ZoneInfo(timezone))
-    return parsed.replace(tzinfo=None)
 
 
 async def _avatar_url(engine: Any, entry: Any) -> str | None:
@@ -104,7 +93,7 @@ async def _resolve_group(
 
 
 def _media_candidates(entry: Any, user_dir: Path, timezone: str) -> list[Path]:
-    cutoff = _cutoff(entry, timezone)
+    cutoff = entry_cutoff(entry, timezone)
     if not user_dir.is_dir():
         raise ValueError("recorded download directory is missing")
     files: list[Path] = []

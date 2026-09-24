@@ -20,7 +20,7 @@ from typing import Any
 
 from dyvine.db.models import DeliveryFileRow, DeliveryGroupRow, DownloadQueueRow
 from dyvine.services.delivery import post_datetime_from_path, upload_file_name
-from dyvine_hermes.weekly_account import _cutoff as weekly_cutoff
+from dyvine_hermes.weekly_state import entry_cutoff
 from scripts.feishu_audit_core import _digest
 
 
@@ -599,7 +599,7 @@ def attest_window(
         return issue
     if queue.mode != "incremental" or not queue.cutoff:
         return "window attestation needs an incremental queue cutoff"
-    cutoff = weekly_cutoff(queue, timezone)
+    cutoff = entry_cutoff(queue, timezone)
     assert cutoff is not None
     target_source = _source_digest(
         original, group, current_queues, current_files, keys_file_sha256
