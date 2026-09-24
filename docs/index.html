@@ -612,11 +612,17 @@ PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
   --work-db &lt;private-staging.sqlite3&gt; --round &lt;active-round&gt; \
   --output &lt;private-group-review.jsonl&gt; --resume --apply</code></pre>
       <p>
-        For absent legacy topic keys, explicitly add
-        <code>--discover-missing-topics</code> with <code>--round</code> and
-        use a separate journal. The read-only preview scans complete chat
-        history for exactly one app-authored profile root. The resumed apply
-        rechecks that history before adopting the discovered topic.
+        For an absent legacy topic key, or a recorded root that was deleted,
+        explicitly add <code>--discover-missing-topics</code> with
+        <code>--round</code> and use a separate journal. The legacy sender
+        posted a profile root whenever it started delivering to a chat and
+        recorded the most recent one, so the read-only preview scans the
+        complete chat history and adopts the latest live app-authored root
+        (a post or a text message) that links to exactly this account's
+        profile. A chat whose root predates exact links is accepted only when
+        exactly one app-authored root carries a Douyin short link and none
+        names any profile. The resumed apply rechecks that history before
+        adopting the discovered topic.
       </p>
       <pre><code>PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
   --queue-path &lt;legacy-state-dir&gt;/download_queue.json \
@@ -729,10 +735,28 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
         chat does not hold move to <code>legacy_disproved</code> as
         <code>legacy_not_in_chat</code>, so the runner sends them again; a
         shortened ledger name counts as held while the chat has any file of its
-        post. The proposal carries the exact plan, the apply recomputes it from
-        the audit and Postgres and holds the row on any difference, and the
-        released row gets a fresh download.
+        post. A file name without a post time is outside every scope: the
+        runner never sends such media in a window, and no media path carries
+        that name. The proposal carries the exact plan, the apply recomputes it
+        from the audit and Postgres and holds the row on any difference, and
+        the released row gets a fresh download.
       </p>
+      <p>
+        An account whose queue rows or legacy progress name another chat than
+        its current group stays held, because that chat may hold sends the
+        runner would repeat. <code>audit_other_chats.py</code> reads each such
+        older chat for exact queue keys, read-only: a dissolved chat, whose
+        history Feishu keeps from its members, or one with no app file inside
+        the row's scope is cleared. Pass the journal as
+        <code>--other-chat-audit</code> to both the proposal and the apply; its
+        digest joins the plan digest, and any older chat it does not clear
+        still holds the row.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/audit_other_chats.py \
+  --legacy-report &lt;private-reconciliation.jsonl&gt; --round &lt;active-round&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --keys-file &lt;private-queue-keys.txt&gt; \
+  --output &lt;private-other-chat-audit.jsonl&gt;</code></pre>
       <p>
         The legacy queue records <code>skipped_404</code> for accounts the user
         ordered skipped for a round: the group is kept and nothing is sent. No

@@ -19,9 +19,10 @@ arguments. Apply rechecks Feishu before each idempotent Postgres import.
 It never creates a group, topic, or message.
 
 ``--discover-missing-topics`` requires ``--round`` and uses complete read-only
-chat history to identify one app-authored profile root when legacy topic keys
-are absent. It writes a separate, mode-bound journal and rechecks history on
-apply; default adoption remains unchanged.
+chat history to identify the account's current app-authored profile root when
+a legacy topic key is absent or its recorded root was deleted. It writes a
+separate, mode-bound journal and rechecks history on apply; default adoption
+remains unchanged.
 """
 
 from __future__ import annotations
@@ -162,7 +163,17 @@ async def _review_candidate(
             expected_owner,
             unique_chat=candidate.chat_id in unique_chats,
         )
-    return await _verify(candidate, reader, app_id, expected_owner)
+    decision, evidence = await _verify(candidate, reader, app_id, expected_owner)
+    if discover and decision == "feishu_topic_deleted":
+        # The chat still shows which profile root the sender used last.
+        return await _discover(
+            candidate,
+            reader,
+            app_id,
+            expected_owner,
+            unique_chat=candidate.chat_id in unique_chats,
+        )
+    return decision, evidence
 
 
 def _report_rows(
@@ -240,7 +251,7 @@ async def run(
         unmatched = [item for item in unmatched if item.get("round") == args.round]
     if args.discover_missing_topics:
         fingerprint = hashlib.sha256(
-            f"legacy-topic-discovery-v2\0{fingerprint}".encode()
+            f"legacy-topic-discovery-v3\0{fingerprint}".encode()
         ).hexdigest()
     journal = Journal(args.output, fingerprint, resume=args.resume)
     try:
@@ -343,9 +354,7 @@ async def _run_with_reader(
             for candidate in candidates:
                 report = rows[candidate.row_id]
                 discovered = (
-                    args.discover_missing_topics
-                    and candidate.row_id in discovery_ids
-                    and report["decision"] == "discovered"
+                    args.discover_missing_topics and report["decision"] == "discovered"
                 )
                 if candidate.row_id in applied or (
                     report["decision"] != "verified" and not discovered
@@ -367,6 +376,8 @@ async def _run_with_reader(
                         evidence.get(field) != report.get(field)
                         for field in (
                             "discovered_topic_message_id",
+                            "topic_selection",
+                            "profile_post_matches",
                             "chat_history_sha256",
                             "root_message_sha256",
                             "history_pages",

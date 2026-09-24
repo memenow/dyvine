@@ -634,9 +634,77 @@ def test_adoption_follows_the_cutoff_delivery_applies_even_in_full_mode() -> Non
     assert (plan.scope, plan.adopt) == ("window", ())
 
 
-def test_adoption_holds_an_app_file_without_a_post_time() -> None:
-    values = _window_inputs([{"file_name": "no-date.mp4"}], [])
-    assert plan_feishu_adoption(**values) == "Feishu app file name has no post time"
+@pytest.mark.parametrize(
+    ("cutoff", "mode"), [("2026-09-06T08:00:00", "incremental"), (None, "full")]
+)
+def test_adoption_leaves_names_without_a_post_time_out_of_scope(
+    cutoff: str | None, mode: str
+) -> None:
+    kept = _media(_IN_WINDOW, "kept")
+    values = _window_inputs(
+        [{"file_name": "no-date.mp4"}, _chat_file(kept)], [], cutoff=cutoff, mode=mode
+    )
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert [item.relative_path for item in plan.adopt] == [kept]
+
+
+def _older_chat(status: str = "normal", *names: str, complete: bool = True) -> Any:
+    return {
+        "oc-other": {
+            "chat_status": status,
+            "scan_complete": complete,
+            "app_file_names": list(names),
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "older",
+    [
+        _older_chat("dissolved", complete=False),
+        _older_chat("dissolved_save", complete=False),
+        _older_chat("normal", _chat_file(_media(_BEFORE_CUTOFF))["file_name"]),
+        _older_chat("normal", "no-date.mp4"),
+        _older_chat("normal"),
+    ],
+)
+def test_adoption_clears_an_older_chat_that_cannot_hold_a_repeated_send(
+    older: dict[str, dict[str, Any]],
+) -> None:
+    values = _window_inputs([], [])
+    values["work_chats"] = {("weekly0913", "Alpha"): {"oc-chat", "oc-other"}}
+    values["other_chats"] = older
+    assert isinstance(plan_feishu_adoption(**values), FeishuAdoption)
+
+
+@pytest.mark.parametrize(
+    ("older", "cutoff", "mode"),
+    [
+        (
+            _older_chat("normal", _chat_file(_media(_IN_WINDOW))["file_name"]),
+            "2026-09-06T08:00:00",
+            "incremental",
+        ),
+        (_older_chat("normal", complete=False), "2026-09-06T08:00:00", "incremental"),
+        (
+            _older_chat("normal", _chat_file(_media(_BEFORE_CUTOFF))["file_name"]),
+            None,
+            "full",
+        ),
+        ({"oc-chat": _older_chat("dissolved")["oc-other"]}, None, "full"),
+        ({}, "2026-09-06T08:00:00", "incremental"),
+    ],
+)
+def test_adoption_holds_an_older_chat_the_audit_does_not_clear(
+    older: dict[str, dict[str, Any]], cutoff: str | None, mode: str
+) -> None:
+    values = _window_inputs([], [], cutoff=cutoff, mode=mode)
+    values["work_chats"] = {("weekly0913", "Alpha"): {"oc-chat", "oc-other"}}
+    values["other_chats"] = older
+    assert plan_feishu_adoption(**values) == (
+        "account has another or unverified historical chat"
+    )
 
 
 def test_adoption_holds_a_shared_chat() -> None:

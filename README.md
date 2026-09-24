@@ -327,10 +327,15 @@ PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
   --output <private-group-review.jsonl> --resume --apply
 ```
 
-If a legacy topic key is missing, opt in to full chat-history discovery
-with `--discover-missing-topics --round <active-round>` and a separate
-report path. The preview accepts only one app-authored profile root; the
-resumed apply rechecks the chat history before adopting it. Keep the
+If a legacy topic key is missing, or its recorded root was deleted, opt
+in to full chat-history discovery with `--discover-missing-topics --round
+<active-round>` and a separate report path. The legacy sender posted a
+profile root whenever it started delivering to a chat and recorded the most
+recent one, so the preview adopts the latest live app-authored root that
+links to exactly this account's profile (a post or a text message). A chat
+whose root predates exact links is accepted only when exactly one
+app-authored root carries a Douyin short link and none names any profile.
+The resumed apply rechecks the chat history before adopting it. Keep the
 discovery journal separate from the default adoption journal:
 
 ```bash
@@ -449,9 +454,28 @@ name at its exact path, and a shortened name, which lost its media slot, as
 one post-level row that covers every media of that post. Ledger rows the
 chat does not hold move to `legacy_disproved` as `legacy_not_in_chat`, so the
 runner sends them again; a shortened ledger name counts as held while the
-chat has any file of its post. The proposal carries the exact plan, the
+chat has any file of its post. A file name without a post time is outside
+every scope: the runner never sends such media in a window, and no media
+path carries that name. The proposal carries the exact plan, the
 apply recomputes it from the audit and Postgres and holds the row on any
 difference, and the released row gets a fresh download.
+
+An account whose queue rows or legacy progress name another chat than its
+current group stays held, because that chat may hold sends the runner would
+repeat. `audit_other_chats.py` reads each such older chat for exact queue
+keys, read-only: a dissolved chat, whose history Feishu keeps from its
+members, or one with no app file inside the row's scope is cleared. Pass the
+journal as `--other-chat-audit` to both the proposal and the apply; its
+digest joins the plan digest, and any older chat it does not clear still
+holds the row.
+
+```bash
+PYTHONPATH=src uv run python scripts/audit_other_chats.py \
+  --legacy-report <private-reconciliation.jsonl> --round <active-round> \
+  --legacy-work-db <private-staging.sqlite3> \
+  --keys-file <private-queue-keys.txt> \
+  --output <private-other-chat-audit.jsonl>
+```
 
 The legacy queue records `skipped_404` for accounts the user ordered skipped
 for a round: the group is kept and nothing is sent. No other action can close

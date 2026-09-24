@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,7 @@ from scripts.feishu_audit_core import _digest
 from scripts.queue_group_attestation import (
     AuditJournal,
     read_audit_journal,
+    read_other_chat_audit,
     read_work_chats,
 )
 from scripts.queue_reconciliation_policy import _report_rows
@@ -29,6 +30,8 @@ class GroupInputs:
     supplemental_journal: AuditJournal | None = None
     supplemental_keys: frozenset[str] = frozenset()
     keys_file_sha256: str | None = None
+    other_chats: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    other_chat_audit_sha256: str | None = None
 
     def journal_for(self, key: str) -> tuple[AuditJournal, str | None]:
         """Choose the sole permitted source for this reviewed account."""
@@ -43,6 +46,8 @@ class GroupInputs:
         if self.supplemental_journal is not None:
             assert self.keys_file_sha256 is not None
             values.extend((self.supplemental_journal.sha256, self.keys_file_sha256))
+        if self.other_chat_audit_sha256 is not None:
+            values.append(self.other_chat_audit_sha256)
         return tuple(values)
 
 
@@ -56,6 +61,7 @@ def load_group_inputs(
     active_round: str,
     supplemental_audit_path: Path | None = None,
     supplemental_keys_path: Path | None = None,
+    other_chat_audit_path: Path | None = None,
 ) -> GroupInputs:
     """Require the reviewed rows to differ from the audit source only by decisions."""
     source_rows, source_sha256 = _report_rows(source_report)
@@ -121,6 +127,14 @@ def load_group_inputs(
         if completed > 1:
             raise ValueError("selected account has duplicate completed audit rows")
     work_chats, work_sha256 = read_work_chats(work_path)
+    other_chats: dict[str, dict[str, dict[str, Any]]] = {}
+    other_chat_sha256: str | None = None
+    if other_chat_audit_path is not None:
+        other_chats, other_chat_sha256 = read_other_chat_audit(
+            other_chat_audit_path,
+            manifest_source,
+            {row["key"] for row in source_rows if row.get("round") == active_round},
+        )
     return GroupInputs(
         {row["key"]: row for row in source_rows},
         reviewed_rows,
@@ -131,4 +145,6 @@ def load_group_inputs(
         supplemental,
         frozenset(supplemental_keys),
         keys_sha256,
+        other_chats=other_chats,
+        other_chat_audit_sha256=other_chat_sha256,
     )

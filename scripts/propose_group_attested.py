@@ -114,6 +114,11 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
             if getattr(args, "supplemental_keys_file", None)
             else None
         ),
+        other_chat_audit_path=(
+            Path(args.other_chat_audit)
+            if getattr(args, "other_chat_audit", None)
+            else None
+        ),
     )
     database_url = os.environ.get(args.database_url_env)
     if not database_url:
@@ -200,6 +205,7 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
             inputs.supplemental_journal.sha256 if inputs.supplemental_journal else None
         ),
         "supplemental_keys_sha256": inputs.keys_file_sha256,
+        "other_chat_audit_sha256": inputs.other_chat_audit_sha256,
         "legacy_work_sha256": inputs.work_sha256,
         "total_rows": len(source_rows),
         "active_rows": len(selected),
@@ -214,6 +220,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feishu-audit", required=True)
     parser.add_argument("--supplemental-feishu-audit")
     parser.add_argument("--supplemental-keys-file")
+    parser.add_argument("--other-chat-audit")
     parser.add_argument("--legacy-work-db", required=True)
     parser.add_argument("--active-round", required=True)
     parser.add_argument("--output", required=True)
@@ -244,6 +251,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.feishu_audit,
             args.supplemental_feishu_audit,
             args.supplemental_keys_file,
+            args.other_chat_audit,
             args.legacy_work_db,
         )
         if value

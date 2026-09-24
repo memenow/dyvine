@@ -185,6 +185,60 @@ def read_audit_journal(
     )
 
 
+def other_chat_source_digest(manifest_source: str) -> str:
+    """Bind an other-chat audit to the frozen report and round it read."""
+    return _digest({"other_chat_audit": manifest_source})
+
+
+def read_other_chat_audit(
+    path: Path, manifest_source: str, active_keys: set[str]
+) -> tuple[dict[str, dict[str, dict[str, Any]]], str]:
+    """Read older-chat evidence per account while hashing the whole journal."""
+    payload = path.read_bytes()
+    rows: list[dict[str, Any]] = []
+    for number, line in enumerate(payload.splitlines(keepends=True), start=1):
+        if not line.endswith(b"\n"):
+            raise ValueError("other-chat audit has an incomplete final row")
+        try:
+            row = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"invalid other-chat audit JSONL at line {number}"
+            ) from error
+        if not isinstance(row, dict):
+            raise ValueError("other-chat audit has a non-object row")
+        rows.append(row)
+    expected = {
+        "type": "manifest",
+        "schema": 1,
+        "source_sha256": other_chat_source_digest(manifest_source),
+    }
+    if not rows or rows[0] != expected:
+        raise ValueError("other-chat audit does not match the frozen source report")
+    evidence: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in rows[1:]:
+        key = row.get("key")
+        if key not in active_keys:
+            raise ValueError("other-chat audit names a key outside the active round")
+        if row.get("type") == "account":
+            continue
+        chat = row.get("chat_id")
+        names = row.get("app_file_names")
+        if (
+            row.get("type") != "other_chat"
+            or not isinstance(chat, str)
+            or not chat
+            or not isinstance(row.get("scan_complete"), bool)
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) for name in names)
+        ):
+            raise ValueError("other-chat audit has a malformed row")
+        if chat in evidence.setdefault(str(key), {}):
+            raise ValueError("other-chat audit repeats a chat for one account")
+        evidence[str(key)][chat] = row
+    return evidence, hashlib.sha256(payload).hexdigest()
+
+
 def read_work_chats(path: Path) -> tuple[dict[tuple[str, str], set[str]], str]:
     """Read staged progress chat IDs without modifying the SQLite checkpoint."""
     connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
@@ -343,21 +397,16 @@ _EXPLAINED_DISCREPANCIES = frozenset(
 )
 
 
-def _single_chat_issue(
+def historical_chats(
     *,
     report: dict[str, Any],
-    group: DeliveryGroupRow,
-    current_queues: list[DownloadQueueRow],
     historical_queues: list[DownloadQueueRow],
     all_report_rows: list[dict[str, Any]],
     work_chats: dict[tuple[str, str], set[str]],
     known_aliases: set[str] | None,
-) -> str | None:
-    """Require every historical send of this account to share one chat."""
+) -> set[str] | str:
+    """Every chat the account's queue rows or legacy progress sent to."""
     sec = report["sec_user_id"]
-    chat_id = group.chat_id
-    if not chat_id or len(current_queues) != 1:
-        return "current queue or group is not unique"
     aliases = set(known_aliases or ())
     aliases.update(row.nickname for row in historical_queues)
     aliases.update(
@@ -391,7 +440,38 @@ def _single_chat_issue(
             progress_chats.update(chats)
         elif sec in owners or not owners:
             return "historical nickname chat cannot be attributed to one account"
-    if queue_chats | progress_chats != {chat_id}:
+    return queue_chats | progress_chats
+
+
+def _single_chat_issue(
+    *,
+    report: dict[str, Any],
+    group: DeliveryGroupRow,
+    current_queues: list[DownloadQueueRow],
+    historical_queues: list[DownloadQueueRow],
+    all_report_rows: list[dict[str, Any]],
+    work_chats: dict[tuple[str, str], set[str]],
+    known_aliases: set[str] | None,
+    cleared_chats: frozenset[str] = frozenset(),
+) -> str | None:
+    """Require every historical send of this account to share one chat.
+
+    ``cleared_chats`` are older chats an audit showed cannot hold a send the
+    current row's delivery would repeat.
+    """
+    chat_id = group.chat_id
+    if not chat_id or len(current_queues) != 1:
+        return "current queue or group is not unique"
+    chats = historical_chats(
+        report=report,
+        historical_queues=historical_queues,
+        all_report_rows=all_report_rows,
+        work_chats=work_chats,
+        known_aliases=known_aliases,
+    )
+    if isinstance(chats, str):
+        return chats
+    if chats - (cleared_chats - {chat_id}) != {chat_id}:
         return "account has another or unverified historical chat"
     return None
 
@@ -711,6 +791,9 @@ def attest_window(
     )
 
 
+# Feishu keeps a dissolved chat's history from its members, so nothing sent
+# there still counts as delivered.
+_DISSOLVED_CHAT_STATUSES = frozenset({"dissolved", "dissolved_save"})
 # f2 media slots that close an untruncated file name, such as ``_image_3.webp``.
 _MEDIA_SLOT_SUFFIX = re.compile(
     r"_(?:video|image_\d+|live_\d+|cover|music)\.[A-Za-z0-9]+$"
@@ -748,6 +831,7 @@ def plan_feishu_adoption(
     timezone: str,
     known_aliases: set[str] | None = None,
     keys_file_sha256: str | None = None,
+    other_chats: dict[str, dict[str, Any]] | None = None,
 ) -> FeishuAdoption | str:
     """Plan the ledger changes that make it agree with the audited chat.
 
@@ -757,10 +841,29 @@ def plan_feishu_adoption(
     are demoted so the runner sends them again; a shortened ledger name
     counts as held while the chat has any file of its post. The scope is
     what delivery sends: media after the queue cutoff when the row has one,
-    whatever its download mode, or the whole feed otherwise.
+    whatever its download mode, or the whole feed otherwise. A name without
+    a post time is outside every scope, as the runner never sends such media
+    in a window and no media path can carry that name. ``other_chats`` holds
+    the other-chat audit of this account's older chats: a dissolved chat or
+    one with no in-scope app file cannot hold a send delivery would repeat.
     """
     sec = report["sec_user_id"]
     chat_id = group.chat_id
+    cutoff = entry_cutoff(queue, timezone)
+
+    def in_scope(name: str) -> bool:
+        posted = _posted(name)
+        return posted is not None and (cutoff is None or posted > cutoff)
+
+    cleared = frozenset(
+        chat
+        for chat, evidence in (other_chats or {}).items()
+        if evidence.get("chat_status") in _DISSOLVED_CHAT_STATUSES
+        or (
+            evidence.get("scan_complete") is True
+            and not any(in_scope(name) for name in evidence["app_file_names"])
+        )
+    )
     issue = _single_chat_issue(
         report=report,
         group=group,
@@ -769,6 +872,7 @@ def plan_feishu_adoption(
         all_report_rows=all_report_rows,
         work_chats=work_chats,
         known_aliases=known_aliases,
+        cleared_chats=cleared,
     )
     if issue:
         return issue
@@ -777,7 +881,6 @@ def plan_feishu_adoption(
         for file in historical_files
     ):
         return "imported historical file ledger belongs to another account or chat"
-    cutoff = entry_cutoff(queue, timezone)
     target_source = _source_digest(
         original, group, current_queues, current_files, keys_file_sha256
     )
@@ -786,12 +889,6 @@ def plan_feishu_adoption(
     )
     if isinstance(app_files, str):
         return app_files
-    if any(_posted(file["file_name"]) is None for file in app_files):
-        return "Feishu app file name has no post time"
-
-    def in_scope(name: str) -> bool:
-        posted = _posted(name)
-        return posted is not None and (cutoff is None or posted > cutoff)
 
     chat = sorted(
         (file for file in app_files if in_scope(file["file_name"])),
