@@ -443,6 +443,61 @@ async def test_prior_send_under_an_edited_caption_is_not_counted_as_sent(
     channel.deliver_file.assert_awaited_once()
 
 
+async def test_post_covered_media_never_takes_the_send_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(weekly_account_module, "MAX_FILES_PER_RUN", 2)
+    user_dir = tmp_path / "Account"
+    adopted, fresh = "2026-09-13 09-00-00", "2026-09-14 09-00-00"
+    adopted_dir = user_dir / f"{adopted}_caption"
+    adopted_dir.mkdir(parents=True)
+    for index in (1, 2, 3):
+        (adopted_dir / f"{adopted}_caption_image_{index}.webp").write_bytes(
+            f"image {index}".encode()
+        )
+    fresh_dir = user_dir / f"{fresh}_clip"
+    fresh_dir.mkdir()
+    video = fresh_dir / f"{fresh}_clip_video.mp4"
+    video.write_bytes(b"video")
+    repo = FakeQueueRepository()
+    await _entry(repo, root=user_dir, cutoff="2026-09-12T08:00:00")
+    engine = _engine(repo)
+    post_level = SimpleNamespace(
+        relative_path=f"{adopted}_feishu/{adopted}_feishu_post",
+        status="legacy_confirmed_sent",
+    )
+
+    async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        return [post_level] if kwargs.get("status") == "legacy_confirmed_sent" else []
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
+    group = SimpleNamespace(
+        status="ready",
+        chat_id="oc_new",
+        topic_status="ready",
+        topic_message_id="om_topic",
+    )
+
+    async def deliver_file(**kwargs: Path) -> SimpleNamespace:
+        relative = kwargs["file_path"].relative_to(user_dir).as_posix()
+        return SimpleNamespace(status="sent", relative_path=relative)
+
+    channel = SimpleNamespace(
+        ensure_group=AsyncMock(return_value=group),
+        ensure_topic=AsyncMock(return_value=group),
+        deliver_file=AsyncMock(side_effect=deliver_file),
+    )
+    outcome = await run_once(
+        engine=engine,
+        config=_config(tmp_path),
+        round_name="weekly0913",
+        channel=channel,
+    )
+    assert (outcome.status, outcome.files) == ("completed", 1)
+    channel.deliver_file.assert_awaited_once()
+    assert channel.deliver_file.await_args.kwargs["file_path"] == video
+
+
 async def test_legacy_confirmed_path_completes_without_new_group(
     tmp_path: Path,
 ) -> None:
