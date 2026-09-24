@@ -19,6 +19,7 @@ import httpx
 
 from ..core.exceptions import DeliveryError
 from ..core.logging import ContextLogger
+from ..db.delivery_ledger import post_media_slot
 from ..db.protocols import DeliveryLedgerRepository
 from ..db.records import DeliveryGroupRecord, FileDeliveryRecord
 
@@ -27,7 +28,7 @@ logger = ContextLogger(__name__)
 #: Extensions the sender ever ships.
 MEDIA_EXTS = frozenset({".mp4", ".webp", ".jpg", ".jpeg", ".png"})
 
-#: Upload names longer than this are truncated to stem[:40] + ext.
+#: Upload names longer than this are shortened (see ``upload_file_name``).
 LONG_NAME_CHARS = 50
 TRUNCATED_STEM_CHARS = 40
 
@@ -268,13 +269,33 @@ def post_datetime_from_path(path: Path, user_dir: Path) -> datetime | None:
         return None
 
 
-def upload_file_name(file_path: Path) -> str:
-    """Return the Feishu upload name (truncated, on-disk name untouched)."""
+def legacy_upload_file_name(file_path: Path) -> str:
+    """Return the name the legacy sender uploaded: ``stem[:40] + ext`` if long.
+
+    Audits match historical Feishu files by this name, so it must not change.
+    """
     name = file_path.name
     if len(name) > LONG_NAME_CHARS:
         stem, ext = file_path.stem, file_path.suffix
         return stem[:TRUNCATED_STEM_CHARS] + ext
     return name
+
+
+def upload_file_name(file_path: Path) -> str:
+    """Return the Feishu upload name (on-disk name untouched).
+
+    A long f2 media name keeps its media slot (``_image_3.webp``) and drops
+    caption characters instead, so the images of one post keep distinct names
+    in the group. Other long names keep the legacy truncation.
+    """
+    name = file_path.name
+    if len(name) <= LONG_NAME_CHARS:
+        return name
+    media = post_media_slot(f"{file_path.parent.name}/{name}")
+    if media is None or len(media[0]) + len(media[1]) > LONG_NAME_CHARS:
+        return legacy_upload_file_name(file_path)
+    slot = media[1]
+    return name[: LONG_NAME_CHARS - len(slot)] + slot
 
 
 class FeishuGroupChannel:

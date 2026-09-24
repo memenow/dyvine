@@ -54,7 +54,9 @@ class Transport:
         file_field: str = "file",
         timeout: float = 300.0,
     ) -> dict[str, Any]:
-        self.uploads.append({"url": url, "path": file_path, "field": file_field})
+        self.uploads.append(
+            {"url": url, "path": file_path, "field": file_field, "name": file_name}
+        )
         if "/images" in url:
             return {"code": 0, "data": {"image_key": "avatar-key-1"}}
         return {"code": 0, "data": {"file_key": "file-key-1"}}
@@ -294,6 +296,31 @@ async def test_prior_send_under_an_edited_caption_is_not_sent_again(
     assert again.status == "sent"
     assert again.relative_path == paths[0].relative_to(user_dir).as_posix()
     assert len(transport.posts) == len(transport.uploads) == 1
+
+
+async def test_images_of_a_long_caption_post_upload_with_distinct_names(
+    tmp_path: Path,
+) -> None:
+    folder = "2026-09-22 10-00-00_" + "a caption long enough to be truncated" * 2
+    user_dir = tmp_path / "nickname"
+    (user_dir / folder).mkdir(parents=True)
+    ledger, transport = Ledger(), Transport()
+    channel = _channel(transport)
+    for n in (1, 2):
+        path = user_dir / folder / f"{folder}_image_{n}.webp"
+        path.write_bytes(f"image {n}".encode())
+        result = await channel.deliver_file(
+            ledger=ledger,
+            round="r1",
+            sec_user_id="sec-1",
+            user_dir=user_dir,
+            file_path=path,
+            chat_id="chat-1",
+            parent_id="topic-1",
+        )
+        assert result.status == "sent"
+    names = [upload["name"] for upload in transport.uploads]
+    assert [name[-13:] for name in names] == ["_image_1.webp", "_image_2.webp"]
 
 
 async def test_ambiguous_send_reuses_key_and_uuid(tmp_path: Path) -> None:

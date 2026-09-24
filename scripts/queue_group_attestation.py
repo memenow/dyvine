@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from dyvine.db.models import DeliveryFileRow, DeliveryGroupRow, DownloadQueueRow
-from dyvine.services.delivery import post_datetime_from_path, upload_file_name
+from dyvine.services.delivery import legacy_upload_file_name, post_datetime_from_path
 from dyvine_hermes.weekly_state import entry_cutoff
 from scripts.feishu_audit_core import _digest
 
@@ -528,7 +528,7 @@ def attest_group(
     if issue:
         return issue
     expected = Counter(
-        upload_file_name(Path(file.relative_path)) for file in historical_files
+        legacy_upload_file_name(Path(file.relative_path)) for file in historical_files
     )
     actual = Counter(file["file_name"] for file in messages)
     if expected != actual:
@@ -642,7 +642,7 @@ def attest_window(
     for item in historical_files:
         posted = _posted(item.relative_path)
         if posted is not None and posted > cutoff:
-            in_ledger[upload_file_name(Path(item.relative_path))] += 1
+            in_ledger[legacy_upload_file_name(Path(item.relative_path))] += 1
     if in_chat != in_ledger:
         return "Feishu in-window files differ from the legacy ledger"
     return WindowAttestation(

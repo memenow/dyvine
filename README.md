@@ -463,7 +463,11 @@ same account-relative path, or with the same post creation stamp and media
 slot (`_video.mp4`, `_image_3.webp`, ...) when a caption edit renamed it,
 so the file is not sent twice. Consecutive weekly windows overlap, so a
 confirmed send by this runner covers a caption-renamed re-download the same
-way. An uncertain send or unadopted legacy chat remains
+way. Upload names longer than 50 characters are shortened; post media keeps
+its slot suffix, so the images of one post keep distinct names in the group.
+The Feishu audit and the window proof still match legacy uploads by the
+legacy truncation (the first 40 characters of the stem plus the extension).
+An uncertain send or unadopted legacy chat remains
 on hold for message-level reconciliation; never replay a file merely
 because a summary counter or operation ID is missing.
 The `dyvine.delivery.send_account` tool also uses this ledger: pass `round`
