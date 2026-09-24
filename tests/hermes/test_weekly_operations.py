@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 from dyvine.services.posts import IncrementalDownloadResult
 from dyvine.services.queue import QueueService
 from dyvine_hermes.weekly import WeeklyConfig, run_once
@@ -103,10 +105,13 @@ async def test_empty_cutover_directory_ignores_old_incremental_zero_result(
     assert saved.extra["weekly"]["fresh_download_confirmed"] is True
 
 
-async def test_group_attested_incremental_rechecks_nonempty_dir_without_old_anchor(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "action", ["release_pending_group_attested", "release_pending_window_attested"]
+)
+async def test_attested_incremental_rechecks_nonempty_dir_without_old_anchor(
+    tmp_path: Path, action: str
 ) -> None:
-    """The attested release ignores old media and a stale completed checkpoint."""
+    """An attested release ignores old media and a stale completed checkpoint."""
     user_dir = tmp_path / "Account"
     post_dir = user_dir / "2026-09-13 09-00-00 post"
     post_dir.mkdir(parents=True)
@@ -133,7 +138,7 @@ async def test_group_attested_incremental_rechecks_nonempty_dir_without_old_anch
         extra={
             "since_aweme_id": "old-anchor",
             "weekly": {"download_complete": True, "user_dir": str(user_dir)},
-            "reconciliation": {"action": "release_pending_group_attested"},
+            "reconciliation": {"action": action},
         },
     )
     historical = SimpleNamespace(

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -22,6 +23,7 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -39,7 +41,9 @@ from dyvine.db.models import (  # noqa: E402
 from dyvine.db.session import DatabaseSessionFactory  # noqa: E402
 from scripts.queue_group_attestation import (  # noqa: E402
     GroupAttestation,
+    WindowAttestation,
     attest_group,
+    attest_window,
 )
 from scripts.queue_group_inputs import GroupInputs, load_group_inputs  # noqa: E402
 from scripts.queue_reconciliation_policy import (  # noqa: E402
@@ -51,16 +55,20 @@ from scripts.queue_reconciliation_policy import (  # noqa: E402
     _string,
 )
 
+_ATTESTED_ACTIONS = frozenset(
+    {"release_pending_group_attested", "release_pending_window_attested"}
+)
+
+
+def _action(row: dict[str, Any]) -> Any:
+    resolution = row.get("resolution")
+    return resolution.get("action") if isinstance(resolution, dict) else None
+
 
 def _group_inputs(
     args: argparse.Namespace, rows: list[dict[str, Any]]
 ) -> GroupInputs | None:
-    selected = {
-        row["key"]
-        for row in rows
-        if isinstance(row.get("resolution"), dict)
-        and row["resolution"].get("action") == "release_pending_group_attested"
-    }
+    selected = {row["key"] for row in rows if _action(row) in _ATTESTED_ACTIONS}
     if not selected:
         return None
     if not all(
@@ -68,7 +76,7 @@ def _group_inputs(
         for name in ("audit_source_report", "feishu_audit", "legacy_work_db")
     ):
         raise ValueError(
-            "group attestation requires --audit-source-report, "
+            "attested release requires --audit-source-report, "
             "--feishu-audit, and --legacy-work-db"
         )
     return load_group_inputs(
@@ -91,6 +99,29 @@ def _group_inputs(
     )
 
 
+async def _account_history(
+    session: Any, sec: str, *, lock: bool
+) -> tuple[list[DownloadQueueRow], list[DeliveryFileRow], set[str]]:
+    """Every queue row, file ledger row, and seed alias of one account."""
+    queue_query = select(DownloadQueueRow).where(DownloadQueueRow.sec_user_id == sec)
+    history_query = select(DeliveryFileRow).where(DeliveryFileRow.sec_user_id == sec)
+    if lock:
+        queue_query = queue_query.with_for_update()
+        history_query = history_query.with_for_update()
+    history_queues = list((await session.execute(queue_query)).scalars().all())
+    history_files = list((await session.execute(history_query)).scalars().all())
+    seed_aliases = set(
+        (
+            await session.execute(
+                select(SeedAccountRow.nickname).where(SeedAccountRow.sec_user_id == sec)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return history_queues, history_files, seed_aliases
+
+
 async def _inspect_row(
     session: Any,
     row: dict[str, Any],
@@ -100,6 +131,7 @@ async def _inspect_row(
     group_inputs: GroupInputs | None,
     *,
     lock: bool,
+    timezone: str | None = None,
 ) -> tuple[Decision, DownloadQueueRow | None]:
     queue = await session.get(DownloadQueueRow, row["key"], with_for_update=lock)
     legacy_key = _string(row.get("legacy_key"))
@@ -155,36 +187,60 @@ async def _inspect_row(
             .scalars()
             .all()
         )
+    action = _action(row)
     group_attestation: GroupAttestation | str | None = None
-    if (
-        isinstance(resolution, dict)
-        and resolution.get("action") == "release_pending_group_attested"
-    ):
+    window_attestation: WindowAttestation | str | None = None
+    if action == "release_pending_window_attested":
+        if group_inputs is None or group is None or queue is None:
+            window_attestation = (
+                "window attestation sources or adopted group are missing"
+            )
+        elif not timezone:
+            window_attestation = "window attestation needs the weekly timezone"
+        else:
+            sec = row["sec_user_id"]
+            history_queues, history_files, seed_aliases = await _account_history(
+                session, sec, lock=lock
+            )
+            # Legacy permanent failures were never sent and the runner skips
+            # them; any other non-legacy state is a new send attempt.
+            if any(
+                item.status != "legacy_confirmed_sent"
+                and not (item.status == "permanent_failure" and item.round == "legacy")
+                for item in history_files
+            ):
+                window_attestation = "account has new send attempts in the file ledger"
+            else:
+                journal, keys_sha256 = group_inputs.journal_for(row["key"])
+                window_attestation = attest_window(
+                    report=row,
+                    original=group_inputs.source_rows[row["key"]],
+                    all_report_rows=group_inputs.all_rows,
+                    group=group,
+                    queue=queue,
+                    current_queues=[
+                        item for item in history_queues if item.round == row["round"]
+                    ],
+                    current_files=files,
+                    historical_queues=history_queues,
+                    historical_files=[
+                        item
+                        for item in history_files
+                        if item.status == "legacy_confirmed_sent"
+                    ],
+                    work_chats=group_inputs.work_chats,
+                    journal=journal,
+                    timezone=timezone,
+                    known_aliases=seed_aliases,
+                    keys_file_sha256=keys_sha256,
+                )
+    if action == "release_pending_group_attested":
         if group_inputs is None or group is None:
             group_attestation = "group attestation sources or adopted group are missing"
         else:
             sec = row["sec_user_id"]
-            queue_query = select(DownloadQueueRow).where(
-                DownloadQueueRow.sec_user_id == sec
-            )
-            history_query = select(DeliveryFileRow).where(
-                DeliveryFileRow.sec_user_id == sec
-            )
-            if lock:
-                queue_query = queue_query.with_for_update()
-                history_query = history_query.with_for_update()
-            history_queues = list((await session.execute(queue_query)).scalars().all())
-            history_files = list((await session.execute(history_query)).scalars().all())
-            seed_aliases = set(
-                (
-                    await session.execute(
-                        select(SeedAccountRow.nickname).where(
-                            SeedAccountRow.sec_user_id == sec
-                        )
-                    )
-                )
-                .scalars()
-                .all()
+            history_queues, history_files, seed_aliases = await _account_history(
+                session, sec, lock=lock
             )
             current_queues = [
                 item for item in history_queues if item.round == row["round"]
@@ -220,6 +276,7 @@ async def _inspect_row(
         files=files,
         evidence=evidence,
         group_attestation=group_attestation,
+        window_attestation=window_attestation,
     )
     return decision, queue
 
@@ -233,6 +290,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     if not any(row.get("round") == args.active_round for row in rows):
         raise ValueError("active round is absent from the frozen report")
     evidence_digests = group_inputs.evidence_digests if group_inputs else ()
+    timezone = getattr(args, "timezone", None)
+    if any(_action(row) == "release_pending_window_attested" for row in rows):
+        if not timezone:
+            raise ValueError("window attestation requires --timezone")
+        # The timezone decides every window cutoff, so bind it to the plan.
+        evidence_digests += (
+            hashlib.sha256(f"timezone\0{timezone}".encode()).hexdigest(),
+        )
     plan_digest = _plan_digest(
         source_digest, args.active_round, args.archive_historical, evidence_digests
     )
@@ -262,6 +327,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                         duplicate_legacy_keys,
                         group_inputs,
                         lock=args.apply,
+                        timezone=timezone,
                     )
                     outcome = "held"
                     if decision.status is not None:
@@ -280,13 +346,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                     )
                                 ),
                             }
-                            if decision.action == "release_pending_group_attested":
+                            if decision.action in _ATTESTED_ACTIONS:
                                 assert group_inputs is not None
-                                assert decision.group_attestation is not None
                                 extra["reconciliation"].update(
-                                    audit_sha256=(
-                                        decision.group_attestation.audit_sha256
-                                    ),
                                     main_audit_sha256=group_inputs.journal.sha256,
                                     supplemental_audit_sha256=(
                                         group_inputs.supplemental_journal.sha256
@@ -298,6 +360,13 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                     ),
                                     audit_source_sha256=group_inputs.source_sha256,
                                     work_sha256=group_inputs.work_sha256,
+                                )
+                            if decision.action == "release_pending_group_attested":
+                                assert decision.group_attestation is not None
+                                extra["reconciliation"].update(
+                                    audit_sha256=(
+                                        decision.group_attestation.audit_sha256
+                                    ),
                                     target_source_sha256=(
                                         decision.group_attestation.target_source_sha256
                                     ),
@@ -309,6 +378,24 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                     ),
                                     proof="group_file_name_multiset",
                                 )
+                            if decision.action == "release_pending_window_attested":
+                                assert decision.window_attestation is not None
+                                extra["reconciliation"].update(
+                                    audit_sha256=(
+                                        decision.window_attestation.audit_sha256
+                                    ),
+                                    target_source_sha256=(
+                                        decision.window_attestation.target_source_sha256
+                                    ),
+                                    window_cutoff=decision.window_attestation.cutoff,
+                                    window_file_count=(
+                                        decision.window_attestation.window_file_count
+                                    ),
+                                    timezone=timezone,
+                                    proof="feishu_window_file_name_multiset",
+                                )
+                            if decision.action in _ATTESTED_ACTIONS:
+                                # Local media is gone; force a fresh download.
                                 weekly = extra.get("weekly")
                                 weekly = (
                                     dict(weekly) if isinstance(weekly, dict) else {}
@@ -459,6 +546,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--legacy-work-db", help="staged legacy progress SQLite database"
     )
+    parser.add_argument(
+        "--timezone",
+        help="weekly runner timezone (DYVINE_WEEKLY_TIMEZONE) for window cutoffs",
+    )
     parser.add_argument("--database-url-env", default="DATABASE_URL")
     parser.add_argument("--output", help="write the machine-readable result as JSON")
     parser.add_argument("--apply", action="store_true")
@@ -467,6 +558,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.apply and (not args.expect_plan_sha256 or args.expected_count is None):
         parser.error("--apply requires --expect-plan-sha256 and --expected-count")
+    if args.timezone:
+        try:
+            ZoneInfo(args.timezone)
+        except (ValueError, ZoneInfoNotFoundError):
+            parser.error("--timezone must be an IANA timezone name")
     if bool(args.supplemental_feishu_audit) != bool(args.supplemental_keys_file):
         parser.error("supplemental audit and keys file must be supplied together")
     if args.output and Path(args.output).resolve() in {

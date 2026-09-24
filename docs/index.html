@@ -662,6 +662,31 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
   --apply --expect-plan-sha256 &lt;preview-plan-sha256&gt; \
   --expected-count &lt;preview-expected-count&gt;</code></pre>
       <p>
+        A chat usually also holds files from rounds the imported progress never
+        covered, so the whole-chat multiset rarely matches. The weekly runner
+        only re-sends media posted after the queue cutoff, so the window proof
+        (<code>release_pending_window_attested</code>) compares just that part:
+        the app-sent, non-deleted Feishu file names posted after the cutoff must
+        equal the upload names of the legacy ledger's sends in the same window.
+        An extra Feishu file would be sent twice and an extra ledger file never,
+        so either difference holds the row. Ambiguous, cache-only, or failed
+        legacy sends need no separate proof, because the chat shows whether each
+        one arrived. Pass the runner's <code>DYVINE_WEEKLY_TIMEZONE</code> so
+        cutoffs match; it is bound into the plan digest.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_group_attested.py \
+  --action release_pending_window_attested --timezone Asia/Shanghai \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --feishu-audit &lt;private-feishu-audit.jsonl&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-window-attested-proposal.jsonl&gt;</code></pre>
+      <p>
+        Preview and apply that proposal with the
+        <code>apply_queue_reconciliation.py</code> commands above, adding
+        <code>--timezone</code> with the same value.
+      </p>
+      <p>
         The legacy queue records <code>skipped_404</code> for accounts the user
         ordered skipped for a round: the group is kept and nothing is sent. No
         other action can close such a row in the active round, so it would

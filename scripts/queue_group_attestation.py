@@ -1,7 +1,9 @@
 """Verify a frozen account against complete, group-level Feishu file evidence.
 
-This proof compares multisets of upload names. It never associates an old
-message with an individual media path or infers an old topic parent.
+Both proofs compare multisets of upload names. The group proof covers every
+file in the chat; the window proof covers only media posted after the queue
+cutoff, which is all the weekly runner can ever re-send. Neither associates
+an old message with an individual media path or infers an old topic parent.
 """
 
 from __future__ import annotations
@@ -12,11 +14,13 @@ import os
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from dyvine.db.models import DeliveryFileRow, DeliveryGroupRow, DownloadQueueRow
-from dyvine.services.delivery import upload_file_name
+from dyvine.services.delivery import post_datetime_from_path, upload_file_name
+from dyvine_hermes.weekly_account import _cutoff as weekly_cutoff
 from scripts.feishu_audit_core import _digest
 
 
@@ -28,6 +32,16 @@ class GroupAttestation:
     target_source_sha256: str
     historical_file_count: int
     legacy_user_failed_unknown: bool = False
+
+
+@dataclass(frozen=True)
+class WindowAttestation:
+    """A download-window count match, without path-to-message attribution."""
+
+    audit_sha256: str
+    target_source_sha256: str
+    cutoff: str
+    window_file_count: int
 
 
 @dataclass(frozen=True)
@@ -274,23 +288,27 @@ def _source_digest(
     return _digest(source)
 
 
-def attest_group(
+_EXPLAINED_DISCREPANCIES = frozenset(
+    {
+        "legacy_safe_sent_count_vs_app_topic_files",
+        "legacy_safe_sent_count_vs_app_group_files",
+        "app_files_outside_verified_topic",
+        "zero_file_group",
+    }
+)
+
+
+def _single_chat_issue(
     *,
     report: dict[str, Any],
-    original: dict[str, Any],
-    all_report_rows: list[dict[str, Any]],
     group: DeliveryGroupRow,
     current_queues: list[DownloadQueueRow],
-    current_files: list[DeliveryFileRow],
     historical_queues: list[DownloadQueueRow],
-    historical_files: list[DeliveryFileRow],
+    all_report_rows: list[dict[str, Any]],
     work_chats: dict[tuple[str, str], set[str]],
-    journal: AuditJournal,
-    known_aliases: set[str] | None = None,
-    keys_file_sha256: str | None = None,
-) -> GroupAttestation | str:
-    """Require a complete one-chat file-name multiset proof for this account."""
-    key = report["key"]
+    known_aliases: set[str] | None,
+) -> str | None:
+    """Require every historical send of this account to share one chat."""
     sec = report["sec_user_id"]
     chat_id = group.chat_id
     if not chat_id or len(current_queues) != 1:
@@ -330,32 +348,22 @@ def attest_group(
             return "historical nickname chat cannot be attributed to one account"
     if queue_chats | progress_chats != {chat_id}:
         return "account has another or unverified historical chat"
-    scoped = [row for row in all_report_rows if row.get("sec_user_id") == sec]
-    safe_total = 0
-    failed_unknown = False
-    for row in scoped:
-        for field in (
-            "ambiguous_sent_paths",
-            "cache_only_unverified_paths",
-            "permanent_failure_paths",
-            "permanent_unresolved_paths",
-            "failed_paths",
-            "snapshot_failed_entries",
-        ):
-            if row.get(field) != 0 or isinstance(row.get(field), bool):
-                return f"account has unresolved historical {field}"
-        if "legacy_user_failed_max" not in row:
-            return "account lacks a historical failure summary field"
-        if row["legacy_user_failed_max"] is None:
-            failed_unknown = True
-        elif row["legacy_user_failed_max"] != 0 or isinstance(
-            row["legacy_user_failed_max"], bool
-        ):
-            return "account has reported historical download failures"
-        safe = row.get("first_seen_safe_sent_paths")
-        if not isinstance(safe, int) or isinstance(safe, bool) or safe < 0:
-            return "account has an invalid safe-sent count"
-        safe_total += safe
+    return None
+
+
+def _safe_count(row: dict[str, Any]) -> int | None:
+    safe = row.get("first_seen_safe_sent_paths")
+    if not isinstance(safe, int) or isinstance(safe, bool) or safe < 0:
+        return None
+    return safe
+
+
+def _ledger_issue(
+    historical_files: list[DeliveryFileRow],
+    sec: str,
+    chat_id: str | None,
+    safe_total: int,
+) -> str | None:
     if safe_total != len(historical_files) or any(
         file.status != "legacy_confirmed_sent"
         or file.sec_user_id != sec
@@ -363,9 +371,20 @@ def attest_group(
         for file in historical_files
     ):
         return "imported historical file ledger is incomplete or conflicting"
-    target_source = _source_digest(
-        original, group, current_queues, current_files, keys_file_sha256
-    )
+    return None
+
+
+def _audited_messages(
+    *,
+    report: dict[str, Any],
+    group: DeliveryGroupRow,
+    journal: AuditJournal,
+    target_source: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]] | str:
+    """Deduplicated file messages of a complete audit bound to this target."""
+    key = report["key"]
+    sec = report["sec_user_id"]
+    chat_id = group.chat_id
     rows = journal.rows_for(key)
     accounts = [row for row in rows if row.get("type") == "account"]
     if not accounts or accounts[-1].get("scan_complete") is not True:
@@ -409,7 +428,85 @@ def attest_group(
             if prior is not None and prior["signature"] != signature:
                 return "Feishu audit has conflicting copies of a file message"
             files_by_message[message_id] = {"signature": signature, "file": file}
-    messages = [item["file"] for item in files_by_message.values()]
+    return [item["file"] for item in files_by_message.values()], account
+
+
+def _discrepancy_issue(account: dict[str, Any]) -> str | None:
+    discrepancies = account.get("discrepancies")
+    if not isinstance(discrepancies, list) or any(
+        item not in _EXPLAINED_DISCREPANCIES for item in discrepancies
+    ):
+        return "Feishu audit has an unexplained discrepancy"
+    return None
+
+
+def attest_group(
+    *,
+    report: dict[str, Any],
+    original: dict[str, Any],
+    all_report_rows: list[dict[str, Any]],
+    group: DeliveryGroupRow,
+    current_queues: list[DownloadQueueRow],
+    current_files: list[DeliveryFileRow],
+    historical_queues: list[DownloadQueueRow],
+    historical_files: list[DeliveryFileRow],
+    work_chats: dict[tuple[str, str], set[str]],
+    journal: AuditJournal,
+    known_aliases: set[str] | None = None,
+    keys_file_sha256: str | None = None,
+) -> GroupAttestation | str:
+    """Require a complete one-chat file-name multiset proof for this account."""
+    sec = report["sec_user_id"]
+    chat_id = group.chat_id
+    issue = _single_chat_issue(
+        report=report,
+        group=group,
+        current_queues=current_queues,
+        historical_queues=historical_queues,
+        all_report_rows=all_report_rows,
+        work_chats=work_chats,
+        known_aliases=known_aliases,
+    )
+    if issue:
+        return issue
+    scoped = [row for row in all_report_rows if row.get("sec_user_id") == sec]
+    safe_total = 0
+    failed_unknown = False
+    for row in scoped:
+        for field in (
+            "ambiguous_sent_paths",
+            "cache_only_unverified_paths",
+            "permanent_failure_paths",
+            "permanent_unresolved_paths",
+            "failed_paths",
+            "snapshot_failed_entries",
+        ):
+            if row.get(field) != 0 or isinstance(row.get(field), bool):
+                return f"account has unresolved historical {field}"
+        if "legacy_user_failed_max" not in row:
+            return "account lacks a historical failure summary field"
+        if row["legacy_user_failed_max"] is None:
+            failed_unknown = True
+        elif row["legacy_user_failed_max"] != 0 or isinstance(
+            row["legacy_user_failed_max"], bool
+        ):
+            return "account has reported historical download failures"
+        safe = _safe_count(row)
+        if safe is None:
+            return "account has an invalid safe-sent count"
+        safe_total += safe
+    issue = _ledger_issue(historical_files, sec, chat_id, safe_total)
+    if issue:
+        return issue
+    target_source = _source_digest(
+        original, group, current_queues, current_files, keys_file_sha256
+    )
+    audited = _audited_messages(
+        report=report, group=group, journal=journal, target_source=target_source
+    )
+    if isinstance(audited, str):
+        return audited
+    messages, account = audited
     if any(
         file.get("deleted") is not False
         or file.get("sender_type") != "app"
@@ -427,17 +524,9 @@ def attest_group(
         "app_group_file_count"
     ) != len(messages):
         return "Feishu audit group file counts differ from raw pages"
-    allowed_discrepancies = {
-        "legacy_safe_sent_count_vs_app_topic_files",
-        "legacy_safe_sent_count_vs_app_group_files",
-        "app_files_outside_verified_topic",
-        "zero_file_group",
-    }
-    discrepancies = account.get("discrepancies")
-    if not isinstance(discrepancies, list) or any(
-        item not in allowed_discrepancies for item in discrepancies
-    ):
-        return "Feishu audit has an unexplained discrepancy"
+    issue = _discrepancy_issue(account)
+    if issue:
+        return issue
     expected = Counter(
         upload_file_name(Path(file.relative_path)) for file in historical_files
     )
@@ -448,4 +537,114 @@ def attest_group(
         return "Feishu zero-file finding differs from raw pages"
     return GroupAttestation(
         journal.sha256, target_source, len(historical_files), failed_unknown
+    )
+
+
+def _posted(name: str) -> datetime | None:
+    """Post time exactly as the weekly runner reads it from a media path."""
+    root = Path("/")
+    return post_datetime_from_path(root / name, root)
+
+
+def attest_window(
+    *,
+    report: dict[str, Any],
+    original: dict[str, Any],
+    all_report_rows: list[dict[str, Any]],
+    group: DeliveryGroupRow,
+    queue: DownloadQueueRow,
+    current_queues: list[DownloadQueueRow],
+    current_files: list[DeliveryFileRow],
+    historical_queues: list[DownloadQueueRow],
+    historical_files: list[DeliveryFileRow],
+    work_chats: dict[tuple[str, str], set[str]],
+    journal: AuditJournal,
+    timezone: str,
+    known_aliases: set[str] | None = None,
+    keys_file_sha256: str | None = None,
+) -> WindowAttestation | str:
+    """Require Feishu and the legacy ledger to agree inside the download window.
+
+    The weekly runner re-sends only media posted after the queue cutoff and
+    skips anything the legacy ledger records, so the ledger must name
+    exactly the app files already in the chat for that window: an extra
+    Feishu file would be sent twice, and an extra ledger file would never
+    be sent. Older rounds in the same chat are out of the runner's reach.
+    Ambiguous or unverified legacy sends need no separate proof here,
+    because the chat itself shows whether each one arrived.
+    """
+    sec = report["sec_user_id"]
+    chat_id = group.chat_id
+    issue = _single_chat_issue(
+        report=report,
+        group=group,
+        current_queues=current_queues,
+        historical_queues=historical_queues,
+        all_report_rows=all_report_rows,
+        work_chats=work_chats,
+        known_aliases=known_aliases,
+    )
+    if issue:
+        return issue
+    safe_total = 0
+    for row in all_report_rows:
+        if row.get("sec_user_id") != sec:
+            continue
+        safe = _safe_count(row)
+        if safe is None:
+            return "account has an invalid safe-sent count"
+        safe_total += safe
+    issue = _ledger_issue(historical_files, sec, chat_id, safe_total)
+    if issue:
+        return issue
+    if queue.mode != "incremental" or not queue.cutoff:
+        return "window attestation needs an incremental queue cutoff"
+    cutoff = weekly_cutoff(queue, timezone)
+    assert cutoff is not None
+    target_source = _source_digest(
+        original, group, current_queues, current_files, keys_file_sha256
+    )
+    audited = _audited_messages(
+        report=report, group=group, journal=journal, target_source=target_source
+    )
+    if isinstance(audited, str):
+        return audited
+    messages, account = audited
+    if any(not isinstance(file.get("deleted"), bool) for file in messages):
+        return "Feishu audit has a file message without a deletion state"
+    active = [file for file in messages if not file["deleted"]]
+    app_files = [file for file in active if file.get("sender_type") == "app"]
+    if any(
+        not isinstance(file.get("sender_id"), str)
+        or not file.get("sender_id")
+        or not isinstance(file.get("file_name"), str)
+        or not file.get("file_name")
+        for file in app_files
+    ):
+        return "Feishu audit has an unnamed or unattributed app file"
+    if len({file["sender_id"] for file in app_files}) > 1:
+        return "Feishu audit files have multiple app senders"
+    if account.get("group_file_count") != len(active) or account.get(
+        "app_group_file_count"
+    ) != len(app_files):
+        return "Feishu audit group file counts differ from raw pages"
+    issue = _discrepancy_issue(account)
+    if issue:
+        return issue
+    in_chat: Counter[str] = Counter()
+    for file in app_files:
+        posted = _posted(file["file_name"])
+        if posted is None:
+            return "Feishu app file name has no post time"
+        if posted > cutoff:
+            in_chat[file["file_name"]] += 1
+    in_ledger: Counter[str] = Counter()
+    for item in historical_files:
+        posted = _posted(item.relative_path)
+        if posted is not None and posted > cutoff:
+            in_ledger[upload_file_name(Path(item.relative_path))] += 1
+    if in_chat != in_ledger:
+        return "Feishu in-window files differ from the legacy ledger"
+    return WindowAttestation(
+        journal.sha256, target_source, cutoff.isoformat(), sum(in_ledger.values())
     )

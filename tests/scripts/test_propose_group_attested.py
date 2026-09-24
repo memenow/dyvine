@@ -183,3 +183,27 @@ def test_missing_frozen_adoption_holds_unready_or_wrong_account_group(
     _summary, rows, session = _run(tmp_path, monkeypatch, group, expected=0)
     assert session.group_reads == 1
     assert "resolution" not in rows[0]
+
+
+def test_window_action_requires_the_weekly_timezone(tmp_path: Path) -> None:
+    argv = [
+        "--source-report",
+        str(tmp_path / "frozen.jsonl"),
+        "--feishu-audit",
+        str(tmp_path / "audit.jsonl"),
+        "--legacy-work-db",
+        str(tmp_path / "work.sqlite3"),
+        "--active-round",
+        "weekly0913",
+        "--output",
+        str(tmp_path / "proposal.jsonl"),
+        "--action",
+        "release_pending_window_attested",
+    ]
+    with pytest.raises(SystemExit):
+        proposer.parse_args(argv)
+    args = proposer.parse_args([*argv, "--timezone", "Asia/Shanghai"])
+    assert (args.action, args.timezone) == (
+        "release_pending_window_attested",
+        "Asia/Shanghai",
+    )
