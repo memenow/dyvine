@@ -111,7 +111,12 @@ async def test_empty_cutover_directory_ignores_old_incremental_zero_result(
 
 
 @pytest.mark.parametrize(
-    "action", ["release_pending_group_attested", "release_pending_window_attested"]
+    "action",
+    [
+        "release_pending_group_attested",
+        "release_pending_window_attested",
+        "release_pending_feishu_adopted",
+    ],
 )
 async def test_attested_incremental_rechecks_nonempty_dir_without_old_anchor(
     tmp_path: Path, action: str

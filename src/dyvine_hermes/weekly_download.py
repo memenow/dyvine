@@ -38,7 +38,11 @@ async def download_entry(
     attested_recheck = bool(
         isinstance(reconciliation, dict)
         and reconciliation.get("action")
-        in {"release_pending_group_attested", "release_pending_window_attested"}
+        in {
+            "release_pending_group_attested",
+            "release_pending_window_attested",
+            "release_pending_feishu_adopted",
+        }
         and not checkpoint.get("fresh_download_confirmed")
     )
     cutover_entry = entry.round == config.cutover_round

@@ -18,11 +18,13 @@ sys.path.insert(0, str(ROOT))
 from dyvine.services.delivery import legacy_upload_file_name  # noqa: E402
 from scripts.queue_group_attestation import (  # noqa: E402
     AuditJournal,
+    FeishuAdoption,
     GroupAttestation,
     WindowAttestation,
     _source_digest,
     attest_group,
     attest_window,
+    plan_feishu_adoption,
     read_audit_journal,
 )
 
@@ -562,3 +564,84 @@ def test_window_attestation_keeps_the_shared_audit_checks(mutation: str) -> None
         )
         account["group_file_count"] = account["app_group_file_count"] = 2
     assert isinstance(attest_window(**values), str)
+
+
+_LONG_CAPTION = "a caption long enough that Feishu truncates the upload name"
+
+
+def test_adoption_takes_the_chat_as_the_record_inside_the_window() -> None:
+    kept = _media(_IN_WINDOW, "kept")
+    exact = _media("2026-09-11 09-00-00", "short", "_image_2.webp")
+    shortened = _media("2026-09-12 09-00-00", _LONG_CAPTION, "_image_1.webp")
+    disproved = _media("2026-09-13 09-00-00", "gone")
+    older = _media(_BEFORE_CUTOFF, "older round")
+    values = _window_inputs(
+        [
+            _chat_file(kept),
+            _chat_file(exact),
+            _chat_file(shortened),
+            _chat_file(shortened),
+            _chat_file(older),
+        ],
+        [kept, disproved],
+    )
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.scope, plan.cutoff) == ("window", "2026-09-06T08:00:00")
+    post = "2026-09-12 09-00-00_feishu/2026-09-12 09-00-00_feishu_post"
+    assert [(item.relative_path, item.precision) for item in plan.adopt] == [
+        (exact, "exact"),
+        (post, "post"),
+    ]
+    assert len(plan.adopt[1].message_ids) == 2
+    assert plan.demote == ("media-1",)
+    assert plan.payload()["adopt"][0] == {
+        "relative_path": exact,
+        "message_ids": ["om-file-1"],
+        "precision": "exact",
+    }
+
+
+def test_adoption_keeps_a_shortened_ledger_name_while_the_chat_has_its_post() -> None:
+    first = _media(_IN_WINDOW, _LONG_CAPTION, "_image_1.webp")
+    second = _media(_IN_WINDOW, _LONG_CAPTION, "_image_2.webp")
+    plan = plan_feishu_adoption(**_window_inputs([_chat_file(first)], [first, second]))
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.adopt, plan.demote) == ((), ())
+
+
+def test_adoption_demotes_a_shortened_post_the_chat_does_not_hold() -> None:
+    gone = _media(_IN_WINDOW, _LONG_CAPTION, "_image_1.webp")
+    plan = plan_feishu_adoption(**_window_inputs([], [gone]))
+    assert isinstance(plan, FeishuAdoption)
+    assert plan.demote == ("media-0",)
+
+
+def test_adoption_covers_the_whole_feed_without_an_incremental_cutoff() -> None:
+    older = _media(_BEFORE_CUTOFF, "older", "_image_1.webp")
+    values = _window_inputs([_chat_file(older)], [], cutoff=None, mode="full")
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.scope, plan.cutoff) == ("full", None)
+    assert [item.relative_path for item in plan.adopt] == [older]
+
+
+def test_adoption_follows_the_cutoff_delivery_applies_even_in_full_mode() -> None:
+    older = _media(_BEFORE_CUTOFF, "older", "_image_1.webp")
+    values = _window_inputs([_chat_file(older)], [], mode="full")
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.scope, plan.adopt) == ("window", ())
+
+
+def test_adoption_holds_an_app_file_without_a_post_time() -> None:
+    values = _window_inputs([{"file_name": "no-date.mp4"}], [])
+    assert plan_feishu_adoption(**values) == "Feishu app file name has no post time"
+
+
+def test_adoption_holds_a_shared_chat() -> None:
+    values = _window_inputs([], [])
+    values["work_chats"] = {("weekly0913", "Alpha"): {"oc-chat", "oc-other"}}
+    assert plan_feishu_adoption(**values) == (
+        "account has another or unverified historical chat"
+    )
