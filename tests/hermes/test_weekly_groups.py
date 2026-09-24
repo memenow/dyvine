@@ -86,7 +86,11 @@ async def _setup(
     channel = SimpleNamespace(
         ensure_group=AsyncMock(return_value=_ready_group("oc_new")),
         ensure_topic=AsyncMock(return_value=_ready_group("oc_new")),
-        deliver_file=AsyncMock(return_value=SimpleNamespace(status="sent")),
+        deliver_file=AsyncMock(
+            return_value=SimpleNamespace(
+                status="sent", relative_path=file_path.relative_to(user_dir).as_posix()
+            )
+        ),
     )
     return repo, engine, channel, file_path
 

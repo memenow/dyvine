@@ -468,14 +468,21 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
         runtime and file count. It waits for every download started by that
         invocation and saves its checkpoint to Postgres before exiting. It
         does not advance to the next pair until both current accounts have
-        terminal outcomes. An incremental download stops at the queue cutoff:
+        terminal outcomes. A row still parked in
+        <code>needs_reconciliation</code> does not hold later pairs, but it
+        keeps blocking automatic rounds until it is reconciled. An incremental
+        download stops at the queue cutoff:
         media posted at or before it is neither downloaded nor sent, so a first
         run without a saved anchor fetches only the round's window, not the
         account's whole feed. With no
         <code>--round</code>, it creates a
         <code>weekly-YYYY-MM-DD</code> round at or after Sunday 08:00 in
-        <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>, using the previous
-        Sunday 08:00 as the incremental cutoff. The required
+        <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>. Its incremental
+        cutoff is the Sunday 08:00 of the latest earlier automatic round that
+        was opened; the first round uses the Sunday before the first eligible
+        one.
+        A week held back by an unfinished round therefore widens the next
+        window instead of being skipped. The required
         <code>DYVINE_WEEKLY_FIRST_AUTO_DATE</code> is the first eligible
         Sunday (<code>YYYY-MM-DD</code>); earlier automatic rounds are not
         opened. The required
@@ -558,6 +565,8 @@ PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
         the same account-relative path, or with the same post creation stamp
         and media slot (<code>_video.mp4</code>, <code>_image_3.webp</code>,
         ...) when a caption edit renamed it, so the file is not sent twice.
+        Consecutive weekly windows overlap, so a confirmed send by this runner
+        covers a caption-renamed re-download the same way.
         A file reply goes into the verified topic thread. Unknown group, topic, or file-send outcomes remain on hold
         after their safe UUID retry windows for message-level reconciliation;
         do not replay solely because a summary count is missing. Confirmed

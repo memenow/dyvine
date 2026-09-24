@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from dyvine.services.queue import QueueService
+from dyvine_hermes import weekly as weekly_module
 from dyvine_hermes.weekly import WeeklyConfig, run_once
 from tests.fake_repos import (
     FakeQueueRepository,
@@ -28,9 +29,15 @@ def _config(root: Path, *, cutover_round: str | None = "weekly0913") -> WeeklyCo
     )
 
 
-def _engine(repo: FakeQueueRepository, rounds: FakeRoundRepository) -> SimpleNamespace:
+def _engine(
+    repo: FakeQueueRepository,
+    rounds: FakeRoundRepository,
+    seeds: FakeSeedRepository | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
-        queue=QueueService(queue=repo, seeds=FakeSeedRepository(), rounds=rounds),
+        queue=QueueService(
+            queue=repo, seeds=seeds or FakeSeedRepository(), rounds=rounds
+        ),
         round_repo=rounds,
         delivery_ledger=SimpleNamespace(
             list_files=AsyncMock(return_value=[]),
@@ -98,6 +105,109 @@ async def test_automatic_round_blocks_on_previous_post_cutover_round(
     )
     assert outcome.status == "blocked_by_prior_round"
     assert outcome.round == "weekly-2026-10-04"
+
+
+@pytest.mark.parametrize(
+    ("opened", "now", "round_name", "cutoff"),
+    [
+        # The first window reaches back a week before the first automatic
+        # Sunday even when the cutover round held it back a week longer.
+        (["weekly-2026-09-13"], datetime(2026, 10, 4), "weekly-2026-10-04", "09-20"),
+        (["weekly-2026-09-27"], datetime(2026, 10, 4), "weekly-2026-10-04", "09-27"),
+        # A week whose round never opened widens the next window.
+        (["weekly-2026-09-27"], datetime(2026, 10, 11), "weekly-2026-10-11", "09-27"),
+    ],
+)
+async def test_automatic_window_resumes_at_the_last_opened_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    opened: list[str],
+    now: datetime,
+    round_name: str,
+    cutoff: str,
+) -> None:
+    repo = FakeQueueRepository()
+    rounds = FakeRoundRepository()
+    seeds = FakeSeedRepository()
+    engine = _engine(repo, rounds, seeds)
+    await engine.queue.import_seeds([{"sec_user_id": "sec_1", "nickname": "Account"}])
+    for name in ["weekly0913", *opened]:
+        await rounds.upsert_round(round=name)
+    # A zero budget stops after enqueueing, before any claim.
+    monkeypatch.setattr(weekly_module, "MAX_RUN_SECONDS", 0)
+    outcome = await run_once(
+        engine=engine, config=_config(tmp_path), now=now.replace(tzinfo=UTC)
+    )
+    assert outcome.round == round_name
+    entry = await repo.get_entry(f"{round_name}:sec_1")
+    assert entry.cutoff == f"2026-{cutoff}T08:00:00"
+
+
+async def test_parked_rows_do_not_hold_later_pairs(tmp_path: Path) -> None:
+    user_dir = tmp_path / "Account"
+    user_dir.mkdir()
+    repo = FakeQueueRepository()
+    rounds = FakeRoundRepository()
+    statuses = ["needs_reconciliation", "pending"] + ["needs_reconciliation"] * 2
+    for index, status in enumerate([*statuses, "pending", "pending"], start=1):
+        await repo.upsert_entry(
+            key=f"weekly0913:sec_{index}",
+            round="weekly0913",
+            nickname=f"Account {index}",
+            sec_user_id=f"sec_{index}",
+            mode="incremental",
+            status=status,
+            extra={
+                "weekly": {
+                    "download_complete": True,
+                    "fresh_download_confirmed": True,
+                    "user_dir": str(user_dir),
+                }
+            },
+        )
+    engine = _engine(repo, rounds)
+    first = await run_once(
+        engine=engine, config=_config(tmp_path), round_name="weekly0913"
+    )
+    assert first.key == "weekly0913:sec_2"
+    assert (await repo.get_entry("weekly0913:sec_5")).status == "pending"
+    second = await run_once(
+        engine=engine, config=_config(tmp_path), round_name="weekly0913"
+    )
+    assert second.status == "pair_complete"
+    assert (await repo.get_entry("weekly0913:sec_6")).status == "completed"
+    idle = await run_once(
+        engine=engine, config=_config(tmp_path), round_name="weekly0913"
+    )
+    assert idle.status == "idle"
+    for key in ("sec_1", "sec_3", "sec_4"):
+        assert (await repo.get_entry(f"weekly0913:{key}")).status == (
+            "needs_reconciliation"
+        )
+
+
+async def test_runtime_review_beside_a_parked_row_still_holds_the_queue(
+    tmp_path: Path,
+) -> None:
+    repo = FakeQueueRepository()
+    rounds = FakeRoundRepository()
+    statuses = ("needs_reconciliation", "needs_review", "pending", "pending")
+    for index, status in enumerate(statuses, start=1):
+        await repo.upsert_entry(
+            key=f"weekly0913:sec_{index}",
+            round="weekly0913",
+            nickname=f"Account {index}",
+            sec_user_id=f"sec_{index}",
+            mode="incremental",
+            status=status,
+        )
+    outcome = await run_once(
+        engine=_engine(repo, rounds),
+        config=_config(tmp_path),
+        round_name="weekly0913",
+    )
+    assert outcome.status == "blocked_pair"
+    assert (await repo.get_entry("weekly0913:sec_3")).status == "pending"
 
 
 async def test_automatic_round_requires_explicit_cutover_round(tmp_path: Path) -> None:

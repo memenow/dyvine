@@ -30,10 +30,13 @@ _REVIEW_STATUSES = frozenset(
     {"needs_reconciliation", "needs_review", "op_issue", "pair_needs_review"}
 )
 _DONE_STATUSES = frozenset({"completed", "permanent_failure", "skipped"})
+# The legacy migration parks rows it could not prove. This runner never
+# advances them, so they wait for an operator without holding later pairs.
+_PARKED_STATUSES = frozenset({"needs_reconciliation"})
 
 
-def due_round(now: dt.datetime, timezone: str) -> tuple[str, dt.datetime, dt.datetime]:
-    """Return the most recent Sunday 08:00 and its prior-week cutoff."""
+def due_round(now: dt.datetime, timezone: str) -> tuple[str, dt.datetime]:
+    """Return the name and due time of the most recent Sunday 08:00 round."""
     if now.tzinfo is None:
         raise ValueError("weekly clock must be timezone-aware")
     zone = ZoneInfo(timezone)
@@ -44,10 +47,17 @@ def due_round(now: dt.datetime, timezone: str) -> tuple[str, dt.datetime, dt.dat
     if local < due:
         sunday -= dt.timedelta(days=7)
         due = dt.datetime.combine(sunday, dt.time(8), tzinfo=zone)
-    previous = dt.datetime.combine(
-        sunday - dt.timedelta(days=7), dt.time(8), tzinfo=zone
-    )
-    return f"weekly-{sunday.isoformat()}", due, previous
+    return f"weekly-{sunday.isoformat()}", due
+
+
+def _automatic_round_date(name: str) -> dt.date | None:
+    """Return the Sunday an automatic ``weekly-YYYY-MM-DD`` round is named for."""
+    if not name.startswith("weekly-"):
+        return None
+    try:
+        return dt.date.fromisoformat(name.removeprefix("weekly-"))
+    except ValueError:
+        return None
 
 
 def _blocks_automatic_round(
@@ -60,13 +70,8 @@ def _blocks_automatic_round(
     """Hold the active cutover round and earlier post-cutover rounds only."""
     if candidate == cutover_round:
         return True
-    if not candidate.startswith("weekly-"):
-        return False
-    try:
-        date = dt.date.fromisoformat(candidate.removeprefix("weekly-"))
-    except ValueError:
-        return False
-    return first_auto_date <= date < due_date
+    date = _automatic_round_date(candidate)
+    return date is not None and first_auto_date <= date < due_date
 
 
 @contextmanager
@@ -90,12 +95,17 @@ def single_runner_lock() -> Iterator[bool]:
 
 
 async def _current_pair_keys(engine: Any, round_name: str) -> set[str]:
-    """Restrict claims to the first unfinished pair in stable seed order."""
+    """Restrict claims to the first unfinished pair in stable seed order.
+
+    A pair whose only unfinished rows are parked is passed over; parked rows
+    still hold back automatic rounds until an operator resolves them.
+    """
     rows = await engine.queue.list_entries(round=round_name, limit=-1)
     rows.sort(key=lambda row: (row.created_at, row.key))
+    settled = _DONE_STATUSES | _PARKED_STATUSES
     for offset in range(0, len(rows), 2):
         pair = rows[offset : offset + 2]
-        if any(row.status not in _DONE_STATUSES for row in pair):
+        if any(row.status not in settled for row in pair):
             return {row.key for row in pair}
     return set()
 
@@ -152,18 +162,23 @@ async def run_once(
     """Advance the current pair within the timeout; never spawn detached tasks."""
     instant = now or dt.datetime.now(tz=ZoneInfo(config.timezone))
     automatic = round_name is None
+    window_start: dt.date | None = None
     if automatic:
         if config.first_auto_date is None:
             raise ValueError("DYVINE_WEEKLY_FIRST_AUTO_DATE is required")
         if not config.cutover_round:
             raise ValueError("DYVINE_WEEKLY_CUTOVER_ROUND is required")
-        round_name, due, previous = due_round(instant, config.timezone)
+        round_name, due = due_round(instant, config.timezone)
         if due.date() < config.first_auto_date:
             return WeeklyOutcome("before_cutover", round_name)
         if instant < due:
             return WeeklyOutcome("not_due", round_name)
         unresolved = 0
+        window_start = config.first_auto_date - dt.timedelta(days=7)
         for header in await engine.round_repo.list_rounds():
+            opened = _automatic_round_date(header.round)
+            if opened is not None and config.first_auto_date <= opened < due.date():
+                window_start = max(window_start, opened)
             if not _blocks_automatic_round(
                 header.round,
                 cutover_round=config.cutover_round,
@@ -188,11 +203,15 @@ async def run_once(
         )
         return WeeklyOutcome("dry_run", round_name, pending[0].key if pending else None)
     if automatic:
+        assert window_start is not None
         excluded = await engine.delivery_ledger.list_excluded_nicknames()
+        # Resume where the latest opened automatic window ended, so a week
+        # held back by an unfinished round widens this window instead of
+        # being skipped; delivery skips media an earlier window already sent.
         await engine.queue.enqueue_round(
             round_name,
             mode="incremental",
-            cutoff=previous.replace(tzinfo=None).isoformat(),
+            cutoff=dt.datetime.combine(window_start, dt.time(8)).isoformat(),
             excluded_nicknames=excluded,
         )
     await engine.queue.release_stale(
@@ -230,7 +249,11 @@ async def run_once(
         return WeeklyOutcome("blocked_pair", round_name)
     if len(outcomes) == 1:
         return outcomes[0]
-    pair = [await engine.queue.get_entry(key) for key in sorted(pair_keys)]
+    pair = [
+        entry
+        for entry in [await engine.queue.get_entry(key) for key in sorted(pair_keys)]
+        if entry.status not in _PARKED_STATUSES
+    ]
     if all(entry.status in _DONE_STATUSES for entry in pair):
         status = "pair_complete"
     elif any(entry.status in _REVIEW_STATUSES for entry in pair):

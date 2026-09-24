@@ -377,6 +377,11 @@ async def deliver_file(
     )
     if legacy is not None:
         return legacy
+    prior = await ledger.find_prior_sent(
+        sec_user_id=sec_user_id, relative_path=relative
+    )
+    if prior is not None:
+        return prior
     legacy_permanent = await ledger.find_legacy_permanent_failure(
         sec_user_id=sec_user_id, relative_path=relative
     )

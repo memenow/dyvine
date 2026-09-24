@@ -128,6 +128,12 @@ class DeliveryLedgerRepository(Protocol):
         """
         ...
 
+    async def find_prior_sent(
+        self, *, sec_user_id: str, relative_path: str
+    ) -> FileDeliveryRecord | None:
+        """Confirmed ``sent`` record of the same post media slot, any caption."""
+        ...
+
     async def find_legacy_permanent_failure(
         self, *, sec_user_id: str, relative_path: str
     ) -> FileDeliveryRecord | None: ...
