@@ -4,6 +4,8 @@ Both proofs compare multisets of upload names. The group proof covers every
 file in the chat; the window proof covers only media posted after the queue
 cutoff, which is all the weekly runner can ever re-send. Neither associates
 an old message with an individual media path or infers an old topic parent.
+The Feishu adoption plan instead treats the chat as the record of what was
+sent and says which ledger rows to add or demote so the ledger agrees.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -18,8 +21,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from dyvine.db.delivery_ledger import POST_LEVEL_SLOT
 from dyvine.db.models import DeliveryFileRow, DeliveryGroupRow, DownloadQueueRow
-from dyvine.services.delivery import legacy_upload_file_name, post_datetime_from_path
+from dyvine.services.delivery import (
+    LONG_NAME_CHARS,
+    legacy_upload_file_name,
+    post_datetime_from_path,
+)
 from dyvine_hermes.weekly_state import entry_cutoff
 from scripts.feishu_audit_core import _digest
 
@@ -42,6 +50,43 @@ class WindowAttestation:
     target_source_sha256: str
     cutoff: str
     window_file_count: int
+
+
+@dataclass(frozen=True)
+class AdoptedFile:
+    """A chat file the ledger lacks, under the path the runner's dedupe matches."""
+
+    relative_path: str
+    message_ids: tuple[str, ...]
+    precision: str
+
+
+@dataclass(frozen=True)
+class FeishuAdoption:
+    """The audited chat as the record of what was sent, within one scope."""
+
+    audit_sha256: str
+    target_source_sha256: str
+    scope: str
+    cutoff: str | None
+    adopt: tuple[AdoptedFile, ...]
+    demote: tuple[str, ...]
+
+    def payload(self) -> dict[str, Any]:
+        """Return the plan as a proposal must carry it, for exact comparison."""
+        return {
+            "scope": self.scope,
+            "cutoff": self.cutoff,
+            "adopt": [
+                {
+                    "relative_path": item.relative_path,
+                    "message_ids": list(item.message_ids),
+                    "precision": item.precision,
+                }
+                for item in self.adopt
+            ],
+            "demote": list(self.demote),
+        }
 
 
 @dataclass(frozen=True)
@@ -431,6 +476,44 @@ def _audited_messages(
     return [item["file"] for item in files_by_message.values()], account
 
 
+def _audited_app_files(
+    *,
+    report: dict[str, Any],
+    group: DeliveryGroupRow,
+    journal: AuditJournal,
+    target_source: str,
+) -> list[dict[str, Any]] | str:
+    """Named, non-deleted files one app sent to the chat, per a complete audit."""
+    audited = _audited_messages(
+        report=report, group=group, journal=journal, target_source=target_source
+    )
+    if isinstance(audited, str):
+        return audited
+    messages, account = audited
+    if any(not isinstance(file.get("deleted"), bool) for file in messages):
+        return "Feishu audit has a file message without a deletion state"
+    active = [file for file in messages if not file["deleted"]]
+    app_files = [file for file in active if file.get("sender_type") == "app"]
+    if any(
+        not isinstance(file.get("sender_id"), str)
+        or not file.get("sender_id")
+        or not isinstance(file.get("file_name"), str)
+        or not file.get("file_name")
+        for file in app_files
+    ):
+        return "Feishu audit has an unnamed or unattributed app file"
+    if len({file["sender_id"] for file in app_files}) > 1:
+        return "Feishu audit files have multiple app senders"
+    if account.get("group_file_count") != len(active) or account.get(
+        "app_group_file_count"
+    ) != len(app_files):
+        return "Feishu audit group file counts differ from raw pages"
+    issue = _discrepancy_issue(account)
+    if issue:
+        return issue
+    return app_files
+
+
 def _discrepancy_issue(account: dict[str, Any]) -> str | None:
     discrepancies = account.get("discrepancies")
     if not isinstance(discrepancies, list) or any(
@@ -604,33 +687,11 @@ def attest_window(
     target_source = _source_digest(
         original, group, current_queues, current_files, keys_file_sha256
     )
-    audited = _audited_messages(
+    app_files = _audited_app_files(
         report=report, group=group, journal=journal, target_source=target_source
     )
-    if isinstance(audited, str):
-        return audited
-    messages, account = audited
-    if any(not isinstance(file.get("deleted"), bool) for file in messages):
-        return "Feishu audit has a file message without a deletion state"
-    active = [file for file in messages if not file["deleted"]]
-    app_files = [file for file in active if file.get("sender_type") == "app"]
-    if any(
-        not isinstance(file.get("sender_id"), str)
-        or not file.get("sender_id")
-        or not isinstance(file.get("file_name"), str)
-        or not file.get("file_name")
-        for file in app_files
-    ):
-        return "Feishu audit has an unnamed or unattributed app file"
-    if len({file["sender_id"] for file in app_files}) > 1:
-        return "Feishu audit files have multiple app senders"
-    if account.get("group_file_count") != len(active) or account.get(
-        "app_group_file_count"
-    ) != len(app_files):
-        return "Feishu audit group file counts differ from raw pages"
-    issue = _discrepancy_issue(account)
-    if issue:
-        return issue
+    if isinstance(app_files, str):
+        return app_files
     in_chat: Counter[str] = Counter()
     for file in app_files:
         posted = _posted(file["file_name"])
@@ -647,4 +708,136 @@ def attest_window(
         return "Feishu in-window files differ from the legacy ledger"
     return WindowAttestation(
         journal.sha256, target_source, cutoff.isoformat(), sum(in_ledger.values())
+    )
+
+
+# f2 media slots that close an untruncated file name, such as ``_image_3.webp``.
+_MEDIA_SLOT_SUFFIX = re.compile(
+    r"_(?:video|image_\d+|live_\d+|cover|music)\.[A-Za-z0-9]+$"
+)
+
+
+def _adoption_path(name: str) -> tuple[str, str]:
+    """Map a chat file name to a ledger path and its precision.
+
+    An untruncated f2 name still ends in its media slot, and its folder is the
+    name without that slot, so the path is exact. A shortened name lost the
+    slot; its post is recorded at ``POST_LEVEL_SLOT``, which covers every
+    media of that post.
+    """
+    match = _MEDIA_SLOT_SUFFIX.search(name)
+    if len(name) <= LONG_NAME_CHARS and match:
+        return f"{name[: match.start()]}/{name}", "exact"
+    stamp = name[:19]
+    return f"{stamp}_feishu/{stamp}_feishu{POST_LEVEL_SLOT}", "post"
+
+
+def plan_feishu_adoption(
+    *,
+    report: dict[str, Any],
+    original: dict[str, Any],
+    all_report_rows: list[dict[str, Any]],
+    group: DeliveryGroupRow,
+    queue: DownloadQueueRow,
+    current_queues: list[DownloadQueueRow],
+    current_files: list[DeliveryFileRow],
+    historical_queues: list[DownloadQueueRow],
+    historical_files: list[DeliveryFileRow],
+    work_chats: dict[tuple[str, str], set[str]],
+    journal: AuditJournal,
+    timezone: str,
+    known_aliases: set[str] | None = None,
+    keys_file_sha256: str | None = None,
+) -> FeishuAdoption | str:
+    """Plan the ledger changes that make it agree with the audited chat.
+
+    The chat is the record of what the legacy sender delivered. Chat files
+    the ledger lacks are adopted: an untruncated name at its exact path, a
+    shortened one for its whole post. Ledger records the chat does not hold
+    are demoted so the runner sends them again; a shortened ledger name
+    counts as held while the chat has any file of its post. The scope is
+    what delivery sends: media after the queue cutoff when the row has one,
+    whatever its download mode, or the whole feed otherwise.
+    """
+    sec = report["sec_user_id"]
+    chat_id = group.chat_id
+    issue = _single_chat_issue(
+        report=report,
+        group=group,
+        current_queues=current_queues,
+        historical_queues=historical_queues,
+        all_report_rows=all_report_rows,
+        work_chats=work_chats,
+        known_aliases=known_aliases,
+    )
+    if issue:
+        return issue
+    if any(
+        file.sec_user_id != sec or file.chat_id not in (None, chat_id)
+        for file in historical_files
+    ):
+        return "imported historical file ledger belongs to another account or chat"
+    cutoff = entry_cutoff(queue, timezone)
+    target_source = _source_digest(
+        original, group, current_queues, current_files, keys_file_sha256
+    )
+    app_files = _audited_app_files(
+        report=report, group=group, journal=journal, target_source=target_source
+    )
+    if isinstance(app_files, str):
+        return app_files
+    if any(_posted(file["file_name"]) is None for file in app_files):
+        return "Feishu app file name has no post time"
+
+    def in_scope(name: str) -> bool:
+        posted = _posted(name)
+        return posted is not None and (cutoff is None or posted > cutoff)
+
+    chat = sorted(
+        (file for file in app_files if in_scope(file["file_name"])),
+        key=lambda file: (file["file_name"], file["message_id"]),
+    )
+    ledger = sorted(
+        (
+            item
+            for item in historical_files
+            if item.status == "legacy_confirmed_sent" and in_scope(item.relative_path)
+        ),
+        key=lambda item: item.relative_path,
+    )
+    ledger_names = Counter(
+        legacy_upload_file_name(Path(item.relative_path)) for item in ledger
+    )
+    chat_names = Counter(file["file_name"] for file in chat)
+    spare = chat_names - ledger_names
+    adopted: dict[str, tuple[list[str], str]] = {}
+    for file in chat:
+        name = file["file_name"]
+        if spare[name] <= 0:
+            continue
+        spare[name] -= 1
+        path, precision = _adoption_path(name)
+        adopted.setdefault(path, ([], precision))[0].append(file["message_id"])
+    chat_posts = {name[:19] for name in chat_names}
+    missing = ledger_names - chat_names
+    demote: list[str] = []
+    for item in ledger:
+        name = legacy_upload_file_name(Path(item.relative_path))
+        if missing[name] <= 0:
+            continue
+        if name != Path(item.relative_path).name and name[:19] in chat_posts:
+            # A shortened name cannot say which media of the post the chat has.
+            continue
+        missing[name] -= 1
+        demote.append(item.media_id)
+    return FeishuAdoption(
+        audit_sha256=journal.sha256,
+        target_source_sha256=target_source,
+        scope="window" if cutoff else "full",
+        cutoff=cutoff.isoformat() if cutoff else None,
+        adopt=tuple(
+            AdoptedFile(path, tuple(ids), precision)
+            for path, (ids, precision) in sorted(adopted.items())
+        ),
+        demote=tuple(sorted(demote)),
     )

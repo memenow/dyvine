@@ -34,6 +34,11 @@ def _stamp() -> str:
 _POST_CREATE_STAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}")
 
 
+# A Feishu history adoption that knows a post but not which of its media the
+# chat holds records this slot; it stands for every media slot of the post.
+POST_LEVEL_SLOT = "_post"
+
+
 def post_media_slot(relative_path: str) -> tuple[str, str] | None:
     """Return the post creation stamp and media slot of an f2 media path.
 
@@ -101,15 +106,19 @@ async def _same_post_media(
     candidates: Select[tuple[DeliveryFileRow]],
     relative_path: str,
 ) -> FileDeliveryRecord | None:
-    """Return the first candidate holding the same post media as this path."""
+    """Return the first candidate holding the same post media as this path.
+
+    A candidate recorded at ``POST_LEVEL_SLOT`` covers every slot of its post.
+    """
     slot = post_media_slot(relative_path)
     if slot is None:
         return None
+    covering = {slot, (slot[0], POST_LEVEL_SLOT)}
     same_post = candidates.where(
         DeliveryFileRow.relative_path.startswith(slot[0], autoescape=True)
     ).order_by(DeliveryFileRow.relative_path)
     for candidate in (await session.execute(same_post)).scalars():
-        if post_media_slot(candidate.relative_path) == slot:
+        if post_media_slot(candidate.relative_path) in covering:
             return _file_record(candidate)
     return None
 

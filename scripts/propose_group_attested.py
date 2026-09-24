@@ -4,7 +4,9 @@ The output is a private JSONL copy of the frozen report. Only rows with a
 complete proof receive the chosen action: ``release_pending_group_attested``
 (the whole chat matches imported history) or, with ``--action``,
 ``release_pending_window_attested`` (the chat matches the legacy ledger for
-media posted after the queue cutoff). Run ``apply_queue_reconciliation.py``
+media posted after the queue cutoff) or ``release_pending_feishu_adopted``
+(the chat is taken as the record of what was sent, and the proposal carries
+the ledger rows to adopt and demote). Run ``apply_queue_reconciliation.py``
 in preview mode against this output before any separately authorized apply.
 """
 
@@ -161,6 +163,25 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
                             lock=False,
                             timezone=timezone,
                         )
+                        if (
+                            decision.status is None
+                            and decision.feishu_adoption is not None
+                        ):
+                            # Carry the plan the audit and Postgres imply, then
+                            # confirm the row releases with exactly that plan.
+                            candidate["resolution"][
+                                "plan"
+                            ] = decision.feishu_adoption.payload()
+                            decision, _queue = await _inspect_row(
+                                session,
+                                candidate,
+                                args.active_round,
+                                False,
+                                set(),
+                                inputs,
+                                lock=False,
+                                timezone=timezone,
+                            )
             if decision.status == "pending" and candidate is not None:
                 proposed.append(candidate)
                 count += 1
@@ -198,7 +219,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument(
         "--action",
-        choices=("release_pending_group_attested", "release_pending_window_attested"),
+        choices=(
+            "release_pending_group_attested",
+            "release_pending_window_attested",
+            "release_pending_feishu_adopted",
+        ),
         default="release_pending_group_attested",
     )
     parser.add_argument(
@@ -207,7 +232,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--database-url-env", default="DATABASE_URL")
     args = parser.parse_args(argv)
-    if args.action == "release_pending_window_attested" and not args.timezone:
+    if args.action != "release_pending_group_attested" and not args.timezone:
         parser.error("window attestation requires --timezone")
     if bool(args.supplemental_feishu_audit) != bool(args.supplemental_keys_file):
         parser.error("supplemental audit and keys file must be supplied together")

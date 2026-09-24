@@ -436,6 +436,19 @@ PYTHONPATH=src uv run python scripts/propose_group_attested.py \
 Preview and apply that proposal with the `apply_queue_reconciliation.py`
 commands above, adding `--timezone` with the same value.
 
+When the chat and the ledger disagree, `--action
+release_pending_feishu_adopted` takes the audited chat as the record of what
+was sent, within the queue cutoff's window when the row has one, as delivery
+applies it, or the whole feed otherwise. Chat files the ledger lacks are adopted as
+`legacy_confirmed_sent` rows in the `feishu_adopted` round: an untruncated
+name at its exact path, and a shortened name, which lost its media slot, as
+one post-level row that covers every media of that post. Ledger rows the
+chat does not hold move to `legacy_disproved` as `legacy_not_in_chat`, so the
+runner sends them again; a shortened ledger name counts as held while the
+chat has any file of its post. The proposal carries the exact plan, the
+apply recomputes it from the audit and Postgres and holds the row on any
+difference, and the released row gets a fresh download.
+
 The legacy queue records `skipped_404` for accounts the user ordered skipped
 for a round: the group is kept and nothing is sent. No other action can close
 such a row in the active round, so it would block every automatic round.

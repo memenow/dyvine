@@ -22,7 +22,7 @@ import tempfile
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(REPO_ROOT))
 
 from sqlalchemy import select, update  # noqa: E402
+from sqlalchemy.dialects.postgresql import insert  # noqa: E402
 
 from dyvine.db.models import (  # noqa: E402
     DeliveryFileRow,
@@ -40,10 +41,12 @@ from dyvine.db.models import (  # noqa: E402
 )
 from dyvine.db.session import DatabaseSessionFactory  # noqa: E402
 from scripts.queue_group_attestation import (  # noqa: E402
+    FeishuAdoption,
     GroupAttestation,
     WindowAttestation,
     attest_group,
     attest_window,
+    plan_feishu_adoption,
 )
 from scripts.queue_group_inputs import GroupInputs, load_group_inputs  # noqa: E402
 from scripts.queue_reconciliation_policy import (  # noqa: E402
@@ -56,7 +59,15 @@ from scripts.queue_reconciliation_policy import (  # noqa: E402
 )
 
 _ATTESTED_ACTIONS = frozenset(
-    {"release_pending_group_attested", "release_pending_window_attested"}
+    {
+        "release_pending_group_attested",
+        "release_pending_window_attested",
+        "release_pending_feishu_adopted",
+    }
+)
+# Both actions compare against the download window, so both need the timezone.
+_WINDOWED_ACTIONS = frozenset(
+    {"release_pending_window_attested", "release_pending_feishu_adopted"}
 )
 
 
@@ -190,13 +201,13 @@ async def _inspect_row(
     action = _action(row)
     group_attestation: GroupAttestation | str | None = None
     window_attestation: WindowAttestation | str | None = None
-    if action == "release_pending_window_attested":
+    feishu_adoption: FeishuAdoption | str | None = None
+    if action in _WINDOWED_ACTIONS:
+        proof: WindowAttestation | FeishuAdoption | str
         if group_inputs is None or group is None or queue is None:
-            window_attestation = (
-                "window attestation sources or adopted group are missing"
-            )
+            proof = "audit sources or adopted group are missing"
         elif not timezone:
-            window_attestation = "window attestation needs the weekly timezone"
+            proof = "the download window needs the weekly timezone"
         else:
             sec = row["sec_user_id"]
             history_queues, history_files, seed_aliases = await _account_history(
@@ -209,10 +220,15 @@ async def _inspect_row(
                 and not (item.status == "permanent_failure" and item.round == "legacy")
                 for item in history_files
             ):
-                window_attestation = "account has new send attempts in the file ledger"
+                proof = "account has new send attempts in the file ledger"
             else:
                 journal, keys_sha256 = group_inputs.journal_for(row["key"])
-                window_attestation = attest_window(
+                check = (
+                    attest_window
+                    if action == "release_pending_window_attested"
+                    else plan_feishu_adoption
+                )
+                proof = check(
                     report=row,
                     original=group_inputs.source_rows[row["key"]],
                     all_report_rows=group_inputs.all_rows,
@@ -234,6 +250,10 @@ async def _inspect_row(
                     known_aliases=seed_aliases,
                     keys_file_sha256=keys_sha256,
                 )
+        if action == "release_pending_window_attested":
+            window_attestation = cast(WindowAttestation | str, proof)
+        else:
+            feishu_adoption = cast(FeishuAdoption | str, proof)
     if action == "release_pending_group_attested":
         if group_inputs is None or group is None:
             group_attestation = "group attestation sources or adopted group are missing"
@@ -277,8 +297,77 @@ async def _inspect_row(
         evidence=evidence,
         group_attestation=group_attestation,
         window_attestation=window_attestation,
+        feishu_adoption=feishu_adoption,
     )
     return decision, queue
+
+
+async def _adopt_chat_history(
+    connection: Any,
+    adoption: FeishuAdoption,
+    *,
+    sec_user_id: str,
+    chat_id: str | None,
+    stamp: str,
+) -> None:
+    """Make the ledger agree with the audited chat inside one transaction.
+
+    Adopted chat files become ``legacy_confirmed_sent`` rows in the
+    ``feishu_adopted`` round, which the runner's dedupe honors. Demoted rows
+    move to ``legacy_disproved`` as ``legacy_not_in_chat`` so the runner sends
+    their media again; they leave the queue's round, which would otherwise
+    hold them as unresolved.
+    """
+    if adoption.adopt:
+        await connection.execute(
+            insert(DeliveryFileRow)
+            .values(
+                [
+                    {
+                        "media_id": hashlib.sha256(
+                            f"legacy\0{sec_user_id}\0{item.relative_path}".encode()
+                        ).hexdigest(),
+                        "round": "feishu_adopted",
+                        "sec_user_id": sec_user_id,
+                        "relative_path": item.relative_path,
+                        "content_sha256": None,
+                        "chat_id": chat_id,
+                        "parent_id": None,
+                        "status": "legacy_confirmed_sent",
+                        "file_key": None,
+                        "send_uuid": None,
+                        "send_started_at": None,
+                        "message_id": item.message_ids[0],
+                        "legacy_source_path": "feishu:" + ",".join(item.message_ids),
+                        "legacy_progress_file": f"feishu-audit:{adoption.audit_sha256}",
+                        "created_at": stamp,
+                        "updated_at": stamp,
+                    }
+                    for item in adoption.adopt
+                ]
+            )
+            .on_conflict_do_nothing(index_elements=["media_id"])
+        )
+    if adoption.demote:
+        demoted = (
+            await connection.execute(
+                update(DeliveryFileRow)
+                .where(
+                    DeliveryFileRow.media_id.in_(adoption.demote),
+                    DeliveryFileRow.sec_user_id == sec_user_id,
+                    DeliveryFileRow.status == "legacy_confirmed_sent",
+                )
+                .values(
+                    status="legacy_not_in_chat",
+                    round="legacy_disproved",
+                    updated_at=stamp,
+                )
+            )
+        ).rowcount
+        if demoted != len(adoption.demote):
+            raise ValueError(
+                f"ledger demotion compare-and-set failed for {sec_user_id}"
+            )
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -291,7 +380,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("active round is absent from the frozen report")
     evidence_digests = group_inputs.evidence_digests if group_inputs else ()
     timezone = getattr(args, "timezone", None)
-    if any(_action(row) == "release_pending_window_attested" for row in rows):
+    if any(_action(row) in _WINDOWED_ACTIONS for row in rows):
         if not timezone:
             raise ValueError("window attestation requires --timezone")
         # The timezone decides every window cutoff, so bind it to the plan.
@@ -394,6 +483,19 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                     timezone=timezone,
                                     proof="feishu_window_file_name_multiset",
                                 )
+                            if decision.action == "release_pending_feishu_adopted":
+                                adoption = decision.feishu_adoption
+                                assert adoption is not None
+                                extra["reconciliation"].update(
+                                    audit_sha256=adoption.audit_sha256,
+                                    target_source_sha256=adoption.target_source_sha256,
+                                    scope=adoption.scope,
+                                    window_cutoff=adoption.cutoff,
+                                    adopted_count=len(adoption.adopt),
+                                    demoted_count=len(adoption.demote),
+                                    timezone=timezone,
+                                    proof="feishu_chat_adoption",
+                                )
                             if decision.action in _ATTESTED_ACTIONS:
                                 # Local media is gone; force a fresh download.
                                 weekly = extra.get("weekly")
@@ -429,6 +531,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             if changed != 1:
                                 raise ValueError(
                                     f"queue compare-and-set failed for {queue.key}"
+                                )
+                            if decision.action == "release_pending_feishu_adopted":
+                                assert decision.feishu_adoption is not None
+                                await _adopt_chat_history(
+                                    connection,
+                                    decision.feishu_adoption,
+                                    sec_user_id=row["sec_user_id"],
+                                    chat_id=queue.chat_id,
+                                    stamp=stamp,
                                 )
                             if decision.action == "skip_author_unavailable":
                                 # The author is gone for good: later rounds must

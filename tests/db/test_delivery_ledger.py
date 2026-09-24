@@ -107,6 +107,33 @@ async def test_legacy_send_matches_the_same_media_under_an_edited_caption(
     )
 
 
+async def test_post_level_adoption_covers_every_media_of_its_post(
+    ledger: PostgresDeliveryLedgerRepository,
+) -> None:
+    marker = f"{_STAMP}_feishu/{_STAMP}_feishu_post"
+    rows: list[dict[str, str | None]] = [
+        {
+            "round": "feishu_adopted",
+            "sec_user_id": "sec-1",
+            "relative_path": marker,
+            "legacy_source_path": "feishu:om-1,om-2",
+            "legacy_progress_file": "feishu-audit:journal",
+        }
+    ]
+    assert await ledger.reserve_legacy_sent_batch(rows) == (1, 0)
+    for slot in ("_image_1.webp", "_image_7.webp", "_video.mp4"):
+        found = await ledger.find_legacy_sent(
+            sec_user_id="sec-1",
+            relative_path=f"{_STAMP}_any caption/{_STAMP}_any caption{slot}",
+        )
+        assert found is not None and found.relative_path == marker
+    other_post = "2026-09-10 12-34-57_x/2026-09-10 12-34-57_x_image_1.webp"
+    assert (
+        await ledger.find_legacy_sent(sec_user_id="sec-1", relative_path=other_post)
+        is None
+    )
+
+
 async def test_prior_send_matches_the_same_media_under_an_edited_caption(
     ledger: PostgresDeliveryLedgerRepository,
 ) -> None:

@@ -14,7 +14,11 @@ from dyvine.db.models import (
     DeliveryLegacyEvidenceRow,
     DownloadQueueRow,
 )
-from scripts.queue_group_attestation import GroupAttestation, WindowAttestation
+from scripts.queue_group_attestation import (
+    FeishuAdoption,
+    GroupAttestation,
+    WindowAttestation,
+)
 
 # Legacy queue statuses whose remaining media may be released for sending.
 _RELEASABLE_OLD_STATUSES = frozenset(
@@ -32,6 +36,7 @@ class Decision:
     receipts: tuple[tuple[DeliveryFileRow, str], ...] = ()
     group_attestation: GroupAttestation | None = None
     window_attestation: WindowAttestation | None = None
+    feishu_adoption: FeishuAdoption | None = None
 
 
 def _string(value: Any) -> str | None:
@@ -252,6 +257,53 @@ def _window_release(
     )
 
 
+def _feishu_adoption_release(
+    resolution: dict[str, Any],
+    *,
+    key: str | None,
+    queue: DownloadQueueRow,
+    group: DeliveryGroupRow | None,
+    round_name: str | None,
+    active_round: str,
+    old_status: str | None,
+    feishu_adoption: FeishuAdoption | str | None,
+) -> Decision:
+    """Release an active-round row once the ledger adopts the audited chat.
+
+    The proposal must carry exactly the plan recomputed from the audit and
+    Postgres. A mismatch holds the row and returns the recomputed plan, so a
+    proposer can fill it in and ask again.
+    """
+    if round_name != active_round or old_status not in _RELEASABLE_OLD_STATUSES:
+        return Decision(None, "held", "Feishu adoption cannot release this row")
+    issue = _adoption_issue(group, key, queue, resolution)
+    if issue:
+        return Decision(None, "held", issue)
+    if not isinstance(feishu_adoption, FeishuAdoption):
+        return Decision(
+            None,
+            "held",
+            (
+                feishu_adoption
+                if isinstance(feishu_adoption, str)
+                else "complete Feishu adoption plan is missing"
+            ),
+        )
+    if resolution.get("plan") != feishu_adoption.payload():
+        return Decision(
+            None,
+            "held",
+            "Feishu adoption plan differs from the audited chat",
+            feishu_adoption=feishu_adoption,
+        )
+    return Decision(
+        "pending",
+        "release_pending_feishu_adopted",
+        "the audited chat is the record of what was already sent",
+        feishu_adoption=feishu_adoption,
+    )
+
+
 def _assess(
     report: dict[str, Any],
     queue: DownloadQueueRow | None,
@@ -264,6 +316,7 @@ def _assess(
     evidence: list[DeliveryLegacyEvidenceRow],
     group_attestation: GroupAttestation | str | None = None,
     window_attestation: WindowAttestation | str | None = None,
+    feishu_adoption: FeishuAdoption | str | None = None,
 ) -> Decision:
     key = _string(report.get("key"))
     round_name = _string(report.get("round"))
@@ -318,6 +371,22 @@ def _assess(
             active_round=active_round,
             old_status=old_status,
             window_attestation=window_attestation,
+        )
+    if (
+        isinstance(resolution, dict)
+        and resolution.get("action") == "release_pending_feishu_adopted"
+    ):
+        # The audited chat decides what was sent, which settles the ambiguous,
+        # cache-only, and failed send evidence held below.
+        return _feishu_adoption_release(
+            resolution,
+            key=key,
+            queue=queue,
+            group=group,
+            round_name=round_name,
+            active_round=active_round,
+            old_status=old_status,
+            feishu_adoption=feishu_adoption,
         )
     cache_only = _count(report, "cache_only_unverified_paths")
     if cache_only != 0:

@@ -712,6 +712,23 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
         <code>--timezone</code> with the same value.
       </p>
       <p>
+        When the chat and the ledger disagree,
+        <code>--action release_pending_feishu_adopted</code> takes the audited
+        chat as the record of what was sent, within the queue cutoff's window
+        when the row has one, as delivery applies it, or the whole feed
+        otherwise. Chat files the
+        ledger lacks are adopted as <code>legacy_confirmed_sent</code> rows in
+        the <code>feishu_adopted</code> round: an untruncated name at its exact
+        path, and a shortened name, which lost its media slot, as one
+        post-level row that covers every media of that post. Ledger rows the
+        chat does not hold move to <code>legacy_disproved</code> as
+        <code>legacy_not_in_chat</code>, so the runner sends them again; a
+        shortened ledger name counts as held while the chat has any file of its
+        post. The proposal carries the exact plan, the apply recomputes it from
+        the audit and Postgres and holds the row on any difference, and the
+        released row gets a fresh download.
+      </p>
+      <p>
         The legacy queue records <code>skipped_404</code> for accounts the user
         ordered skipped for a round: the group is kept and nothing is sent. No
         other action can close such a row in the active round, so it would

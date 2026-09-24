@@ -930,3 +930,170 @@ def test_apply_records_window_proof_and_forces_a_fresh_download(
         "timezone": "Asia/Shanghai",
         "proof": "feishu_window_file_name_multiset",
     }
+
+
+def _adoption(script: Any) -> Any:
+    attestation = sys.modules["scripts.queue_group_attestation"]
+    return script.FeishuAdoption(
+        audit_sha256="audit",
+        target_source_sha256="target",
+        scope="window",
+        cutoff="2026-09-06T08:00:00",
+        adopt=(
+            attestation.AdoptedFile(
+                "2026-09-11 09-00-00_a/2026-09-11 09-00-00_a_image_1.webp",
+                ("om-1",),
+                "exact",
+            ),
+        ),
+        demote=("media-gone",),
+    )
+
+
+def _adoption_report(plan: dict[str, Any] | None) -> dict[str, Any]:
+    report = _report()
+    report["resolution"] = {
+        "action": "release_pending_feishu_adopted",
+        "chat_id": "oc-old",
+        "topic_message_id": "om-topic",
+    }
+    if plan is not None:
+        report["resolution"]["plan"] = plan
+    return report
+
+
+def _assess_adoption(script: Any, report: dict[str, Any], adoption: Any) -> Any:
+    return script._assess(
+        report,
+        _queue(report),
+        active_round="weekly0913",
+        archive_historical=False,
+        identity_ids={"sec-one"},
+        group=_group(report),
+        files=[_file(report)],
+        evidence=[],
+        feishu_adoption=adoption,
+    )
+
+
+def test_feishu_adoption_releases_only_with_the_recomputed_plan() -> None:
+    script = _load_script()
+    adoption = _adoption(script)
+    released = _assess_adoption(script, _adoption_report(adoption.payload()), adoption)
+    assert (released.status, released.action) == (
+        "pending",
+        "release_pending_feishu_adopted",
+    )
+    stale = dict(adoption.payload(), demote=[])
+    held = _assess_adoption(script, _adoption_report(stale), adoption)
+    assert held.status is None
+    assert held.reason == "Feishu adoption plan differs from the audited chat"
+    assert held.feishu_adoption == adoption
+    missing = _assess_adoption(script, _adoption_report(None), "audit is incomplete")
+    assert (missing.status, missing.reason) == (None, "audit is incomplete")
+
+
+def test_apply_feishu_adoption_writes_queue_then_adopts_then_demotes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _load_script()
+    adoption = _adoption(script)
+    report = _adoption_report(adoption.payload())
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+    inputs = SimpleNamespace(
+        journal=SimpleNamespace(sha256="journal"),
+        supplemental_journal=None,
+        keys_file_sha256=None,
+        source_sha256="source",
+        work_sha256="work",
+        evidence_digests=("source", "journal", "work"),
+    )
+    written: list[Any] = []
+    rowcounts: list[int] = [1, 1, 1]
+
+    class FakeConnection:
+        async def execute(self, statement: Any) -> SimpleNamespace:
+            written.append(statement)
+            return SimpleNamespace(rowcount=rowcounts[len(written) - 1])
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeSession:
+            return self
+
+        async def connection(self) -> FakeConnection:
+            return FakeConnection()
+
+    class FakeFactory:
+        def __init__(self, _url: str, **_options: Any) -> None:
+            pass
+
+        def session(self) -> FakeSession:
+            return FakeSession()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def inspect(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return (
+            script.Decision(
+                "pending",
+                "release_pending_feishu_adopted",
+                "adopted",
+                feishu_adoption=adoption,
+            ),
+            _queue(report),
+        )
+
+    monkeypatch.setattr(script, "DatabaseSessionFactory", FakeFactory)
+    monkeypatch.setattr(script, "_inspect_row", inspect)
+    monkeypatch.setattr(script, "_group_inputs", lambda *_args: inputs)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://example")
+    args = argparse.Namespace(
+        report=str(path),
+        active_round="weekly0913",
+        archive_historical=False,
+        database_url_env="DATABASE_URL",
+        apply=False,
+        expect_plan_sha256=None,
+        expected_count=None,
+        timezone="Asia/Shanghai",
+    )
+    preview = asyncio.run(script.run(args))
+    args.apply = True
+    args.expect_plan_sha256 = preview["plan_sha256"]
+    args.expected_count = 1
+    result = asyncio.run(script.run(args))
+    assert result["counts"] == {"applied": 1}
+    assert [statement.table.name for statement in written] == [
+        "download_queue",
+        "delivery_files",
+        "delivery_files",
+    ]
+    extra = written[0].compile().params["extra"]
+    assert extra["weekly"] == {"fresh_download_confirmed": False}
+    assert extra["reconciliation"]["proof"] == "feishu_chat_adoption"
+    assert (
+        extra["reconciliation"]["adopted_count"],
+        extra["reconciliation"]["demoted_count"],
+        extra["reconciliation"]["scope"],
+    ) == (1, 1, "window")
+    adopted = written[1].compile().params
+    assert adopted["round_m0"] == "feishu_adopted"
+    assert adopted["status_m0"] == "legacy_confirmed_sent"
+    assert adopted["message_id_m0"] == "om-1"
+    demoted = written[2].compile().params
+    assert (demoted["status"], demoted["round"]) == (
+        "legacy_not_in_chat",
+        "legacy_disproved",
+    )
+    written.clear()
+    rowcounts[2] = 0
+    with pytest.raises(ValueError, match="demotion compare-and-set failed"):
+        asyncio.run(script.run(args))
