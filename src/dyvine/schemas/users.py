@@ -9,11 +9,12 @@ Provides:
 - `DownloadResponse` — alias for `OperationResponse` so the
   user-download contract stays interchangeable with the generic
   operation envelope.
+- `AuthorState` — whether an author's posts can still be downloaded.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
@@ -87,3 +88,15 @@ class UserResponse(BaseModel):
 
 class DownloadResponse(OperationResponse):
     """Backward-compatible alias for user download operations."""
+
+
+class AuthorState(BaseModel):
+    """Whether Douyin still serves an author's posts, read from the profile."""
+
+    available: bool = Field(..., description="Posts can still be downloaded")
+    reason: Literal["deactivated", "banned", "no_posts"] | None = Field(
+        default=None, description="Why the author is unavailable"
+    )
+    aweme_count: int | None = Field(
+        default=None, description="Post count on the profile"
+    )

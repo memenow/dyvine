@@ -453,6 +453,23 @@ Apply by rerunning the preview command with `--apply`, the preview's
 `plan_sha256` as `--expect-plan-sha256`, and its `expected_count` as
 `--expected-count`.
 
+An author Douyin reports deactivated or banned, or who has no posts, can
+never be delivered, yet the unclosed row would block every automatic round.
+`propose_unavailable_author_skips.py` checks the Douyin profile of each
+active-round row still in `needs_reconciliation` (it reads `DATABASE_URL`)
+and writes a private JSONL with `skip_author_unavailable` and the evidence
+(reason, post count, check time) for those authors only. A failed or unclear
+profile answer is counted and never proposed. Preview and apply it the same
+way. Applied rows become `skipped`, the seed is excluded from later rounds,
+and the Feishu group is kept.
+
+```bash
+PYTHONPATH=src uv run python scripts/propose_unavailable_author_skips.py \
+  --source-report <private-reconciliation.jsonl> \
+  --active-round <active-round> \
+  --output <private-author-skip-proposal.jsonl>
+```
+
 For inspection, run `hermes dyvine weekly run-once --dry-run`; use
 `--round weekly-YYYY-MM-DD --dry-run` to inspect a named round. The
 non-dry-run command advances the current account pair, with an upper bound on

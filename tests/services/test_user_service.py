@@ -165,6 +165,120 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
         await service.get_user_info("missing-user")
 
 
+def _author_profile(
+    *, nickname: str, aweme_count: int | None, is_ban: bool, raw: dict[str, Any]
+) -> MagicMock:
+    """Profile double shaped like f2's ``UserProfileFilter``."""
+    profile = MagicMock()
+    profile.nickname = nickname
+    profile.aweme_count = aweme_count
+    profile.is_ban = is_ban
+    profile._to_raw.return_value = raw
+    return profile
+
+
+_DEACTIVATED_NOTICE = {"special_state": 1, "title": "账号已经注销"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [
+        (
+            _author_profile(
+                nickname="",
+                aweme_count=None,
+                is_ban=False,
+                raw={
+                    "status_code": 0,
+                    "user": {"special_state_info": _DEACTIVATED_NOTICE},
+                },
+            ),
+            (False, "deactivated", None),
+        ),
+        (
+            _author_profile(
+                nickname="",
+                aweme_count=None,
+                is_ban=False,
+                raw={"status_code": 0, "user": {"user_deleted": True}},
+            ),
+            (False, "deactivated", None),
+        ),
+        (
+            _author_profile(
+                nickname="n", aweme_count=0, is_ban=True, raw={"status_code": 0}
+            ),
+            (False, "banned", 0),
+        ),
+        (
+            _author_profile(
+                nickname="n", aweme_count=0, is_ban=False, raw={"status_code": 0}
+            ),
+            (False, "no_posts", 0),
+        ),
+        (
+            _author_profile(
+                nickname="n", aweme_count=7, is_ban=False, raw={"status_code": 0}
+            ),
+            (True, None, 7),
+        ),
+    ],
+    ids=["deactivated_notice", "user_deleted", "banned", "no_posts", "available"],
+)
+async def test_get_author_state_classifies_profiles(
+    monkeypatch: pytest.MonkeyPatch, profile: MagicMock, expected: tuple
+) -> None:
+    """Only a deactivation notice, a ban, or zero posts make an author unavailable."""
+    from dyvine.services import users as users_mod
+
+    class FakeHandler:
+        """Answers the profile request with the parametrized double."""
+
+        def __init__(self, kwargs: dict) -> None:
+            """Accept the handler arguments."""
+
+        fetch_user_profile = AsyncMock(return_value=profile)
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    state = await users_mod.fetch_author_state("sec")
+    assert (state.available, state.reason, state.aweme_count) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _author_profile(
+            nickname="n", aweme_count=0, is_ban=False, raw={"status_code": 2154}
+        ),
+        _author_profile(nickname="", aweme_count=0, is_ban=False, raw={"user": {}}),
+        RuntimeError("network down"),
+    ],
+    ids=["status_code", "no_nickname_without_notice", "request_error"],
+)
+async def test_get_author_state_raises_instead_of_guessing(
+    monkeypatch: pytest.MonkeyPatch, answer: object
+) -> None:
+    """Unclear or failed answers raise, so no caller skips an author on them."""
+    from dyvine.services import users as users_mod
+
+    class FakeHandler:
+        """Answers the profile request with an unclear result or an error."""
+
+        def __init__(self, kwargs: dict) -> None:
+            """Accept the handler arguments."""
+
+        fetch_user_profile = AsyncMock(
+            side_effect=answer if isinstance(answer, Exception) else None,
+            return_value=answer,
+        )
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    with pytest.raises(ServiceError):
+        await users_mod.fetch_author_state("sec")
+
+
 @pytest.mark.asyncio
 async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get user info with room data."""

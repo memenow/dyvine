@@ -728,6 +728,23 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
         and its <code>expected_count</code> as <code>--expected-count</code>.
       </p>
       <p>
+        An author Douyin reports deactivated or banned, or who has no posts,
+        can never be delivered, yet the unclosed row would block every
+        automatic round. <code>propose_unavailable_author_skips.py</code>
+        checks the Douyin profile of each active-round row still in
+        <code>needs_reconciliation</code> (it reads <code>DATABASE_URL</code>)
+        and writes a private JSONL with <code>skip_author_unavailable</code>
+        and the evidence (reason, post count, check time) for those authors
+        only. A failed or unclear profile answer is counted and never
+        proposed. Preview and apply it the same way. Applied rows become
+        <code>skipped</code>, the seed is excluded from later rounds, and the
+        Feishu group is kept.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_unavailable_author_skips.py \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-author-skip-proposal.jsonl&gt;</code></pre>
+      <p>
         <code>dyvine.delivery.send_account</code> uses the same ledger. Supply
         <code>round</code> and <code>sec_user_id</code> to identify an account
         directly. If they are omitted, the tool requires a unique matching

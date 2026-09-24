@@ -162,6 +162,40 @@ def _user_ordered_skip(
     )
 
 
+_UNAVAILABLE_AUTHOR_REASONS = frozenset({"deactivated", "banned", "no_posts"})
+
+
+def _author_unavailable_skip(
+    resolution: dict[str, Any],
+    round_name: str | None,
+    active_round: str,
+    files: list[DeliveryFileRow],
+) -> Decision:
+    """Close an active-round row whose author Douyin reports gone for good."""
+    if round_name != active_round:
+        return Decision(None, "held", "author skips apply only to the active round")
+    author = resolution.get("author")
+    if (
+        not isinstance(author, dict)
+        or author.get("reason") not in _UNAVAILABLE_AUTHOR_REASONS
+        or not isinstance(author.get("checked_at"), str)
+    ):
+        return Decision(None, "held", "author unavailability evidence is incomplete")
+    if any(
+        item.status not in {"legacy_confirmed_sent", "permanent_failure"}
+        or item.send_uuid is not None
+        for item in files
+    ):
+        return Decision(
+            None, "held", "account already has new send attempts in this round"
+        )
+    return Decision(
+        "skipped",
+        "skip_author_unavailable",
+        f"Douyin reports the author {author['reason']}",
+    )
+
+
 def _adoption_issue(
     group: DeliveryGroupRow | None,
     key: str | None,
@@ -264,6 +298,11 @@ def _assess(
     if isinstance(resolution, dict) and resolution.get("action") == "skip_user_ordered":
         # A skip sends nothing, so send-evidence gaps below cannot make it unsafe.
         return _user_ordered_skip(round_name, active_round, old_status, files)
+    if (
+        isinstance(resolution, dict)
+        and resolution.get("action") == "skip_author_unavailable"
+    ):
+        return _author_unavailable_skip(resolution, round_name, active_round, files)
     if (
         isinstance(resolution, dict)
         and resolution.get("action") == "release_pending_window_attested"

@@ -254,6 +254,148 @@ def test_user_ordered_skip_holds_accounts_with_new_send_attempts(
     assert decision.reason == "account already has new send attempts in this round"
 
 
+def _author_skip(round_name: str = "weekly0913") -> dict[str, Any]:
+    report = _report(round_name)
+    report["resolution"] = {
+        "action": "skip_author_unavailable",
+        "author": {
+            "reason": "deactivated",
+            "aweme_count": None,
+            "checked_at": "2026-09-24T07:26:00+00:00",
+        },
+    }
+    return report
+
+
+def test_author_skip_closes_active_row_without_send_evidence() -> None:
+    """A skip sends nothing, so unresolved send evidence cannot hold it."""
+    script = _load_script()
+    report = _author_skip()
+    report["cache_only_unverified_paths"] = 3
+    report["permanent_failure_paths"] = 2
+    decision = _assess(script, report)
+    assert (decision.status, decision.action) == ("skipped", "skip_author_unavailable")
+    assert not decision.receipts
+
+
+@pytest.mark.parametrize(
+    "author",
+    [
+        None,
+        {"reason": "renamed", "checked_at": "2026-09-24T07:26:00+00:00"},
+        {"reason": "banned"},
+    ],
+    ids=["missing", "unknown_reason", "unchecked"],
+)
+def test_author_skip_requires_complete_evidence(author: Any) -> None:
+    script = _load_script()
+    report = _author_skip()
+    report["resolution"]["author"] = author
+    decision = _assess(script, report)
+    assert decision.status is None
+    assert decision.reason == "author unavailability evidence is incomplete"
+
+
+def test_author_skip_applies_only_to_the_active_round() -> None:
+    script = _load_script()
+    assert _assess(script, _author_skip("weekly0906")).status is None
+
+
+def test_author_skip_holds_accounts_with_new_send_attempts() -> None:
+    script = _load_script()
+    report = _author_skip()
+    attempt = _file(report)
+    attempt.status = "sent"
+    attempt.send_uuid = "uuid-new"
+    decision = script._assess(
+        report,
+        _queue(report),
+        active_round="weekly0913",
+        archive_historical=False,
+        identity_ids={"sec-one"},
+        group=_group(report),
+        files=[attempt],
+        evidence=[],
+    )
+    assert decision.status is None
+    assert decision.reason == "account already has new send attempts in this round"
+
+
+def test_apply_author_skip_excludes_the_seed_after_the_queue_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _load_script()
+    report = _author_skip()
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+    _, source_digest = script._report_rows(path)
+    statements: list[Any] = []
+
+    class FakeConnection:
+        async def execute(self, statement: Any) -> SimpleNamespace:
+            statements.append(statement)
+            return SimpleNamespace(rowcount=1)
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeSession:
+            return self
+
+        async def connection(self) -> FakeConnection:
+            return FakeConnection()
+
+    class FakeFactory:
+        def __init__(self, _url: str, **_options: Any) -> None:
+            pass
+
+        def session(self) -> FakeSession:
+            return FakeSession()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def inspect(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return (
+            script.Decision("skipped", "skip_author_unavailable", "author gone"),
+            _queue(report),
+        )
+
+    monkeypatch.setattr(script, "DatabaseSessionFactory", FakeFactory)
+    monkeypatch.setattr(script, "_inspect_row", inspect)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://example")
+    args = argparse.Namespace(
+        report=str(path),
+        active_round="weekly0913",
+        archive_historical=False,
+        database_url_env="DATABASE_URL",
+        apply=True,
+        expect_plan_sha256=script._plan_digest(source_digest, "weekly0913", False),
+        expected_count=1,
+    )
+    result = asyncio.run(script.run(args))
+    assert result["counts"] == {"applied": 1}
+    assert [statement.table.name for statement in statements] == [
+        "download_queue",
+        "seed_accounts",
+    ]
+    queue_values = {
+        column.key: value for column, value in statements[0]._values.items()
+    }
+    written = queue_values["extra"].value
+    assert written["reconciliation"]["action"] == "skip_author_unavailable"
+    assert written["reconciliation"]["author"]["reason"] == "deactivated"
+    assert "migration_needs_reconciliation" not in written
+    seed_values = {
+        column.key: value.value for column, value in statements[1]._values.items()
+    }
+    assert seed_values["excluded"] is True
+
+
 def test_false_legacy_op_done_cannot_become_verified_completed() -> None:
     script = _load_script()
     report = _report()
