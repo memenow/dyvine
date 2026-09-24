@@ -34,7 +34,7 @@ def skill_path() -> Path:
 
 
 def _setup_cli(subparser: Any) -> None:
-    """Install the bounded weekly command under ``hermes dyvine``."""
+    """Install the bounded maintenance commands under ``hermes dyvine``."""
     sections = subparser.add_subparsers(dest="dyvine_section", required=True)
     weekly = sections.add_parser("weekly", help="Run weekly delivery steps")
     actions = weekly.add_subparsers(dest="dyvine_weekly_action", required=True)
@@ -42,10 +42,28 @@ def _setup_cli(subparser: Any) -> None:
     run.add_argument("--round", dest="round_name", help="Resume an existing round")
     run.add_argument("--dry-run", action="store_true", help="Inspect without writes")
     run.set_defaults(func=_handle_cli)
+    media = sections.add_parser("media", help="Maintain local downloads")
+    media_actions = media.add_subparsers(dest="dyvine_media_action", required=True)
+    prune = media_actions.add_parser(
+        "prune", help="Delete old media of accounts whose every row is settled"
+    )
+    prune.add_argument(
+        "--older-than-days",
+        type=float,
+        default=14.0,
+        help="Keep media modified within this many days (default 14)",
+    )
+    prune.add_argument("--dry-run", action="store_true", help="Report without deleting")
+    prune.set_defaults(func=_handle_cli)
 
 
 def _handle_cli(args: Any) -> None:
-    """Boot the runner only when the operator invokes the CLI command."""
+    """Boot the engine only when the operator invokes a CLI command."""
+    if args.dyvine_section == "media":
+        from dyvine_hermes.media_prune import prune_cli
+
+        prune_cli(older_than_days=args.older_than_days, dry_run=args.dry_run)
+        return
     from dyvine_hermes.weekly import run_cli
 
     run_cli(round_name=args.round_name, dry_run=args.dry_run)
