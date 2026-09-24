@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from dyvine.services.delivery import post_datetime_from_path, scan_media_files
+
 
 def _checkpoint(entry: Any) -> dict[str, Any]:
     value = entry.extra.get("weekly", {})
@@ -40,3 +42,18 @@ def entry_cutoff(entry: Any, timezone: str) -> datetime | None:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(ZoneInfo(timezone))
     return parsed.replace(tzinfo=None)
+
+
+def media_after_cutoff(user_dir: Path, cutoff: datetime | None) -> list[Path]:
+    """List the media a window covers: posts after ``cutoff``, or all without one.
+
+    A path with no parseable post time counts as posted before the cutoff.
+    """
+    files: list[Path] = []
+    for path in scan_media_files(user_dir):
+        if cutoff is not None:
+            posted = post_datetime_from_path(path, user_dir)
+            if posted is None or posted <= cutoff:
+                continue
+        files.append(path)
+    return files

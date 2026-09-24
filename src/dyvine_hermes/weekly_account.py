@@ -6,16 +6,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-from dyvine.services.delivery import (
-    FeishuCredentials,
-    FeishuGroupChannel,
-    post_datetime_from_path,
-    scan_media_files,
-)
+from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
 from dyvine.services.delivery_durable import media_identity
 
 from .weekly_download import download_entry
-from .weekly_state import _checkpoint, _path_within_root, entry_cutoff, patch_queue
+from .weekly_state import (
+    _checkpoint,
+    _path_within_root,
+    entry_cutoff,
+    media_after_cutoff,
+    patch_queue,
+)
 from .weekly_types import WeeklyConfig, WeeklyOutcome
 
 MAX_FILES_PER_RUN = 20
@@ -96,14 +97,7 @@ def _media_candidates(entry: Any, user_dir: Path, timezone: str) -> list[Path]:
     cutoff = entry_cutoff(entry, timezone)
     if not user_dir.is_dir():
         raise ValueError("recorded download directory is missing")
-    files: list[Path] = []
-    for path in scan_media_files(user_dir):
-        if cutoff is not None:
-            posted = post_datetime_from_path(path, user_dir)
-            if posted is None or posted <= cutoff:
-                continue
-        files.append(path)
-    return files
+    return media_after_cutoff(user_dir, cutoff)
 
 
 async def _deliver(

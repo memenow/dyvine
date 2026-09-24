@@ -189,9 +189,14 @@ async def test_unfinished_first_pair_prevents_next_pair_claim(tmp_path: Path) ->
     assert (await repo.get_entry("weekly0913:sec_3")).status == "pending"
 
 
-async def test_one_run_finishes_current_pair_without_claiming_third(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("budget", "spent"), [("PAIR_START_WINDOW_SECONDS", 0), ("MAX_STEPS_PER_RUN", 2)]
+)
+async def test_spent_run_budget_finishes_current_pair_without_claiming_third(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: str, spent: int
 ) -> None:
+    """A closed start window or a used-up step cap holds the next pair."""
+    monkeypatch.setattr(weekly_module, budget, spent)
     repo = FakeQueueRepository()
     for index in range(1, 4):
         user_dir = tmp_path / f"Account-{index}"
@@ -216,6 +221,7 @@ async def test_one_run_finishes_current_pair_without_claiming_third(
         engine=engine, config=_config(tmp_path), round_name="weekly0913"
     )
     assert outcome.status == "pair_complete"
+    assert outcome.note == "pairs=1 steps=2"
     assert (await repo.get_entry("weekly0913:sec_1")).status == "completed"
     assert (await repo.get_entry("weekly0913:sec_2")).status == "completed"
     assert (await repo.get_entry("weekly0913:sec_3")).status == "pending"
@@ -395,7 +401,7 @@ async def test_parked_partner_does_not_mark_a_finished_pair_for_review(
         channel=channel,
     )
     assert outcome.status == "pair_complete"
-    assert outcome.note == "steps=2"
+    assert outcome.note == "pairs=1 steps=2"
     assert outcome.files == 2
     assert (await repo.get_entry("weekly0913:sec_2")).status == "needs_reconciliation"
 

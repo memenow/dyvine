@@ -7,6 +7,8 @@ import datetime as dt
 import fcntl
 import json
 import os
+import shutil
+import statistics
 import sys
 import time
 from collections.abc import Iterator
@@ -17,18 +19,29 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from dyvine.core.exceptions import DeliveryError
+from dyvine.db.protocols import QUEUE_ACTIVE_STATUSES
 
 from .weekly_account import process_entry
-from .weekly_state import patch_queue
+from .weekly_state import _checkpoint, entry_cutoff, patch_queue
 from .weekly_types import WeeklyConfig, WeeklyOutcome
 
 MAX_RUN_SECONDS = 2700
+# Hermes kills a cron script at 3600 s. A later pair starts only this early,
+# so every pair keeps most of the run's MAX_RUN_SECONDS deadline.
+PAIR_START_WINDOW_SECONDS = 900
+DISK_RESERVE_BYTES = 10 * 1024**3
+DISK_RESERVE_FRACTION = 0.10
+RATE_SAFETY = 1.5
+RATE_MIN_SAMPLES = 10
+DEFAULT_RATE_BYTES_PER_DAY = 20 * 1024**2
+FULL_DOWNLOAD_ALLOWANCE = 2 * 1024**3
 MAX_STEPS_PER_RUN = 100
 STALE_AFTER_SECONDS = 3600
 MAX_ATTEMPTS = 8
 _REVIEW_STATUSES = frozenset(
     {"needs_reconciliation", "needs_review", "op_issue", "pair_needs_review"}
 )
+_REPORTED_STATUSES = _REVIEW_STATUSES | {"blocked_by_prior_round", "disk_budget"}
 _DONE_STATUSES = frozenset({"completed", "permanent_failure", "skipped"})
 # The legacy migration parks rows it could not prove. This runner never
 # advances them, so they wait for an operator without holding later pairs.
@@ -110,6 +123,71 @@ async def _current_pair_keys(engine: Any, round_name: str) -> set[str]:
     return set()
 
 
+def _download_rate(rows: list[Any]) -> float:
+    """Return the p90 bytes per window day that finished rows downloaded.
+
+    Until RATE_MIN_SAMPLES rows recorded a window, the default rate applies.
+    """
+    samples: list[float] = []
+    for row in rows:
+        checkpoint = _checkpoint(row)
+        size = checkpoint.get("window_bytes")
+        days = checkpoint.get("window_days")
+        if (
+            row.status in _DONE_STATUSES
+            and isinstance(size, int | float)
+            and isinstance(days, int | float)
+        ):
+            samples.append(size / max(days, 1))
+    if len(samples) < RATE_MIN_SAMPLES:
+        return DEFAULT_RATE_BYTES_PER_DAY
+    return statistics.quantiles(samples, n=10)[-1]
+
+
+async def _disk_shortfall(
+    engine: Any,
+    config: WeeklyConfig,
+    round_name: str,
+    pair_keys: set[str],
+    local_now: dt.datetime,
+) -> str | None:
+    """Explain why a pair's estimated download does not fit, or return ``None``.
+
+    Only the pair's in-flight rows count. A cutoff-bounded incremental row
+    needs its window days (at least one) times the round's rate times
+    RATE_SAFETY; a full-feed row needs FULL_DOWNLOAD_ALLOWANCE. The estimate
+    must fit the free space above max(DISK_RESERVE_BYTES, DISK_RESERVE_FRACTION
+    of the disk). ``local_now`` is naive weekly-timezone time, as cutoffs are.
+    """
+    rows = await engine.queue.list_entries(round=round_name, limit=-1)
+    rate = _download_rate(rows)
+    need = 0.0
+    for row in rows:
+        if row.key not in pair_keys or row.status not in QUEUE_ACTIVE_STATUSES:
+            continue
+        # A full or post download fetches the whole feed whatever its cutoff.
+        # A malformed cutoff counts as a full feed here and is flagged for
+        # review when its row is claimed.
+        try:
+            cutoff = (
+                entry_cutoff(row, config.timezone)
+                if row.mode == "incremental"
+                else None
+            )
+        except ValueError:
+            cutoff = None
+        if cutoff is None:
+            need += FULL_DOWNLOAD_ALLOWANCE
+        else:
+            days = (local_now - cutoff).total_seconds() / 86400
+            need += max(days, 1) * rate * RATE_SAFETY
+    usage = shutil.disk_usage(config.download_root)
+    reserve = max(DISK_RESERVE_BYTES, usage.total * DISK_RESERVE_FRACTION)
+    if need <= usage.free - reserve:
+        return None
+    return f"need={round(need / 1024**2)}MiB free={usage.free // 1024**2}MiB"
+
+
 async def _advance_claimed(
     engine: Any,
     entry: Any,
@@ -150,6 +228,45 @@ async def _advance_claimed(
         raise
 
 
+async def _advance_pair(
+    engine: Any,
+    config: WeeklyConfig,
+    round_name: str,
+    pair_keys: set[str],
+    deadline: float,
+    channel: Any,
+    outcomes: list[WeeklyOutcome],
+) -> list[WeeklyOutcome]:
+    """Step the pair's rows until each stalls; return this pair's outcomes.
+
+    ``outcomes`` gathers every step of the run, so MAX_STEPS_PER_RUN caps
+    the whole invocation rather than each pair.
+    """
+    first = len(outcomes)
+    stalled: set[str] = set()
+    while len(outcomes) < MAX_STEPS_PER_RUN:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or (outcomes and remaining < 1):
+            break
+        allowed = pair_keys - stalled
+        if not allowed:
+            break
+        entry = await engine.queue.claim_next(round=round_name, keys=allowed)
+        if entry is None:
+            break
+        outcome = await _advance_claimed(engine, entry, config, deadline, channel)
+        outcomes.append(outcome)
+        if outcome.status != "pending" or outcome.note == "send_intent":
+            stalled.add(entry.key)
+        elif (
+            not outcome.processed
+            and not outcome.files
+            and outcome.note != "full_continuation"
+        ):
+            stalled.add(entry.key)
+    return outcomes[first:]
+
+
 async def run_once(
     *,
     engine: Any,
@@ -159,7 +276,7 @@ async def run_once(
     now: dt.datetime | None = None,
     channel: Any = None,
 ) -> WeeklyOutcome:
-    """Advance the current pair within the timeout; never spawn detached tasks."""
+    """Advance pairs in seed order within run budgets; never spawn detached tasks."""
     instant = now or dt.datetime.now(tz=ZoneInfo(config.timezone))
     automatic = round_name is None
     window_start: dt.date | None = None
@@ -222,49 +339,58 @@ async def run_once(
     pair_keys = await _current_pair_keys(engine, round_name)
     if not pair_keys:
         return WeeklyOutcome("idle", round_name)
-    deadline = time.monotonic() + MAX_RUN_SECONDS
+    started = time.monotonic()
+    deadline = started + MAX_RUN_SECONDS
+    local_now = instant.astimezone(ZoneInfo(config.timezone)).replace(tzinfo=None)
+    shortfall = await _disk_shortfall(engine, config, round_name, pair_keys, local_now)
+    if shortfall:
+        return WeeklyOutcome("disk_budget", round_name, note=shortfall)
     outcomes: list[WeeklyOutcome] = []
-    stalled: set[str] = set()
-    for _ in range(MAX_STEPS_PER_RUN):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or (outcomes and remaining < 1):
+    pairs = 0
+    while True:
+        pairs += 1
+        advanced = await _advance_pair(
+            engine, config, round_name, pair_keys, deadline, channel, outcomes
+        )
+        if not advanced or any(item.status in _REVIEW_STATUSES for item in advanced):
             break
-        allowed = pair_keys - stalled
-        if not allowed:
-            break
-        entry = await engine.queue.claim_next(round=round_name, keys=allowed)
-        if entry is None:
-            break
-        outcome = await _advance_claimed(engine, entry, config, deadline, channel)
-        outcomes.append(outcome)
-        if outcome.status != "pending" or outcome.note == "send_intent":
-            stalled.add(entry.key)
-        elif (
-            not outcome.processed
-            and not outcome.files
-            and outcome.note != "full_continuation"
+        # An unsettled pair stays first, so seed order holds across pairs.
+        next_keys = await _current_pair_keys(engine, round_name)
+        if (
+            not next_keys
+            or next_keys == pair_keys
+            or len(outcomes) >= MAX_STEPS_PER_RUN
+            or time.monotonic() - started >= PAIR_START_WINDOW_SECONDS
+            or await _disk_shortfall(engine, config, round_name, next_keys, local_now)
         ):
-            stalled.add(entry.key)
+            break
+        pair_keys = next_keys
     if not outcomes:
         return WeeklyOutcome("blocked_pair", round_name)
-    if len(outcomes) == 1:
+    if pairs == 1 and len(outcomes) == 1:
         return outcomes[0]
-    pair = [
-        entry
-        for entry in [await engine.queue.get_entry(key) for key in sorted(pair_keys)]
-        if entry.status not in _PARKED_STATUSES
-    ]
-    if all(entry.status in _DONE_STATUSES for entry in pair):
-        status = "pair_complete"
-    elif any(entry.status in _REVIEW_STATUSES for entry in pair):
-        status = "pair_needs_review"
-    else:
-        status = "pair_progress"
+    status = next(
+        (item.status for item in outcomes if item.status in _REVIEW_STATUSES), None
+    )
+    if status is None:
+        pair = [
+            entry
+            for entry in [
+                await engine.queue.get_entry(key) for key in sorted(pair_keys)
+            ]
+            if entry.status not in _PARKED_STATUSES
+        ]
+        if all(entry.status in _DONE_STATUSES for entry in pair):
+            status = "pair_complete"
+        elif any(entry.status in _REVIEW_STATUSES for entry in pair):
+            status = "pair_needs_review"
+        else:
+            status = "pair_progress"
     return WeeklyOutcome(
         status,
         round_name,
         files=sum(item.files for item in outcomes),
-        note=f"steps={len(outcomes)}",
+        note=f"pairs={pairs} steps={len(outcomes)}",
         processed=sum(item.processed for item in outcomes),
     )
 
@@ -290,10 +416,9 @@ def run_cli(round_name: str | None, dry_run: bool) -> None:
             outcome = asyncio.run(execute())
         if dry_run:
             print(json.dumps(asdict(outcome), ensure_ascii=False))
-        elif outcome.status in _REVIEW_STATUSES | {"blocked_by_prior_round"}:
-            print(
-                f"dyvine weekly: {outcome.status} {outcome.key or ''}", file=sys.stderr
-            )
+        elif outcome.status in _REPORTED_STATUSES:
+            detail = " ".join(part for part in (outcome.key, outcome.note) if part)
+            print(f"dyvine weekly: {outcome.status} {detail}".rstrip(), file=sys.stderr)
     except Exception as error:
         print(f"dyvine weekly failed: {type(error).__name__}", file=sys.stderr)
         raise SystemExit(1) from error

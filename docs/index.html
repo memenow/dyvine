@@ -454,7 +454,7 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       <ul>
         <li>Never send a bare text probe: the first message in a delivery group is always the author's profile link + nickname.</li>
         <li>Use <code>DYVINE_WEEKLY_GROUP_POLICY=reuse_existing</code> in every round. A returning account is identified by stable <code>sec_user_id</code> and reuses one Postgres-verified historical chat and topic; only a new account gets a new group with the recipient's <code>ou_</code> open ID as <code>owner_id</code>.</li>
-        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner advances at most one pair per invocation; do not clean local files until delivery is reconciled.</li>
+        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner finishes each pair before it starts the next; do not clean local files until delivery is reconciled.</li>
         <li>The durable sender records 0-byte files and files above its 29 MiB upload cap as permanent failures. It leaves local media in place for reconciliation.</li>
         <li>Backfill dedupe uses file-level ledger records and confirmed historical messages, not nickname counters. A <code>0/0</code> summary is not evidence that no media was missed.</li>
         <li>Run same-nickname accounts (distinct <code>sec_user_id</code>s) serially during backfill: legacy download directories and progress keys were nickname-based.</li>
@@ -463,12 +463,21 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       </ul>
       <h3>Weekly runner</h3>
       <p>
-        <code>hermes dyvine weekly run-once</code> advances at most one ordered
-        pair of accounts (both accounts of the current pair) within a bounded
-        runtime and file count. It waits for every download started by that
-        invocation and saves its checkpoint to Postgres before exiting. It
-        does not advance to the next pair until both current accounts have
-        terminal outcomes. A row still parked in
+        <code>hermes dyvine weekly run-once</code> advances ordered pairs of
+        accounts back to back in seed order within a bounded runtime and file
+        count. It waits for every download started by that invocation and
+        saves its checkpoint to Postgres before exiting. It does not advance
+        to the next pair until both current accounts have terminal outcomes.
+        A new pair starts only within the first 15 minutes of an invocation,
+        while no review state was hit, and while the pair's estimated
+        download fits the free disk space minus max(10 GiB, 10% of the disk).
+        The estimate is 2 GiB per full-feed account (full mode or no cutoff)
+        and, for an incremental account, 1.5 times its days since the queue
+        cutoff times the round's download rate: the 90th percentile of bytes
+        per window day among its finished accounts, or 20 MiB per day until
+        10 of them recorded one. The first pair must fit too; a
+        <code>disk_budget</code> outcome means nothing was started. A row
+        still parked in
         <code>needs_reconciliation</code> does not hold later pairs, but it
         keeps blocking automatic rounds until it is reconciled. An incremental
         download stops at the queue cutoff:
