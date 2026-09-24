@@ -391,6 +391,83 @@ def test_group_attested_pending_uses_stable_sec_despite_reused_nickname() -> Non
     assert decision.group_attestation is proof
 
 
+def _window_report(old_status: str = "op_done") -> dict[str, Any]:
+    report = _report(old_status=old_status)
+    report["resolution"] = {
+        "action": "release_pending_window_attested",
+        "chat_id": "oc-old",
+        "topic_message_id": "om-topic",
+    }
+    return report
+
+
+def _assess_window(script: Any, report: dict[str, Any], proof: Any) -> Any:
+    return script._assess(
+        report,
+        _queue(report),
+        active_round="weekly0913",
+        archive_historical=False,
+        identity_ids={"sec-one"},
+        group=_group(report),
+        files=[_file(report)],
+        evidence=[],
+        window_attestation=proof,
+    )
+
+
+def test_window_attested_release_does_not_require_zero_send_evidence() -> None:
+    """The audited chat settles ambiguous, cache-only, and failed paths."""
+    script = _load_script()
+    report = _window_report(old_status="send_issue")
+    for field in (
+        "cache_only_unverified_paths",
+        "permanent_failure_paths",
+        "permanent_unresolved_paths",
+        "ambiguous_sent_paths",
+        "failed_paths",
+    ):
+        report[field] = 2
+    proof = script.WindowAttestation("audit", "target", "2026-09-06T08:00:00", 3)
+    decision = _assess_window(script, report, proof)
+    assert (decision.status, decision.action) == (
+        "pending",
+        "release_pending_window_attested",
+    )
+    assert decision.window_attestation is proof
+    assert decision.receipts == ()
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("no_proof", "complete window attestation is missing"),
+        ("held_proof", "Feishu in-window files differ from the legacy ledger"),
+        ("other_chat", "group and topic have not been adopted exactly"),
+        ("historical_round", "window attestation cannot release this row"),
+        ("recorded_skip", "window attestation cannot release this row"),
+    ],
+)
+def test_window_attested_release_holds_without_exact_proof(
+    change: str, reason: str
+) -> None:
+    script = _load_script()
+    report = _window_report(
+        old_status="skipped_404" if change == "recorded_skip" else "op_done"
+    )
+    proof: Any = script.WindowAttestation("audit", "target", "2026-09-06T08:00:00", 1)
+    if change == "no_proof":
+        proof = None
+    elif change == "held_proof":
+        proof = reason
+    elif change == "other_chat":
+        report["resolution"]["chat_id"] = "oc-other"
+    elif change == "historical_round":
+        report = {**report, "key": "weekly0906:sec-one", "round": "weekly0906"}
+    decision = _assess_window(script, report, proof)
+    assert decision.status is None
+    assert decision.reason == reason
+
+
 @pytest.mark.parametrize("action", ["complete", "release_pending"])
 def test_cache_only_unverified_paths_hold_even_with_reviewed_resolution(
     action: str,
@@ -582,3 +659,132 @@ def test_apply_uses_guarded_queue_and_receipt_writes(
         with pytest.raises(ValueError, match="compare-and-set failed"):
             asyncio.run(script.run(args))
         assert len(statements) == len(write_counts)
+
+
+def test_window_plan_is_bound_to_the_weekly_timezone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _load_script()
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(_window_report()) + "\n", encoding="utf-8")
+    args = argparse.Namespace(
+        report=str(path),
+        active_round="weekly0913",
+        archive_historical=False,
+        apply=False,
+        timezone=None,
+    )
+    monkeypatch.setattr(
+        script, "_group_inputs", lambda *_args: SimpleNamespace(evidence_digests=())
+    )
+    with pytest.raises(ValueError, match="requires --timezone"):
+        asyncio.run(script.run(args))
+
+
+def test_apply_records_window_proof_and_forces_a_fresh_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _load_script()
+    report = _window_report()
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+    _, source_digest = script._report_rows(path)
+    inputs = SimpleNamespace(
+        journal=SimpleNamespace(sha256="journal"),
+        supplemental_journal=None,
+        keys_file_sha256=None,
+        source_sha256="source",
+        work_sha256="work",
+        evidence_digests=("source", "journal", "work"),
+    )
+    written: list[Any] = []
+
+    class FakeConnection:
+        async def execute(self, statement: Any) -> SimpleNamespace:
+            written.append(statement)
+            return SimpleNamespace(rowcount=1)
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeSession:
+            return self
+
+        async def connection(self) -> FakeConnection:
+            return FakeConnection()
+
+    class FakeFactory:
+        def __init__(self, _url: str, **_options: Any) -> None:
+            pass
+
+        def session(self) -> FakeSession:
+            return FakeSession()
+
+        async def aclose(self) -> None:
+            return None
+
+    proof = script.WindowAttestation("audit", "target", "2026-09-06T08:00:00", 4)
+    seen_timezones: list[Any] = []
+
+    async def inspect(*_args: Any, **kwargs: Any) -> tuple[Any, Any]:
+        seen_timezones.append(kwargs.get("timezone"))
+        return (
+            script.Decision(
+                "pending",
+                "release_pending_window_attested",
+                "matched",
+                window_attestation=proof,
+            ),
+            _queue(report),
+        )
+
+    monkeypatch.setattr(script, "DatabaseSessionFactory", FakeFactory)
+    monkeypatch.setattr(script, "_inspect_row", inspect)
+    monkeypatch.setattr(script, "_group_inputs", lambda *_args: inputs)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://example")
+    plain = script._plan_digest(
+        source_digest, "weekly0913", False, inputs.evidence_digests
+    )
+    args = argparse.Namespace(
+        report=str(path),
+        active_round="weekly0913",
+        archive_historical=False,
+        database_url_env="DATABASE_URL",
+        apply=True,
+        expect_plan_sha256=plain,
+        expected_count=1,
+        timezone="Asia/Shanghai",
+    )
+    with pytest.raises(ValueError, match="exact preview digest"):
+        asyncio.run(script.run(args))
+    preview = asyncio.run(
+        script.run(argparse.Namespace(**{**vars(args), "apply": False}))
+    )
+    args.expect_plan_sha256 = preview["plan_sha256"]
+    result = asyncio.run(script.run(args))
+    assert result["counts"] == {"applied": 1}
+    assert seen_timezones[-1] == "Asia/Shanghai"
+    extra = written[-1].compile().params["extra"]
+    assert extra["weekly"] == {"fresh_download_confirmed": False}
+    assert "migration_needs_reconciliation" not in extra
+    assert extra["reconciliation"] | {"applied_at": None} == {
+        "action": "release_pending_window_attested",
+        "plan_sha256": preview["plan_sha256"],
+        "applied_at": None,
+        "feishu_history_reference": None,
+        "main_audit_sha256": "journal",
+        "supplemental_audit_sha256": None,
+        "supplemental_keys_sha256": None,
+        "audit_source_sha256": "source",
+        "work_sha256": "work",
+        "audit_sha256": "audit",
+        "target_source_sha256": "target",
+        "window_cutoff": "2026-09-06T08:00:00",
+        "window_file_count": 4,
+        "timezone": "Asia/Shanghai",
+        "proof": "feishu_window_file_name_multiset",
+    }

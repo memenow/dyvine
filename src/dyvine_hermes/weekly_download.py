@@ -25,9 +25,12 @@ async def download_entry(
 ) -> Any:
     checkpoint = _checkpoint(entry)
     reconciliation = entry.extra.get("reconciliation")
+    # Attested cutover releases proved what the chat already holds, not that
+    # any legacy download or operation still describes the media on disk.
     attested_recheck = bool(
         isinstance(reconciliation, dict)
-        and reconciliation.get("action") == "release_pending_group_attested"
+        and reconciliation.get("action")
+        in {"release_pending_group_attested", "release_pending_window_attested"}
         and not checkpoint.get("fresh_download_confirmed")
     )
     cutover_entry = entry.round == config.cutover_round

@@ -14,7 +14,12 @@ from dyvine.db.models import (
     DeliveryLegacyEvidenceRow,
     DownloadQueueRow,
 )
-from scripts.queue_group_attestation import GroupAttestation
+from scripts.queue_group_attestation import GroupAttestation, WindowAttestation
+
+# Legacy queue statuses whose remaining media may be released for sending.
+_RELEASABLE_OLD_STATUSES = frozenset(
+    {"op_done", "pending", "downloading", "op_issue", "send_issue"}
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +31,7 @@ class Decision:
     reason: str
     receipts: tuple[tuple[DeliveryFileRow, str], ...] = ()
     group_attestation: GroupAttestation | None = None
+    window_attestation: WindowAttestation | None = None
 
 
 def _string(value: Any) -> str | None:
@@ -156,6 +162,62 @@ def _user_ordered_skip(
     )
 
 
+def _adoption_issue(
+    group: DeliveryGroupRow | None,
+    key: str | None,
+    queue: DownloadQueueRow,
+    resolution: dict[str, Any],
+) -> str | None:
+    if (
+        group is None
+        or group.key != key
+        or group.status != "ready"
+        or group.topic_status != "ready"
+        or not group.topic_message_id
+        or not queue.chat_id
+        or group.chat_id != queue.chat_id
+        or resolution.get("chat_id") != group.chat_id
+        or resolution.get("topic_message_id") != group.topic_message_id
+    ):
+        return "group and topic have not been adopted exactly"
+    return None
+
+
+def _window_release(
+    resolution: dict[str, Any],
+    *,
+    key: str | None,
+    queue: DownloadQueueRow,
+    group: DeliveryGroupRow | None,
+    round_name: str | None,
+    active_round: str,
+    old_status: str | None,
+    window_attestation: WindowAttestation | str | None,
+) -> Decision:
+    """Release an active-round row whose download window Feishu confirms."""
+    if round_name != active_round or old_status not in _RELEASABLE_OLD_STATUSES:
+        return Decision(None, "held", "window attestation cannot release this row")
+    issue = _adoption_issue(group, key, queue, resolution)
+    if issue:
+        return Decision(None, "held", issue)
+    if not isinstance(window_attestation, WindowAttestation):
+        return Decision(
+            None,
+            "held",
+            (
+                window_attestation
+                if isinstance(window_attestation, str)
+                else "complete window attestation is missing"
+            ),
+        )
+    return Decision(
+        "pending",
+        "release_pending_window_attested",
+        "Feishu in-window files match the legacy ledger",
+        window_attestation=window_attestation,
+    )
+
+
 def _assess(
     report: dict[str, Any],
     queue: DownloadQueueRow | None,
@@ -167,6 +229,7 @@ def _assess(
     files: list[DeliveryFileRow],
     evidence: list[DeliveryLegacyEvidenceRow],
     group_attestation: GroupAttestation | str | None = None,
+    window_attestation: WindowAttestation | str | None = None,
 ) -> Decision:
     key = _string(report.get("key"))
     round_name = _string(report.get("round"))
@@ -201,6 +264,22 @@ def _assess(
     if isinstance(resolution, dict) and resolution.get("action") == "skip_user_ordered":
         # A skip sends nothing, so send-evidence gaps below cannot make it unsafe.
         return _user_ordered_skip(round_name, active_round, old_status, files)
+    if (
+        isinstance(resolution, dict)
+        and resolution.get("action") == "release_pending_window_attested"
+    ):
+        # The audited chat shows which in-window sends arrived, which settles
+        # the ambiguous, cache-only, and failed evidence held below.
+        return _window_release(
+            resolution,
+            key=key,
+            queue=queue,
+            group=group,
+            round_name=round_name,
+            active_round=active_round,
+            old_status=old_status,
+            window_attestation=window_attestation,
+        )
     cache_only = _count(report, "cache_only_unverified_paths")
     if cache_only != 0:
         return Decision(None, "held", "cache-only paths have no verified send outcome")
@@ -244,23 +323,14 @@ def _assess(
         "release_pending_group_attested",
     }:
         return Decision(None, "held", "unsupported reviewed action")
-    if (
-        group is None
-        or group.key != key
-        or group.status != "ready"
-        or group.topic_status != "ready"
-        or not group.topic_message_id
-        or not queue.chat_id
-        or group.chat_id != queue.chat_id
-        or resolution.get("chat_id") != group.chat_id
-        or resolution.get("topic_message_id") != group.topic_message_id
-    ):
-        return Decision(None, "held", "group and topic have not been adopted exactly")
+    issue = _adoption_issue(group, key, queue, resolution)
+    if issue:
+        return Decision(None, "held", issue)
+    assert group is not None
     if action == "release_pending_group_attested":
         if (
             round_name != active_round
-            or old_status
-            not in {"op_done", "pending", "downloading", "op_issue", "send_issue"}
+            or old_status not in _RELEASABLE_OLD_STATUSES
             or _count(report, "ambiguous_sent_paths") != 0
             or _count(report, "failed_paths") != 0
             or _count(report, "snapshot_failed_entries") != 0
