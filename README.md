@@ -189,11 +189,19 @@ An automatic round's queue cutoff is the Sunday 08:00 of the latest earlier
 automatic round that was opened; the first round uses the Sunday before the
 first eligible one. A week held back by an unfinished round therefore widens the
 next window instead of being skipped.
-The command processes at most one ordered pair of accounts per invocation:
-within its step and runtime bounds it advances both accounts of the current
-pair, records its checkpoint in Postgres, and waits for any download it
-starts before exiting. It holds the next pair until both accounts in the
-current pair have terminal outcomes. A row still parked in
+The command processes ordered pairs of accounts back to back in seed order:
+within its step and runtime bounds it advances both accounts of a pair,
+records its checkpoint in Postgres, and waits for any download it starts
+before exiting. It holds the next pair until both accounts in the current
+pair have terminal outcomes. A new pair starts only within the first 15
+minutes of an invocation, while no review state was hit, and while the
+pair's estimated download fits the free disk space minus max(10 GiB, 10% of
+the disk). The estimate is 2 GiB per full-feed account (full mode or no
+cutoff) and, for an incremental account, 1.5 times its days since the queue
+cutoff times the round's download rate: the 90th percentile of bytes per
+window day among its finished accounts, or 20 MiB per day until 10 of them
+recorded one. The first pair must fit too; a `disk_budget` outcome means
+nothing was started. A row still parked in
 `needs_reconciliation` does not hold later pairs, but it keeps blocking
 automatic rounds until it is reconciled. An incremental download stops at the
 queue cutoff: media posted at or before it is neither downloaded nor sent,
@@ -472,8 +480,8 @@ PYTHONPATH=src uv run python scripts/propose_unavailable_author_skips.py \
 
 For inspection, run `hermes dyvine weekly run-once --dry-run`; use
 `--round weekly-YYYY-MM-DD --dry-run` to inspect a named round. The
-non-dry-run command advances the current account pair, with an upper bound on
-files and runtime. A new file's delivery key includes its account, account-relative path,
+non-dry-run command advances account pairs in seed order, within bounds on
+files, runtime, and free disk space. A new file's delivery key includes its account, account-relative path,
 and content hash. The ledger retains the uploaded `file_key`, send UUID,
 and Feishu message ID. A legacy send covers a re-downloaded file with the
 same account-relative path, or with the same post creation stamp and media

@@ -7,6 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -345,6 +346,84 @@ async def test_incremental_operation_is_persisted_before_download(
     )
     assert outcome.status == "completed"
     engine.posts.download_new_posts.assert_awaited_once()
+    # Without a cutoff there is no window to learn a download rate from.
+    saved = await repo.get_entry("weekly0913:sec_1")
+    assert "window_bytes" not in saved.extra["weekly"]
+
+
+async def test_incremental_download_records_its_window_sample(
+    tmp_path: Path,
+) -> None:
+    """The runner sizes later pairs' disk budget from finished windows."""
+    user_dir = tmp_path / "Account"
+    fresh = user_dir / "2026-09-13 09-00-00 post"
+    fresh.mkdir(parents=True)
+    (fresh / "clip.mp4").write_bytes(b"12345")
+    (fresh / "cover.jpg").write_bytes(b"123")
+    (fresh / "notes.txt").write_bytes(b"not media")
+    older = user_dir / "2026-09-11 09-00-00 post"
+    older.mkdir()
+    (older / "clip.mp4").write_bytes(b"x" * 100)
+    (user_dir / "undated.mp4").write_bytes(b"x" * 50)
+    repo = FakeQueueRepository()
+    engine = _engine(repo)
+    await repo.upsert_entry(
+        key="weekly0913:sec_1",
+        round="weekly0913",
+        nickname="Account",
+        sec_user_id="sec_1",
+        mode="incremental",
+        status="pending",
+        cutoff="2026-09-12T08:00:00",
+        extra={},
+    )
+    delivered = [
+        SimpleNamespace(
+            relative_path=f"{fresh.name}/{name}", status="legacy_confirmed_sent"
+        )
+        for name in ("clip.mp4", "cover.jpg")
+    ]
+
+    async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        return delivered if kwargs.get("status") == "legacy_confirmed_sent" else []
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
+
+    async def complete(
+        sec_user_id: str,
+        *,
+        since_aweme_id: str | None,
+        operation_id: str,
+        posted_after: datetime | None = None,
+    ) -> IncrementalDownloadResult:
+        await engine.operations.update_operation(
+            operation_id,
+            status="completed",
+            message="Downloaded new posts",
+            download_path="Account",
+            metadata={"new_count": 1, "failed_count": 0},
+        )
+        return IncrementalDownloadResult(operation_id, 1, "aweme_1", ["aweme_1"], 0)
+
+    engine.posts.download_new_posts = AsyncMock(side_effect=complete)
+    cutoff = datetime(2026, 9, 12, 8, 0)
+
+    def days_since_cutoff() -> float:
+        local = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+        return (local - cutoff).total_seconds() / 86400
+
+    earliest = days_since_cutoff()
+    outcome = await run_once(
+        engine=engine, config=_config(tmp_path), round_name="weekly0913"
+    )
+    latest = days_since_cutoff()
+    assert outcome.status == "completed"
+    checkpoint = (await repo.get_entry("weekly0913:sec_1")).extra["weekly"]
+    # Only media posted after the cutoff counts: clip.mp4 and cover.jpg.
+    assert checkpoint["window_bytes"] == 8
+    assert earliest <= checkpoint["window_days"] <= latest
+    assert checkpoint["downloaded_posts"] == 1
+    assert checkpoint["fresh_download_confirmed"] is True
 
 
 async def test_incremental_download_is_bounded_by_the_queue_cutoff(

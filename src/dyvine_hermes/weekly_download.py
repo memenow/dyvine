@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dyvine.services.delivery import MEDIA_EXTS
 
-from .weekly_state import _checkpoint, _path_within_root, entry_cutoff, patch_queue
+from .weekly_state import (
+    _checkpoint,
+    _path_within_root,
+    entry_cutoff,
+    media_after_cutoff,
+    patch_queue,
+)
 from .weekly_types import WeeklyConfig
 
 
@@ -143,6 +151,7 @@ async def download_entry(
         operation_id=operation.operation_id,
         op_status="pending",
     )
+    cutoff = entry_cutoff(entry, config.timezone)
     result = await asyncio.wait_for(
         engine.posts.download_new_posts(
             entry.sec_user_id,
@@ -150,7 +159,7 @@ async def download_entry(
             operation_id=operation.operation_id,
             # Delivery never sends media posted at or before the cutoff, so
             # a fresh re-download must not walk the whole history to reach it.
-            posted_after=entry_cutoff(entry, config.timezone),
+            posted_after=cutoff,
         ),
         timeout=remaining,
     )
@@ -170,13 +179,23 @@ async def download_entry(
         )
     if not operation.download_path:
         raise ValueError("completed download has no recorded directory")
+    user_dir = _path_within_root(operation.download_path, config.download_root)
     checkpoint.update(
         download_complete=True,
         fresh_download_confirmed=True,
-        user_dir=str(_path_within_root(operation.download_path, config.download_root)),
+        user_dir=str(user_dir),
         downloaded_posts=result.new_count,
         newest_aweme_id=result.newest_aweme_id,
     )
+    if cutoff is not None:
+        # The runner sizes later pairs' disk budget from these window samples.
+        finished = datetime.now(ZoneInfo(config.timezone)).replace(tzinfo=None)
+        checkpoint.update(
+            window_bytes=sum(
+                path.stat().st_size for path in media_after_cutoff(user_dir, cutoff)
+            ),
+            window_days=(finished - cutoff).total_seconds() / 86400,
+        )
     return await patch_queue(
         engine,
         entry,
