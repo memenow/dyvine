@@ -185,11 +185,17 @@ automatic rounds are not opened. The required
 `DYVINE_WEEKLY_CUTOVER_ROUND` identifies the active legacy round: it and
 unfinished automatic rounds dated from the first eligible Sunday onward
 block a new automatic round. Older frozen history does not block the schedule.
+An automatic round's queue cutoff is the Sunday 08:00 of the latest earlier
+automatic round that was opened; the first round uses the Sunday before the
+first eligible one. A week held back by an unfinished round therefore widens the
+next window instead of being skipped.
 The command processes at most one ordered pair of accounts per invocation:
 within its step and runtime bounds it advances both accounts of the current
 pair, records its checkpoint in Postgres, and waits for any download it
 starts before exiting. It holds the next pair until both accounts in the
-current pair have terminal outcomes. An incremental download stops at the
+current pair have terminal outcomes. A row still parked in
+`needs_reconciliation` does not hold later pairs, but it keeps blocking
+automatic rounds until it is reconciled. An incremental download stops at the
 queue cutoff: media posted at or before it is neither downloaded nor sent,
 so a first run without a saved anchor fetches only the round's window, not
 the account's whole feed.
@@ -455,7 +461,9 @@ and content hash. The ledger retains the uploaded `file_key`, send UUID,
 and Feishu message ID. A legacy send covers a re-downloaded file with the
 same account-relative path, or with the same post creation stamp and media
 slot (`_video.mp4`, `_image_3.webp`, ...) when a caption edit renamed it,
-so the file is not sent twice. An uncertain send or unadopted legacy chat remains
+so the file is not sent twice. Consecutive weekly windows overlap, so a
+confirmed send by this runner covers a caption-renamed re-download the same
+way. An uncertain send or unadopted legacy chat remains
 on hold for message-level reconciliation; never replay a file merely
 because a summary counter or operation ID is missing.
 The `dyvine.delivery.send_account` tool also uses this ledger: pass `round`

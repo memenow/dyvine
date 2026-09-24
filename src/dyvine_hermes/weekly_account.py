@@ -257,12 +257,14 @@ async def _deliver(
                 note="send_intent",
                 processed=processed_now,
             )
-        if record.status == "sent":
+        relative = path.relative_to(user_dir).as_posix()
+        # A renamed re-download returns the earlier send of the same media.
+        if record.status == "sent" and record.relative_path == relative:
             sent_now += 1
         if record.status == "permanent_failure":
-            failed_paths.add(path.relative_to(user_dir).as_posix())
+            failed_paths.add(relative)
         if record.status in {"sent", "permanent_failure", "legacy_confirmed_sent"}:
-            returned_resolved.add(path.relative_to(user_dir).as_posix())
+            returned_resolved.add(relative)
     ledger_files = await engine.delivery_ledger.list_files(
         round=entry.round, sec_user_id=entry.sec_user_id, limit=-1
     )

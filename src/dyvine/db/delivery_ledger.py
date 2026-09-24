@@ -9,8 +9,9 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import PurePosixPath
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .group_adoption import adopt_prior_verified_group_for_round as adopt_group
 from .models import (
@@ -93,6 +94,24 @@ def _file_record(row: DeliveryFileRow) -> FileDeliveryRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+async def _same_post_media(
+    session: AsyncSession,
+    candidates: Select[tuple[DeliveryFileRow]],
+    relative_path: str,
+) -> FileDeliveryRecord | None:
+    """Return the first candidate holding the same post media as this path."""
+    slot = post_media_slot(relative_path)
+    if slot is None:
+        return None
+    same_post = candidates.where(
+        DeliveryFileRow.relative_path.startswith(slot[0], autoescape=True)
+    ).order_by(DeliveryFileRow.relative_path)
+    for candidate in (await session.execute(same_post)).scalars():
+        if post_media_slot(candidate.relative_path) == slot:
+            return _file_record(candidate)
+    return None
 
 
 def _evidence_record(row: DeliveryLegacyEvidenceRow) -> LegacyEvidenceRecord:
@@ -593,21 +612,32 @@ class PostgresDeliveryLedgerRepository:
             .where(DeliveryFileRow.sec_user_id == sec_user_id)
             .where(DeliveryFileRow.status == "legacy_confirmed_sent")
         )
-        slot = post_media_slot(relative_path)
         async with self._sessions.session() as session:
             exact = legacy_sends.where(
                 DeliveryFileRow.relative_path == relative_path
             ).limit(1)
             row = (await session.execute(exact)).scalars().first()
-            if row is not None or slot is None:
-                return _file_record(row) if row else None
-            same_post = legacy_sends.where(
-                DeliveryFileRow.relative_path.startswith(slot[0], autoescape=True)
-            ).order_by(DeliveryFileRow.relative_path)
-            for candidate in (await session.execute(same_post)).scalars():
-                if post_media_slot(candidate.relative_path) == slot:
-                    return _file_record(candidate)
-        return None
+            if row is not None:
+                return _file_record(row)
+            return await _same_post_media(session, legacy_sends, relative_path)
+
+    async def find_prior_sent(
+        self, *, sec_user_id: str, relative_path: str
+    ) -> FileDeliveryRecord | None:
+        """Find this runner's confirmed send of the same post media.
+
+        ``reserve_file`` dedupes only the exact path and content. Weekly
+        windows overlap, so a caption edited between two downloads renames
+        the file; a ``sent`` record with the same post creation stamp and
+        media slot (see ``post_media_slot``) is the same media.
+        """
+        sends = (
+            select(DeliveryFileRow)
+            .where(DeliveryFileRow.sec_user_id == sec_user_id)
+            .where(DeliveryFileRow.status == "sent")
+        )
+        async with self._sessions.session() as session:
+            return await _same_post_media(session, sends, relative_path)
 
     async def find_legacy_permanent_failure(
         self, *, sec_user_id: str, relative_path: str

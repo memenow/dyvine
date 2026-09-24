@@ -107,6 +107,43 @@ async def test_legacy_send_matches_the_same_media_under_an_edited_caption(
     )
 
 
+async def test_prior_send_matches_the_same_media_under_an_edited_caption(
+    ledger: PostgresDeliveryLedgerRepository,
+) -> None:
+    old = f"{_STAMP}_old caption/{_STAMP}_old caption_video.mp4"
+    renamed = f"{_STAMP}_new caption/{_STAMP}_new caption_video.mp4"
+    await ledger.reserve_file(
+        media_id="media-1",
+        round="weekly0913",
+        sec_user_id="sec-1",
+        relative_path=old,
+        content_sha256="0" * 64,
+        chat_id="chat-1",
+        parent_id="topic-1",
+    )
+    await ledger.set_file_key("media-1", "file-key-1")
+    await ledger.begin_send("media-1")
+    # An unconfirmed send is still resumed by its own intent, not skipped.
+    assert (
+        await ledger.find_prior_sent(sec_user_id="sec-1", relative_path=renamed) is None
+    )
+    await ledger.mark_sent("media-1", "message-1")
+    found = await ledger.find_prior_sent(sec_user_id="sec-1", relative_path=renamed)
+    assert found is not None and found.relative_path == old
+    for other in (
+        renamed.replace("_video.mp4", "_image_1.webp"),
+        renamed.replace("12-34-56", "12-34-57"),
+        "clip.mp4",
+    ):
+        assert (
+            await ledger.find_prior_sent(sec_user_id="sec-1", relative_path=other)
+            is None
+        )
+    assert (
+        await ledger.find_prior_sent(sec_user_id="sec-2", relative_path=renamed) is None
+    )
+
+
 async def test_file_intent_and_legacy_import_are_idempotent(
     ledger: PostgresDeliveryLedgerRepository,
 ) -> None:

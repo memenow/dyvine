@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from dyvine.core.exceptions import DeliveryError
+from dyvine.db.delivery_ledger import post_media_slot
 from dyvine.db.records import DeliveryGroupRecord, FileDeliveryRecord
 from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
 from dyvine.services.delivery_durable import media_identity
@@ -98,6 +99,22 @@ class Ledger:
         self, *, sec_user_id: str, relative_path: str
     ) -> FileDeliveryRecord | None:
         return self.legacy.get((sec_user_id, relative_path))
+
+    async def find_prior_sent(
+        self, *, sec_user_id: str, relative_path: str
+    ) -> FileDeliveryRecord | None:
+        slot = post_media_slot(relative_path)
+        return next(
+            (
+                row
+                for row in self.files.values()
+                if slot is not None
+                and row.sec_user_id == sec_user_id
+                and row.status == "sent"
+                and post_media_slot(row.relative_path) == slot
+            ),
+            None,
+        )
 
     async def find_legacy_permanent_failure(
         self, *, sec_user_id: str, relative_path: str
@@ -247,6 +264,35 @@ async def test_deliver_file_uses_reply_and_persisted_identity(tmp_path: Path) ->
     assert transport.posts[0]["payload"]["reply_in_thread"] is True
     assert transport.posts[0]["payload"]["uuid"] == "stable-uuid"
     assert (await channel.deliver_file(**kwargs)).status == "sent"
+    assert len(transport.posts) == len(transport.uploads) == 1
+
+
+async def test_prior_send_under_an_edited_caption_is_not_sent_again(
+    tmp_path: Path,
+) -> None:
+    stamp = "2026-09-22 10-00-00"
+    user_dir = tmp_path / "nickname"
+    ledger, transport = Ledger(), Transport()
+    channel = _channel(transport)
+    paths = []
+    for caption, content in (("old caption", b"media"), ("new caption", b"re-encoded")):
+        path = user_dir / f"{stamp}_{caption}" / f"{stamp}_{caption}_video.mp4"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(content)
+        paths.append(path)
+    kwargs = {
+        "ledger": ledger,
+        "round": "r1",
+        "sec_user_id": "sec-1",
+        "user_dir": user_dir,
+        "chat_id": "chat-1",
+        "parent_id": "topic-1",
+    }
+    first = await channel.deliver_file(**kwargs, file_path=paths[0])
+    assert first.status == "sent"
+    again = await channel.deliver_file(**kwargs, file_path=paths[1])
+    assert again.status == "sent"
+    assert again.relative_path == paths[0].relative_to(user_dir).as_posix()
     assert len(transport.posts) == len(transport.uploads) == 1
 
 
