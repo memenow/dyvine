@@ -107,6 +107,11 @@ def _group_inputs(
             if getattr(args, "supplemental_keys_file", None)
             else None
         ),
+        other_chat_audit_path=(
+            Path(args.other_chat_audit)
+            if getattr(args, "other_chat_audit", None)
+            else None
+        ),
     )
 
 
@@ -223,33 +228,35 @@ async def _inspect_row(
                 proof = "account has new send attempts in the file ledger"
             else:
                 journal, keys_sha256 = group_inputs.journal_for(row["key"])
-                check = (
-                    attest_window
-                    if action == "release_pending_window_attested"
-                    else plan_feishu_adoption
-                )
-                proof = check(
-                    report=row,
-                    original=group_inputs.source_rows[row["key"]],
-                    all_report_rows=group_inputs.all_rows,
-                    group=group,
-                    queue=queue,
-                    current_queues=[
+                sources: dict[str, Any] = {
+                    "report": row,
+                    "original": group_inputs.source_rows[row["key"]],
+                    "all_report_rows": group_inputs.all_rows,
+                    "group": group,
+                    "queue": queue,
+                    "current_queues": [
                         item for item in history_queues if item.round == row["round"]
                     ],
-                    current_files=files,
-                    historical_queues=history_queues,
-                    historical_files=[
+                    "current_files": files,
+                    "historical_queues": history_queues,
+                    "historical_files": [
                         item
                         for item in history_files
                         if item.status == "legacy_confirmed_sent"
                     ],
-                    work_chats=group_inputs.work_chats,
-                    journal=journal,
-                    timezone=timezone,
-                    known_aliases=seed_aliases,
-                    keys_file_sha256=keys_sha256,
-                )
+                    "work_chats": group_inputs.work_chats,
+                    "journal": journal,
+                    "timezone": timezone,
+                    "known_aliases": seed_aliases,
+                    "keys_file_sha256": keys_sha256,
+                }
+                if action == "release_pending_window_attested":
+                    proof = attest_window(**sources)
+                else:
+                    proof = plan_feishu_adoption(
+                        **sources,
+                        other_chats=group_inputs.other_chats.get(row["key"], {}),
+                    )
         if action == "release_pending_window_attested":
             window_attestation = cast(WindowAttestation | str, proof)
         else:
@@ -636,6 +643,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         "supplemental_keys_sha256": (
             group_inputs.keys_file_sha256 if group_inputs else None
         ),
+        "other_chat_audit_sha256": (
+            group_inputs.other_chat_audit_sha256 if group_inputs else None
+        ),
         "legacy_work_sha256": group_inputs.work_sha256 if group_inputs else None,
         "plan_sha256": plan_digest,
         "expected_count": len(rows),
@@ -669,6 +679,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--supplemental-keys-file", help="exact owned 0600 supplemental key list"
     )
     parser.add_argument(
+        "--other-chat-audit", help="private audit JSONL of accounts' older chats"
+    )
+    parser.add_argument(
         "--legacy-work-db", help="staged legacy progress SQLite database"
     )
     parser.add_argument(
@@ -698,6 +711,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.feishu_audit,
             args.supplemental_feishu_audit,
             args.supplemental_keys_file,
+            args.other_chat_audit,
             args.legacy_work_db,
         )
         if value

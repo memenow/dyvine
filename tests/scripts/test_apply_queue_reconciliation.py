@@ -835,6 +835,7 @@ def test_apply_records_window_proof_and_forces_a_fresh_download(
         journal=SimpleNamespace(sha256="journal"),
         supplemental_journal=None,
         keys_file_sha256=None,
+        other_chat_audit_sha256=None,
         source_sha256="source",
         work_sha256="work",
         evidence_digests=("source", "journal", "work"),
@@ -1005,6 +1006,7 @@ def test_apply_feishu_adoption_writes_queue_then_adopts_then_demotes(
         journal=SimpleNamespace(sha256="journal"),
         supplemental_journal=None,
         keys_file_sha256=None,
+        other_chat_audit_sha256=None,
         source_sha256="source",
         work_sha256="work",
         evidence_digests=("source", "journal", "work"),
@@ -1097,3 +1099,61 @@ def test_apply_feishu_adoption_writes_queue_then_adopts_then_demotes(
     rowcounts[2] = 0
     with pytest.raises(ValueError, match="demotion compare-and-set failed"):
         asyncio.run(script.run(args))
+
+
+@pytest.mark.asyncio
+async def test_inspect_row_gives_adoption_its_accounts_older_chat_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _load_script()
+    key = "weekly0913:sec-one"
+    row = {
+        "key": key,
+        "round": "weekly0913",
+        "sec_user_id": "sec-one",
+        "nickname": "Alpha",
+        "resolution": {"action": "release_pending_feishu_adopted"},
+    }
+    queue = DownloadQueueRow(key=key, round="weekly0913", sec_user_id="sec-one")
+    group = DeliveryGroupRow(key=key, round="weekly0913", sec_user_id="sec-one")
+    older = {"oc-old": {"chat_status": "dissolved", "scan_complete": False}}
+    received: dict[str, Any] = {}
+
+    def plan(**sources: Any) -> str:
+        received.update(sources)
+        return "held by the test"
+
+    async def history(*_args: Any, lock: bool) -> tuple[list[Any], list[Any], set[str]]:
+        return [queue], [], set()
+
+    class Session:
+        async def get(self, model: Any, _key: str, **_options: Any) -> Any:
+            return queue if model is DownloadQueueRow else group
+
+        async def execute(self, _statement: Any) -> Any:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    monkeypatch.setattr(script, "plan_feishu_adoption", plan)
+    monkeypatch.setattr(script, "_account_history", history)
+    inputs = SimpleNamespace(
+        source_rows={key: row},
+        all_rows=[row],
+        work_chats={},
+        other_chats={key: older},
+        journal_for=lambda _key: ("journal", None),
+    )
+
+    decision, _queue = await script._inspect_row(
+        Session(),
+        row,
+        "weekly0913",
+        False,
+        set(),
+        inputs,
+        lock=False,
+        timezone="Asia/Shanghai",
+    )
+
+    assert received["other_chats"] == older
+    assert received["journal"] == "journal"
+    assert decision.status is None

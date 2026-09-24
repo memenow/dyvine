@@ -22,9 +22,14 @@ from scripts.legacy_group_candidates import Candidate  # noqa: E402
 
 
 def _post(
-    message_id: str, sec: str = "sec-a", nickname: str = "Alpha"
+    message_id: str,
+    sec: str = "sec-a",
+    nickname: str = "Alpha",
+    *,
+    created: str | None = None,
+    href: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    message: dict[str, Any] = {
         "message_id": message_id,
         "chat_id": "oc_one",
         "msg_type": "post",
@@ -39,7 +44,8 @@ def _post(
                                 {
                                     "tag": "a",
                                     "text": nickname,
-                                    "href": f"https://www.douyin.com/user/{sec}",
+                                    "href": href
+                                    or f"https://www.douyin.com/user/{sec}",
                                 }
                             ]
                         ]
@@ -47,6 +53,20 @@ def _post(
                 }
             )
         },
+    }
+    if created is not None:
+        message["create_time"] = created
+    return message
+
+
+def _text(message_id: str, text: str) -> dict[str, Any]:
+    return {
+        "message_id": message_id,
+        "chat_id": "oc_one",
+        "msg_type": "text",
+        "deleted": False,
+        "sender": {"sender_type": "app", "id": "app-id"},
+        "body": {"content": json.dumps({"text": text})},
     }
 
 
@@ -105,7 +125,9 @@ def _candidate() -> Candidate:
     )
 
 
-def _sources(tmp_path: Path) -> tuple[Path, Path]:
+def _sources(
+    tmp_path: Path, topics: tuple[tuple[str, str, str], ...] = ()
+) -> tuple[Path, Path]:
     queue = tmp_path / "queue.json"
     queue.write_text(
         json.dumps(
@@ -142,6 +164,10 @@ def _sources(tmp_path: Path) -> tuple[Path, Path]:
         connection.execute(
             "INSERT INTO work_meta VALUES ('identity_fingerprint', 'frozen')"
         )
+        connection.executemany(
+            "INSERT INTO source_topics VALUES (?, ?, ?, ?)",
+            [(str(progress), *topic) for topic in topics],
+        )
         connection.commit()
     finally:
         connection.close()
@@ -166,19 +192,40 @@ def _args(queue: Path, work_db: Path, output: Path, *more: str) -> Any:
 
 
 def test_profile_identity_uses_exact_https_host_and_stable_user_path() -> None:
-    def link(href: str) -> dict[str, str]:
-        return {"tag": "a", "text": "Old Alpha", "href": href}
-
-    assert discovery._exact_profile_link(
-        link("https://www.douyin.com/user/sec-a"), "sec-a"
+    assert discovery._profile_owner("https://www.douyin.com/user/sec-a") == "sec-a"
+    assert discovery._profile_owner("https://douyin.com/user/sec-a/?f=1") == "sec-a"
+    assert (
+        discovery._profile_owner("https://www.douyin.com/user/sec-a-other")
+        == "sec-a-other"
     )
     for href in (
         "http://www.douyin.com/user/sec-a",
         "https://evil.example/user/sec-a",
-        "https://www.douyin.com/user/sec-a-other",
         "https://www.douyin.com/user/sec-a/extra",
+        "https://www.douyin.com/video/123",
+        "https://v.douyin.com/AbC12/",
     ):
-        assert not discovery._exact_profile_link(link(href), "sec-a")
+        assert discovery._profile_owner(href) is None
+
+
+def test_links_cover_post_hyperlinks_and_plain_text_urls() -> None:
+    post = {
+        "zh_cn": {
+            "content": [
+                [
+                    {"tag": "a", "text": "Alpha", "href": "https://v.douyin.com/x/"},
+                    {"tag": "text", "text": "see https://www.douyin.com/user/a"},
+                ]
+            ]
+        }
+    }
+    assert set(discovery._links(post)) == {
+        "https://v.douyin.com/x/",
+        "https://www.douyin.com/user/a",
+    }
+    assert discovery._links({"text": "Alpha\nhttps://www.douyin.com/user/a"}) == [
+        "https://www.douyin.com/user/a"
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -244,6 +291,139 @@ async def test_absent_ambiguous_or_conflicting_profile_never_discovers() -> None
             _candidate(), reader, "app-id", "ou_owner", unique_chat=True
         )
     )[0] == "feishu_chat_not_active"
+
+
+@pytest.mark.asyncio
+async def test_latest_exact_profile_root_is_the_topic() -> None:
+    reader = HistoryReader(
+        [
+            _post("om_old", created="1000"),
+            {"message_id": "om_file", "chat_id": "oc_one", "msg_type": "file"},
+            _post("om_new", created="2000"),
+            _post("om_other", "sec-b", created="3000"),
+        ]
+    )
+
+    decision, evidence = await script._discover(
+        _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+    )
+
+    assert decision == "discovered"
+    assert evidence["discovered_topic_message_id"] == "om_new"
+    assert evidence["topic_selection"] == "latest_profile_root"
+    assert evidence["profile_post_matches"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second", ["1000", None])
+async def test_tied_or_undated_profile_roots_stay_ambiguous(
+    second: str | None,
+) -> None:
+    reader = HistoryReader(
+        [_post("om_one", created="1000"), _post("om_two", created=second)]
+    )
+
+    decision, evidence = await script._discover(
+        _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+    )
+
+    assert decision == "feishu_profile_post_ambiguous"
+    assert evidence == {"profile_post_matches": 2}
+
+
+@pytest.mark.asyncio
+async def test_text_root_with_exact_profile_url_is_a_profile_root() -> None:
+    reader = HistoryReader(
+        [_text("om_text", "Alpha\nhttps://www.douyin.com/user/sec-a")]
+    )
+
+    decision, evidence = await script._discover(
+        _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+    )
+
+    assert (decision, evidence["topic_selection"]) == (
+        "discovered",
+        "only_profile_root",
+    )
+    assert evidence["discovered_topic_message_id"] == "om_text"
+
+
+@pytest.mark.asyncio
+async def test_single_short_link_root_is_the_topic_only_without_profiles() -> None:
+    short = "https://v.douyin.com/AbC12/"
+    reader = HistoryReader(
+        [
+            _post("om_card", href=short),
+            {"message_id": "om_file", "chat_id": "oc_one", "msg_type": "file"},
+        ]
+    )
+
+    decision, evidence = await script._discover(
+        _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+    )
+    assert decision == "discovered"
+    assert evidence["discovered_topic_message_id"] == "om_card"
+    assert evidence["topic_selection"] == "single_short_link_root"
+
+    reader.messages = [_post("om_card", href=short), _post("om_again", href=short)]
+    assert (
+        await script._discover(
+            _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+        )
+    )[0] == "feishu_profile_post_ambiguous"
+
+    reader.messages = [_post("om_card", href=short), _post("om_b", "sec-b")]
+    assert (
+        await script._discover(
+            _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+        )
+    )[0] == "feishu_profile_post_missing"
+
+    user_card = _post("om_user", href=short)
+    user_card["sender"] = {"sender_type": "user", "id": "ou_someone"}
+    reader.messages = [user_card]
+    assert (
+        await script._discover(
+            _candidate(), reader, "app-id", "ou_owner", unique_chat=True
+        )
+    )[0] == "feishu_profile_post_missing"
+
+
+@pytest.mark.asyncio
+async def test_deleted_recorded_topic_falls_back_to_discovery(
+    tmp_path: Path,
+) -> None:
+    queue, work_db = _sources(tmp_path, (("weekly0913", "Alpha:oc_one", "om_gone"),))
+    gone = _post("om_gone", created="1000")
+    gone["deleted"] = True
+    reader = HistoryReader([gone, _post("om_root", created="2000")])
+    ledger = FakeLedger()
+    default = script.parse_args(
+        [
+            "--queue-path",
+            str(queue),
+            "--work-db",
+            str(work_db),
+            "--round",
+            "weekly0913",
+            "--output",
+            str(tmp_path / "default.jsonl"),
+        ]
+    )
+    assert (await script.run(default, reader=reader))["feishu_topic_deleted"] == 1
+
+    output = tmp_path / "private.jsonl"
+    dry = await script.run(_args(queue, work_db, output), reader=reader)
+    assert dry["discovered"] == 1
+    applied = await script.run(
+        _args(queue, work_db, output, "--resume", "--apply"),
+        reader=reader,
+        ledger=ledger,
+    )
+
+    assert applied["applied"] == 1
+    assert ledger.imports[0]["topic_message_id"] == "om_root"
+    assert ledger.imports[0]["source_file"] == str(output.resolve())
 
 
 @pytest.mark.asyncio
