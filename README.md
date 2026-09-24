@@ -189,7 +189,10 @@ The command processes at most one ordered pair of accounts per invocation:
 within its step and runtime bounds it advances both accounts of the current
 pair, records its checkpoint in Postgres, and waits for any download it
 starts before exiting. It holds the next pair until both accounts in the
-current pair have terminal outcomes.
+current pair have terminal outcomes. An incremental download stops at the
+queue cutoff: media posted at or before it is neither downloaded nor sent,
+so a first run without a saved anchor fetches only the round's window, not
+the account's whole feed.
 Other periodic work uses single-shot tools. The plugin runs no resident
 weekly loop or idle database connection.
 

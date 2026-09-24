@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -250,3 +251,114 @@ async def test_get_bulk_download_status_rejects_unrelated_op() -> None:
 
     with pytest.raises(OperationNotFoundError):
         await service.get_bulk_download_status(op.operation_id)
+
+
+_CUTOFF = datetime(2026, 9, 6, 8, 0, 0)
+
+
+def _paged(pages: list[list[dict[str, object]]]) -> AsyncMock:
+    """Serve ``pages`` newest-first, advertising more until the last one."""
+
+    async def fetch(_uid: str, cursor: int) -> dict[str, object]:
+        index = cursor // 1000
+        return {
+            "aweme_list": pages[index],
+            "has_more": index + 1 < len(pages),
+            "max_cursor": (index + 1) * 1000,
+        }
+
+    return AsyncMock(side_effect=fetch)
+
+
+def _post(aweme_id: str, created: object) -> dict[str, object]:
+    return {"aweme_id": aweme_id, "create_time": created}
+
+
+async def test_collect_new_posts_stops_after_a_page_older_than_the_cutoff() -> None:
+    """A cutoff-bounded scan fetches no page past the first all-old page."""
+    service = _make_service()
+    service._fetch_posts_batch = _paged(  # type: ignore[method-assign]
+        [
+            [_post("new", "2026-09-10 12-00-00"), _post("old", "2026-09-01 12-00-00")],
+            [_post("older", "2026-08-20 12-00-00")],
+            [_post("never", "2026-08-01 12-00-00")],
+        ]
+    )
+    service._download_post_content = AsyncMock()  # type: ignore[method-assign]
+
+    new_ids, failed, truncated = await service._collect_new_posts(
+        "user01", Path("/tmp/x"), known=set(), since_aweme_id=None, posted_after=_CUTOFF
+    )
+
+    assert (new_ids, failed, truncated) == (["new"], 0, False)
+    assert service._fetch_posts_batch.await_count == 2
+    assert service._download_post_content.await_count == 1
+
+
+async def test_collect_new_posts_scans_past_an_old_pinned_post() -> None:
+    """An old pinned post at the top does not end the scan early."""
+    service = _make_service()
+    service._fetch_posts_batch = _paged(  # type: ignore[method-assign]
+        [
+            [
+                _post("pinned-old", "2025-01-01 00-00-00"),
+                _post("at-cutoff", "2026-09-06 08-00-00"),
+                _post("newest", "2026-09-10 12-00-00"),
+            ],
+            [_post("new", "2026-09-07 09-00-00")],
+            [_post("old", "2026-09-01 12-00-00")],
+        ]
+    )
+    service._download_post_content = AsyncMock()  # type: ignore[method-assign]
+
+    new_ids, _failed, _truncated = await service._collect_new_posts(
+        "user01", Path("/tmp/x"), known=set(), since_aweme_id=None, posted_after=_CUTOFF
+    )
+
+    assert new_ids == ["newest", "new"]
+    assert service._fetch_posts_batch.await_count == 3
+
+
+async def test_collect_new_posts_reads_epoch_times_and_skips_unreadable_ones() -> None:
+    """Epoch times use f2's UTC+8 naming zone; unreadable times are skipped."""
+    service = _make_service()
+    # 2026-09-06 08:00:01 UTC+8 is 2026-09-06 00:00:01 UTC.
+    after_cutoff = int(datetime.fromisoformat("2026-09-06T00:00:01+00:00").timestamp())
+    at_cutoff = after_cutoff - 1
+    service._fetch_posts_batch = _paged(  # type: ignore[method-assign]
+        [
+            [
+                _post("epoch-new", after_cutoff),
+                _post("epoch-at", at_cutoff),
+                _post("undated", None),
+            ]
+        ]
+    )
+    service._download_post_content = AsyncMock()  # type: ignore[method-assign]
+
+    new_ids, _failed, _truncated = await service._collect_new_posts(
+        "user01", Path("/tmp/x"), known=set(), since_aweme_id=None, posted_after=_CUTOFF
+    )
+
+    assert new_ids == ["epoch-new"]
+
+
+async def test_download_new_posts_records_the_cutoff_it_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _make_service()
+    service.handler.fetch_user_profile = AsyncMock(
+        return_value=MagicMock(nickname="someone")
+    )
+    service.handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/u"))
+    monkeypatch.setattr(posts_module, "AsyncUserDB", _FakeUserDB)
+    monkeypatch.setattr(
+        posts_module, "relative_to_download_root", lambda _path: "users/user01"
+    )
+    service._collect_new_posts = AsyncMock(return_value=([], 0, False))  # type: ignore[method-assign]
+
+    result = await service.download_new_posts("user01", posted_after=_CUTOFF)
+
+    assert service._collect_new_posts.await_args.kwargs["posted_after"] == _CUTOFF
+    operation = await service.operation_store.get_operation(result.operation_id)
+    assert operation.metadata["posted_after"] == "2026-09-06T08:00:00"
