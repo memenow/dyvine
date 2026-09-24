@@ -306,6 +306,20 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
       </p>
       <p>
+        Weekly delivery downloads into account folders under <code>DOUYIN_DOWNLOAD_ROOT</code>,
+        which <code>DOUYIN_RETAIN_MAX_GB</code> does not bound. <code>hermes dyvine media prune</code>
+        deletes media older than <code>--older-than-days</code> (default 14) from the folders of
+        accounts whose every queue row is settled (<code>completed</code>,
+        <code>permanent_failure</code>, or <code>skipped</code>): delivery reads only media posted
+        after a round's cutoff, so a settled account never reads those files again. A folder that
+        any unsettled row records is kept, even when another account shares it, and nothing outside
+        the download root is touched. The command takes the weekly runner's lock and skips while a
+        run is active; run it daily through Hermes no-agent cron, and use <code>--dry-run</code> to
+        report without deleting.
+      </p>
+      <pre><code>hermes dyvine media prune --dry-run
+hermes dyvine media prune --older-than-days 14</code></pre>
+      <p>
         Douyin's web APIs additionally require a per-request Argus webSign
         triple (<code>uifid</code>/<code>timestamp</code>/<code>x-secsdk-web-signature</code>)
         that only the SecureSDK inside a real browser session can compute. Dyvine keeps one
