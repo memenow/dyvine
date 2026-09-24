@@ -371,6 +371,13 @@ class UserService:
         finally:
             await _safely_close_handler(handler)
 
+    async def get_author_state(self, user_id: str) -> AuthorState:
+        """Report whether Douyin still serves this author's posts.
+
+        See :func:`fetch_author_state`.
+        """
+        return await fetch_author_state(user_id)
+
     async def get_following(
         self, user_id: str, count: int = 20
     ) -> list[dict[str, Any]]:

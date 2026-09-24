@@ -280,6 +280,22 @@ async def test_get_author_state_raises_instead_of_guessing(
 
 
 @pytest.mark.asyncio
+async def test_service_author_state_delegates_to_profile_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service answers with the module-level profile check, unchanged."""
+    from dyvine.schemas.users import AuthorState
+    from dyvine.services import users as users_mod
+
+    state = AuthorState(available=False, reason="banned", aweme_count=3)
+    check = AsyncMock(return_value=state)
+    monkeypatch.setattr(users_mod, "fetch_author_state", check)
+    service = UserService(FakeOperationRepository())
+    assert await service.get_author_state("sec") is state
+    check.assert_awaited_once_with("sec")
+
+
+@pytest.mark.asyncio
 async def test_get_user_info_with_room_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify get user info with room data."""
     from dyvine.services import users as users_mod

@@ -12,7 +12,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.exceptions import QueueEntryNotFoundError, ServiceError
+from ..core.exceptions import (
+    QueueEntryNotFoundError,
+    SeedAccountNotFoundError,
+    ServiceError,
+)
 from ..db.protocols import (
     QUEUE_ACTIVE_STATUSES,
     QueueRepository,
@@ -71,6 +75,27 @@ class QueueService:
                 excluded=bool(item.get("excluded", False)),
             )
         return len(items)
+
+    async def exclude_seed(self, sec_user_id: str) -> bool:
+        """Keep a seed out of later rounds; return whether the seed exists.
+
+        Nickname, source, and batch are preserved, so re-importing the seed
+        with ``excluded`` false restores it.
+        """
+        try:
+            seed = await self._seeds.get_seed(sec_user_id)
+        except SeedAccountNotFoundError:
+            return False
+        if not seed.excluded:
+            await self._seeds.upsert_seed(
+                sec_user_id=seed.sec_user_id,
+                nickname=seed.nickname,
+                source_url=seed.source_url,
+                source=seed.source,
+                batch=seed.batch,
+                excluded=True,
+            )
+        return True
 
     async def ensure_round(self, round_name: str, note: str | None = None) -> None:
         """Create the round header when missing (idempotent)."""

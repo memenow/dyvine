@@ -206,7 +206,11 @@ nothing was started. A row still parked in
 automatic rounds until it is reconciled. An incremental download stops at the
 queue cutoff: media posted at or before it is neither downloaded nor sent,
 so a first run without a saved anchor fetches only the round's window, not
-the account's whole feed.
+the account's whole feed. Before downloading an account, the runner checks
+its Douyin profile: an author Douyin reports deactivated or banned, or who
+has no posts, is skipped for good (the row becomes `skipped`, the seed is
+excluded from later rounds, and the Feishu group and file ledger are kept).
+A failed or unclear check never skips.
 Other periodic work uses single-shot tools. The plugin runs no resident
 weekly loop or idle database connection.
 
