@@ -566,7 +566,11 @@ PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
         and media slot (<code>_video.mp4</code>, <code>_image_3.webp</code>,
         ...) when a caption edit renamed it, so the file is not sent twice.
         Consecutive weekly windows overlap, so a confirmed send by this runner
-        covers a caption-renamed re-download the same way.
+        covers a caption-renamed re-download the same way. Upload names longer
+        than 50 characters are shortened; post media keeps its slot suffix, so
+        the images of one post keep distinct names in the group. The Feishu
+        audit and the window proof still match legacy uploads by the legacy
+        truncation (the first 40 characters of the stem plus the extension).
         A file reply goes into the verified topic thread. Unknown group, topic, or file-send outcomes remain on hold
         after their safe UUID retry windows for message-level reconciliation;
         do not replay solely because a summary count is missing. Confirmed

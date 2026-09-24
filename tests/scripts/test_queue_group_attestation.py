@@ -15,7 +15,7 @@ from dyvine.db.models import DeliveryFileRow, DeliveryGroupRow, DownloadQueueRow
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dyvine.services.delivery import upload_file_name  # noqa: E402
+from dyvine.services.delivery import legacy_upload_file_name  # noqa: E402
 from scripts.queue_group_attestation import (  # noqa: E402
     AuditJournal,
     GroupAttestation,
@@ -352,7 +352,7 @@ def _media(stamp: str, caption: str = "clip", slot: str = "_video.mp4") -> str:
 
 
 def _chat_file(path: str, **overrides: Any) -> dict[str, Any]:
-    return {"file_name": upload_file_name(Path(path)), **overrides}
+    return {"file_name": legacy_upload_file_name(Path(path)), **overrides}
 
 
 def _window_inputs(
@@ -542,7 +542,7 @@ def test_window_cutoff_matches_the_weekly_runner_timezone() -> None:
 def test_window_attestation_matches_truncated_upload_names() -> None:
     long_caption = "a caption long enough that Feishu truncates the upload name"
     sent = _media(_IN_WINDOW, long_caption, "_image_1.webp")
-    assert upload_file_name(Path(sent)) != Path(sent).name
+    assert legacy_upload_file_name(Path(sent)) != Path(sent).name
     values = _window_inputs([_chat_file(sent)], [sent])
     assert isinstance(attest_window(**values), WindowAttestation)
 
