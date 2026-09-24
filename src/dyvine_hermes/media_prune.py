@@ -1,12 +1,14 @@
-"""Delete settled accounts' local media once it is old enough.
+"""Delete old media from download folders no unsettled queue row records.
 
 Local-retention mode keeps every download, so the download root only grows.
-Weekly delivery reads only media posted after a round's cutoff, and a settled
-row (completed, permanent_failure, or skipped) is never delivered again, so an
-account whose every queue row is settled never reads its old files. Media
-older than the retention age in the folders its checkpoints record is
-deleted. A folder that any unsettled row records is never touched, even when
-another account shares it, and nothing outside DOUYIN_DOWNLOAD_ROOT is.
+Weekly delivery reads only the folder its row's checkpoint records, and a
+settled row (completed, permanent_failure, or skipped) is never delivered
+again, so a folder whose every recording row is settled holds nothing a
+delivery will read. Its media older than the retention age is deleted; a
+later round downloads again whatever it needs. A folder that any unsettled
+row records is never touched, even when another account shares it; rows that
+never downloaded into a folder, such as frozen legacy history, do not hold
+it; and nothing outside DOUYIN_DOWNLOAD_ROOT is touched.
 """
 
 from __future__ import annotations
@@ -32,9 +34,9 @@ DEFAULT_RETENTION_DAYS = 14.0
 class PruneReport:
     """What one prune pass found and removed (or would remove on a dry run)."""
 
-    accounts: int = 0
-    settled_accounts: int = 0
     folders: int = 0
+    kept: int = 0
+    pruned: int = 0
     files: int = 0
     bytes: int = 0
     dry_run: bool = False
@@ -56,16 +58,13 @@ async def prune_settled_media(
     dry_run: bool = False,
     now: float | None = None,
 ) -> PruneReport:
-    """Delete settled accounts' media older than ``older_than_days``."""
+    """Delete media older than ``older_than_days`` from settled folders."""
     if older_than_days < 1:
         raise ValueError("media retention must be at least one day")
     entries = await engine.queue.list_entries(limit=-1)
-    accounts = {entry.sec_user_id for entry in entries}
-    unsettled = {
-        entry.sec_user_id for entry in entries if entry.status not in SETTLED_STATUSES
-    }
     root = download_root.expanduser().resolve()
-    folders: dict[Path, set[str]] = defaultdict(set)
+    # Each recorded folder maps to whether an unsettled row still records it.
+    held: dict[Path, bool] = defaultdict(bool)
     for entry in entries:
         saved = _checkpoint(entry).get("user_dir")
         if not isinstance(saved, str) or not saved:
@@ -75,15 +74,11 @@ async def prune_settled_media(
         except ValueError:
             continue
         if folder != root:
-            folders[folder].add(entry.sec_user_id)
-    report = PruneReport(
-        accounts=len(accounts),
-        settled_accounts=len(accounts - unsettled),
-        dry_run=dry_run,
-    )
+            held[folder] |= entry.status not in SETTLED_STATUSES
+    report = PruneReport(folders=len(held), kept=sum(held.values()), dry_run=dry_run)
     oldest_kept = (time.time() if now is None else now) - older_than_days * 86400
-    for folder, owners in sorted(folders.items()):
-        if owners & unsettled or not folder.is_dir():
+    for folder, unsettled in sorted(held.items()):
+        if unsettled or not folder.is_dir():
             continue
         removed = False
         for path in scan_media_files(folder):
@@ -96,7 +91,7 @@ async def prune_settled_media(
             if not dry_run:
                 path.unlink()
         if removed:
-            report.folders += 1
+            report.pruned += 1
             if not dry_run:
                 _remove_empty_dirs(folder)
     return report
