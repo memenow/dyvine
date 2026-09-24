@@ -483,7 +483,12 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
         download stops at the queue cutoff:
         media posted at or before it is neither downloaded nor sent, so a first
         run without a saved anchor fetches only the round's window, not the
-        account's whole feed. With no
+        account's whole feed. Before downloading an account, the runner
+        checks its Douyin profile: an author Douyin reports deactivated or
+        banned, or who has no posts, is skipped for good (the row becomes
+        <code>skipped</code>, the seed is excluded from later rounds, and the
+        Feishu group and file ledger are kept). A failed or unclear check
+        never skips. With no
         <code>--round</code>, it creates a
         <code>weekly-YYYY-MM-DD</code> round at or after Sunday 08:00 in
         <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>. Its incremental

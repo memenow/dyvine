@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from dyvine.schemas.users import AuthorState
 from dyvine.services.queue import QueueService
 from dyvine_hermes.weekly import WeeklyConfig, run_once
 from tests.fake_repos import FakeOperationRepository, FakeQueueRepository
@@ -28,6 +29,11 @@ def _engine(repo: FakeQueueRepository) -> SimpleNamespace:
     return SimpleNamespace(
         queue=QueueService(queue=repo, seeds=AsyncMock(), rounds=AsyncMock()),
         delivery_ledger=SimpleNamespace(list_files=AsyncMock(return_value=[])),
+        users=SimpleNamespace(
+            get_author_state=AsyncMock(
+                return_value=AuthorState(available=True, aweme_count=1)
+            )
+        ),
         posts=SimpleNamespace(
             download_bulk_inline=AsyncMock(), download_new_posts=AsyncMock()
         ),

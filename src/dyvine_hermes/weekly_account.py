@@ -336,6 +336,10 @@ async def process_entry(
         if group is None or group.chat_id != entry.chat_id:
             raise ValueError("legacy chat has no matching reconciled group ledger")
     entry = await download_entry(engine, entry, config, deadline)
+    if entry.status == "skipped":
+        return WeeklyOutcome(
+            "skipped", entry.round, entry.key, note="author_unavailable"
+        )
     if entry.status == "op_issue":
         return WeeklyOutcome("op_issue", entry.round, entry.key)
     if entry.status == "pending":

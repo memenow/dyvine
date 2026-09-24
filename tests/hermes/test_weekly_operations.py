@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,10 +11,16 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from dyvine.core.exceptions import OperationNotFoundError, ServiceError
+from dyvine.schemas.users import AuthorState
 from dyvine.services.posts import IncrementalDownloadResult
 from dyvine.services.queue import QueueService
 from dyvine_hermes.weekly import WeeklyConfig, run_once
-from tests.fake_repos import FakeOperationRepository, FakeQueueRepository
+from tests.fake_repos import (
+    FakeOperationRepository,
+    FakeQueueRepository,
+    FakeSeedRepository,
+)
 
 
 def _config(root: Path) -> WeeklyConfig:
@@ -26,12 +32,21 @@ def _config(root: Path) -> WeeklyConfig:
     )
 
 
-def _engine(repo: FakeQueueRepository) -> SimpleNamespace:
+def _engine(
+    repo: FakeQueueRepository, seeds: FakeSeedRepository | None = None
+) -> SimpleNamespace:
     return SimpleNamespace(
-        queue=QueueService(queue=repo, seeds=AsyncMock(), rounds=AsyncMock()),
+        queue=QueueService(
+            queue=repo, seeds=seeds or FakeSeedRepository(), rounds=AsyncMock()
+        ),
         delivery_ledger=SimpleNamespace(
             get_group=AsyncMock(return_value=None),
             list_files=AsyncMock(return_value=[]),
+        ),
+        users=SimpleNamespace(
+            get_author_state=AsyncMock(
+                return_value=AuthorState(available=True, aweme_count=1)
+            )
         ),
         posts=SimpleNamespace(download_new_posts=AsyncMock()),
         operations=FakeOperationRepository(),
@@ -476,3 +491,153 @@ async def test_incremental_download_is_bounded_by_the_queue_cutoff(
     engine.posts.download_new_posts = AsyncMock(side_effect=complete)
     await run_once(engine=engine, config=_config(tmp_path), round_name="weekly0913")
     assert seen["posted_after"] == datetime(2026, 9, 6, 8, 0)
+
+
+@pytest.mark.parametrize(
+    ("queue_mode", "state"),
+    [
+        ("incremental", AuthorState(available=False, reason="deactivated")),
+        ("post", AuthorState(available=False, reason="banned", aweme_count=4)),
+        ("full", AuthorState(available=False, reason="no_posts", aweme_count=0)),
+    ],
+    ids=["incremental_deactivated", "post_banned", "full_no_posts"],
+)
+async def test_unavailable_author_is_skipped_for_good_before_any_download(
+    tmp_path: Path, queue_mode: str, state: AuthorState
+) -> None:
+    """A gone author closes the row and leaves later rounds; its group stays."""
+    repo = FakeQueueRepository()
+    seeds = FakeSeedRepository()
+    await seeds.upsert_seed(sec_user_id="sec_1", nickname="Account")
+    await repo.upsert_entry(
+        key="weekly0913:sec_1",
+        round="weekly0913",
+        nickname="Account",
+        sec_user_id="sec_1",
+        mode=queue_mode,
+        status="pending",
+        chat_id="oc_kept",
+        extra={"since_aweme_id": "anchor"},
+    )
+    engine = _engine(repo, seeds)
+    engine.delivery_ledger.get_group = AsyncMock(
+        return_value=SimpleNamespace(chat_id="oc_kept")
+    )
+    engine.users.get_author_state = AsyncMock(return_value=state)
+    engine.posts.download_bulk_inline = AsyncMock()
+    channel = SimpleNamespace(
+        ensure_group=AsyncMock(), ensure_topic=AsyncMock(), deliver_file=AsyncMock()
+    )
+    before = datetime.now(UTC)
+    outcome = await run_once(
+        engine=engine,
+        config=_config(tmp_path),
+        round_name="weekly0913",
+        channel=channel,
+    )
+    after = datetime.now(UTC)
+    assert (outcome.status, outcome.key, outcome.note) == (
+        "skipped",
+        "weekly0913:sec_1",
+        "author_unavailable",
+    )
+    engine.users.get_author_state.assert_awaited_once_with("sec_1")
+    saved = await repo.get_entry("weekly0913:sec_1")
+    assert (saved.status, saved.chat_id, saved.operation_id) == (
+        "skipped",
+        "oc_kept",
+        None,
+    )
+    assert saved.op_message == (
+        f"Douyin reports the author {state.reason}; skipped for good, group kept"
+    )
+    assert saved.extra["since_aweme_id"] == "anchor"
+    evidence = dict(saved.extra["author_unavailable"])
+    checked_at = datetime.fromisoformat(evidence.pop("checked_at"))
+    assert before <= checked_at <= after
+    assert checked_at.utcoffset() == timedelta(0)
+    assert evidence == {
+        "reason": state.reason,
+        "aweme_count": state.aweme_count,
+        "seed_excluded": True,
+    }
+    assert (await seeds.get_seed("sec_1")).excluded is True
+    with pytest.raises(OperationNotFoundError):
+        await engine.operations.get_latest_operation_for_subject("sec_1")
+    engine.posts.download_new_posts.assert_not_called()
+    engine.posts.download_bulk_inline.assert_not_called()
+    engine.delivery_ledger.list_files.assert_not_called()
+    channel.ensure_group.assert_not_called()
+    channel.ensure_topic.assert_not_called()
+    channel.deliver_file.assert_not_called()
+
+
+@pytest.mark.parametrize("queue_mode", ["incremental", "post"])
+@pytest.mark.parametrize(
+    "answer",
+    [AuthorState(available=True, aweme_count=5), ServiceError("profile check failed")],
+    ids=["available", "check_failed"],
+)
+async def test_available_or_unchecked_author_downloads_as_before(
+    tmp_path: Path, queue_mode: str, answer: AuthorState | ServiceError
+) -> None:
+    """Only a clear unavailable answer skips; a failed check never does."""
+    (tmp_path / "Account").mkdir()
+    repo = FakeQueueRepository()
+    seeds = FakeSeedRepository()
+    await seeds.upsert_seed(sec_user_id="sec_1", nickname="Account")
+    await repo.upsert_entry(
+        key="weekly0913:sec_1",
+        round="weekly0913",
+        nickname="Account",
+        sec_user_id="sec_1",
+        mode=queue_mode,
+        status="pending",
+    )
+    engine = _engine(repo, seeds)
+    engine.users.get_author_state = AsyncMock(
+        side_effect=answer if isinstance(answer, ServiceError) else None,
+        return_value=answer,
+    )
+
+    async def finish(operation_id: str) -> None:
+        await engine.operations.update_operation(
+            operation_id,
+            status="completed",
+            completed_items=0,
+            download_path="Account",
+            metadata={"new_count": 0, "failed_count": 0, "resume_cursor": None},
+        )
+
+    async def incremental(
+        _sec_user_id: str,
+        *,
+        since_aweme_id: str | None,
+        operation_id: str,
+        posted_after: datetime | None = None,
+    ) -> IncrementalDownloadResult:
+        await finish(operation_id)
+        return IncrementalDownloadResult(operation_id, 0, None, [], 0)
+
+    async def full(
+        _sec_user_id: str, *, operation_id: str, max_cursor: int, mode: str
+    ) -> None:
+        await finish(operation_id)
+
+    engine.posts.download_new_posts = AsyncMock(side_effect=incremental)
+    engine.posts.download_bulk_inline = AsyncMock(side_effect=full)
+    outcome = await run_once(
+        engine=engine, config=_config(tmp_path), round_name="weekly0913"
+    )
+    assert outcome.status == "completed"
+    engine.users.get_author_state.assert_awaited_once_with("sec_1")
+    started = (
+        engine.posts.download_new_posts
+        if queue_mode == "incremental"
+        else engine.posts.download_bulk_inline
+    )
+    started.assert_awaited_once()
+    saved = await repo.get_entry("weekly0913:sec_1")
+    assert saved.extra["weekly"]["fresh_download_confirmed"] is True
+    assert "author_unavailable" not in saved.extra
+    assert (await seeds.get_seed("sec_1")).excluded is False

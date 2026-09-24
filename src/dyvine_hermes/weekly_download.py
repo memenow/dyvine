@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from dyvine.core.exceptions import ServiceError
 from dyvine.services.delivery import MEDIA_EXTS
 
 from .weekly_state import (
@@ -25,6 +26,41 @@ def _has_local_media(user_dir: Path) -> bool:
     return user_dir.is_dir() and any(
         path.is_file() and path.suffix.lower() in MEDIA_EXTS
         for path in user_dir.rglob("*")
+    )
+
+
+async def _skip_unavailable_author(engine: Any, entry: Any) -> Any | None:
+    """Skip the row for good when Douyin reports its author gone.
+
+    A deactivated or banned author, or one without posts, can never be
+    delivered: the row becomes ``skipped`` with the evidence in
+    ``author_unavailable``, and the seed is excluded from later rounds. The
+    Feishu group and file ledger are kept. A failed or unclear check never
+    skips; ``None`` lets the download proceed.
+    """
+    try:
+        state = await engine.users.get_author_state(entry.sec_user_id)
+    except ServiceError:
+        return None
+    if state.available:
+        return None
+    seed_excluded = await engine.queue.exclude_seed(entry.sec_user_id)
+    return await patch_queue(
+        engine,
+        entry,
+        status="skipped",
+        op_message=(
+            f"Douyin reports the author {state.reason}; skipped for good, group kept"
+        ),
+        extra={
+            **entry.extra,
+            "author_unavailable": {
+                "reason": state.reason,
+                "aweme_count": state.aweme_count,
+                "checked_at": datetime.now(UTC).isoformat(),
+                "seed_excluded": seed_excluded,
+            },
+        },
     )
 
 
@@ -140,6 +176,9 @@ async def download_entry(
     remaining = deadline - time.monotonic()
     if remaining <= 30:
         return await patch_queue(engine, entry, status="pending", extra=entry.extra)
+    skipped = await _skip_unavailable_author(engine, entry)
+    if skipped is not None:
+        return skipped
     operation = await engine.operations.create_operation(
         operation_type="user_posts_incremental_download",
         subject_id=entry.sec_user_id,
@@ -233,6 +272,9 @@ async def _download_full(
     remaining = deadline - time.monotonic()
     if remaining <= 30:
         return await patch_queue(engine, entry, status="pending")
+    skipped = await _skip_unavailable_author(engine, entry)
+    if skipped is not None:
+        return skipped
     operation = await engine.operations.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id=entry.sec_user_id,
