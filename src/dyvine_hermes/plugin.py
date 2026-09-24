@@ -45,7 +45,7 @@ def _setup_cli(subparser: Any) -> None:
     media = sections.add_parser("media", help="Maintain local downloads")
     media_actions = media.add_subparsers(dest="dyvine_media_action", required=True)
     prune = media_actions.add_parser(
-        "prune", help="Delete old media of accounts whose every row is settled"
+        "prune", help="Delete old media from folders no unsettled row records"
     )
     prune.add_argument(
         "--older-than-days",

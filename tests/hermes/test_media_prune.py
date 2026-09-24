@@ -1,4 +1,4 @@
-"""Media pruning touches only settled accounts' old files inside the root."""
+"""Media pruning touches only old files of settled folders inside the root."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def _engine(repo: FakeQueueRepository) -> SimpleNamespace:
     )
 
 
-async def test_prune_deletes_only_old_media_of_settled_accounts(
+async def test_prune_deletes_only_old_media_of_settled_folders(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "downloads"
@@ -68,18 +68,20 @@ async def test_prune_deletes_only_old_media_of_settled_accounts(
     busy_old = _media(busy, "2026-09-01 08-00-00", OLD)
     outside = _media(tmp_path / "elsewhere", "2026-09-01 08-00-00", OLD)
     repo = FakeQueueRepository()
-    await _row(repo, "weekly0906", "sec_settled", "completed", settled)
-    await _row(repo, "weekly0913", "sec_settled", "skipped", None)
-    await _row(repo, "weekly0906", "sec_busy", "completed", busy)
-    await _row(repo, "weekly0913", "sec_busy", "pending", None)
+    await _row(repo, "weekly0913", "sec_settled", "completed", settled)
+    # Frozen history and a row that has not downloaded yet record no folder.
+    await _row(repo, "weekly0906", "sec_settled", "needs_reconciliation", None)
+    await _row(repo, "weekly0920", "sec_settled", "pending", None)
+    await _row(repo, "weekly0913", "sec_busy", "completed", busy)
+    await _row(repo, "weekly0920", "sec_busy", "pending", busy)
     await _row(repo, "weekly0913", "sec_outside", "completed", outside.parent.parent)
 
     report = await prune_settled_media(
         _engine(repo), download_root=root, older_than_days=14, now=NOW
     )
 
-    assert (report.files, report.folders, report.bytes) == (1, 1, 5)
-    assert (report.accounts, report.settled_accounts) == (3, 2)
+    assert (report.folders, report.kept, report.pruned) == (2, 1, 1)
+    assert (report.files, report.bytes) == (1, 5)
     assert not old.exists() and not old.parent.exists()
     assert fresh.exists() and busy_old.exists() and outside.exists()
 

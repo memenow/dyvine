@@ -167,13 +167,15 @@ than discarding them.
 Weekly delivery downloads into account folders under
 `DOUYIN_DOWNLOAD_ROOT`, which `DOUYIN_RETAIN_MAX_GB` does not bound.
 `hermes dyvine media prune` deletes media older than `--older-than-days`
-(default 14) from the folders of accounts whose every queue row is settled
-(`completed`, `permanent_failure`, or `skipped`): delivery reads only media
-posted after a round's cutoff, so a settled account never reads those files
-again. A folder that any unsettled row records is kept, even when another
-account shares it, and nothing outside the download root is touched. The
-command takes the weekly runner's lock and skips while a run is active; run
-it daily through Hermes no-agent cron, and use `--dry-run` to report
+(default 14) from download folders whose every recording queue row is
+settled (`completed`, `permanent_failure`, or `skipped`): delivery reads
+only the folder its row's checkpoint records, a settled row is never
+delivered again, and a later round downloads again whatever it needs. A
+folder that any unsettled row records is kept, even when another account
+shares it. Rows that never downloaded into a folder, such as frozen legacy
+history, do not hold it, and nothing outside the download root is touched.
+The command takes the weekly runner's lock and skips while a run is active;
+run it daily through Hermes no-agent cron, and use `--dry-run` to report
 without deleting.
 
 Database connections stay idle-quiet. `DATABASE_POOL_CLASS=null`
