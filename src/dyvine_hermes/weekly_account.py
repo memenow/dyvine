@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from dyvine.db.delivery_ledger import POST_LEVEL_SLOT, post_media_slot
 from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
 from dyvine.services.delivery_durable import media_identity
 
@@ -179,6 +180,21 @@ async def _deliver(
         if record.relative_path in candidate_by_path
     )
     resolved.update(failed_paths)
+    # The ledger answers a send with an earlier record of the same post media:
+    # a send under an edited caption, or a post-level adoption covering every
+    # slot of its post. Settle those files here, so they never take the run's
+    # send budget from media that still needs a send.
+    covering = {
+        slot
+        for record in (*legacy_records, *sent_history)
+        if (slot := post_media_slot(record.relative_path)) is not None
+    }
+    resolved.update(
+        relative
+        for relative in candidate_by_path
+        if (slot := post_media_slot(relative)) is not None
+        and (slot in covering or (slot[0], POST_LEVEL_SLOT) in covering)
+    )
     if any(
         record.status in {"sent", "permanent_failure"}
         and not getattr(record, "content_sha256", None)
