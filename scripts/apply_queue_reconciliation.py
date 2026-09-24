@@ -404,6 +404,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                 extra["weekly"] = weekly
                             if decision.action == "archive_historical":
                                 extra["legacy_unverified_delivery"] = True
+                            if decision.action == "skip_author_unavailable":
+                                extra["reconciliation"]["author"] = row["resolution"][
+                                    "author"
+                                ]
                             statement = (
                                 update(DownloadQueueRow)
                                 .where(
@@ -425,6 +429,16 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                             if changed != 1:
                                 raise ValueError(
                                     f"queue compare-and-set failed for {queue.key}"
+                                )
+                            if decision.action == "skip_author_unavailable":
+                                # The author is gone for good: later rounds must
+                                # not enqueue the seed again. The group stays.
+                                await connection.execute(
+                                    update(SeedAccountRow)
+                                    .where(
+                                        SeedAccountRow.sec_user_id == row["sec_user_id"]
+                                    )
+                                    .values(excluded=True, updated_at=stamp)
                                 )
                             for file, message_id in decision.receipts:
                                 receipt_update = (

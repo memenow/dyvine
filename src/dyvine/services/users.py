@@ -58,7 +58,7 @@ from ..core.path_safety import (
 )
 from ..core.settings import settings
 from ..db import OperationRepository
-from ..schemas.users import DownloadResponse, UserResponse
+from ..schemas.users import AuthorState, DownloadResponse, UserResponse
 from .storage import ContentType, R2StorageService
 
 if TYPE_CHECKING:
@@ -183,6 +183,20 @@ def _parse_room_data(raw: Any) -> dict[str, Any] | None:
     return None
 
 
+def _profile_handler_kwargs(user_id: str) -> dict[str, Any]:
+    """Build the f2 handler arguments for one author's profile page."""
+    return {
+        "url": f"https://www.douyin.com/user/{user_id}",
+        "cookie": settings.douyin_cookie,
+        "headers": {
+            "User-Agent": settings.douyin_user_agent,
+            "Referer": settings.douyin_referer,
+        },
+        "proxies": settings.douyin_proxies,
+        "mode": "post",
+    }
+
+
 async def _safely_close_handler(handler: DouyinHandler) -> None:
     """Best-effort close of a DouyinHandler instance.
 
@@ -220,6 +234,47 @@ logger = ContextLogger(__name__)
 # Alias for backward compatibility
 UserServiceError = ServiceError
 UserDownloadError = DownloadError
+
+
+async def fetch_author_state(user_id: str) -> AuthorState:
+    """Report whether Douyin still serves this author's posts.
+
+    A deactivated account carries ``user_deleted`` or a special-state
+    notice such as "账号已经注销"; a banned one sets ``is_ban``; an
+    account without posts reports a zero ``aweme_count``. Anything else
+    is available.
+
+    Raises:
+        UserServiceError: If the request fails, returns a non-zero
+            status, or lacks a nickname without a deactivation notice,
+            so callers never treat a transient answer as a removal.
+    """
+    handler: DouyinHandler | None = None
+    try:
+        handler = DouyinHandler(_profile_handler_kwargs(user_id))
+        profile = await handler.fetch_user_profile(user_id)
+        raw = profile._to_raw() or {}
+    except Exception as e:
+        logger.exception("Failed to check author state", extra={"user_id": user_id})
+        raise UserServiceError(f"Failed to check author state: {e}") from e
+    finally:
+        if handler is not None:
+            await _safely_close_handler(handler)
+    status = raw.get("status_code")
+    if status not in (None, 0):
+        raise UserServiceError(f"Author profile returned status {status}")
+    user = raw.get("user") or {}
+    special = user.get("special_state_info") or {}
+    if user.get("user_deleted") or special.get("special_state"):
+        return AuthorState(available=False, reason="deactivated")
+    if not profile.nickname:
+        raise UserServiceError("Author profile has no nickname or state notice")
+    count = int(profile.aweme_count or 0)
+    if profile.is_ban:
+        return AuthorState(available=False, reason="banned", aweme_count=count)
+    if count == 0:
+        return AuthorState(available=False, reason="no_posts", aweme_count=0)
+    return AuthorState(available=True, aweme_count=count)
 
 
 class UserService:
@@ -280,18 +335,7 @@ class UserService:
             UserNotFoundError: If the requested user cannot be found.
             UserServiceError: If an error occurs during the operation.
         """
-        handler_kwargs = {
-            "url": f"https://www.douyin.com/user/{user_id}",
-            "cookie": settings.douyin_cookie,
-            "headers": {
-                "User-Agent": settings.douyin_user_agent,
-                "Referer": settings.douyin_referer,
-            },
-            "proxies": settings.douyin_proxies,
-            "mode": "post",
-        }
-
-        handler = DouyinHandler(handler_kwargs)
+        handler = DouyinHandler(_profile_handler_kwargs(user_id))
         try:
             user_data = await handler.fetch_user_profile(user_id)
 
