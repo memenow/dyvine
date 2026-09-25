@@ -37,7 +37,6 @@ _TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/inter
 _IM_MESSAGES_URL = (
     "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
 )
-_IM_REPLY_URL = "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply"
 
 #: Hermes default env file carrying FEISHU_APP_ID / FEISHU_APP_SECRET.
 _HERMES_ENV_PATH = Path.home() / ".hermes" / ".env"
@@ -366,9 +365,8 @@ class FeishuGroupChannel:
         user_dir: Path,
         file_path: Path,
         chat_id: str,
-        parent_id: str,
     ) -> FileDeliveryRecord:
-        """Deliver a media file with durable pre-send intent."""
+        """Deliver a media file to the chat with durable pre-send intent."""
         from .delivery_durable import deliver_file
 
         return await deliver_file(
@@ -379,7 +377,6 @@ class FeishuGroupChannel:
             user_dir=user_dir,
             file_path=file_path,
             chat_id=chat_id,
-            parent_id=parent_id,
         )
 
     async def _auth_token(self) -> str:
@@ -450,23 +447,18 @@ class FeishuGroupChannel:
         msg_type: str,
         content: dict[str, Any],
         *,
-        parent_id: str | None,
         request_uuid: str,
     ) -> tuple[dict[str, Any] | None, Any]:
-        """Send one message; refresh the token once on auth errors."""
+        """Send one plain chat message; refresh the token once on auth errors."""
         import json as _json
 
         payload: dict[str, Any] = {
+            "receive_id": chat_id,
             "msg_type": msg_type,
             "content": _json.dumps(content, ensure_ascii=False),
+            "uuid": request_uuid,
         }
-        if parent_id:
-            url = _IM_REPLY_URL.format(message_id=parent_id)
-            payload["reply_in_thread"] = True
-        else:
-            url = _IM_MESSAGES_URL
-            payload["receive_id"] = chat_id
-        payload["uuid"] = request_uuid
+        url = _IM_MESSAGES_URL
         token = await self._auth_token()
         headers = {
             "Authorization": f"Bearer {token}",

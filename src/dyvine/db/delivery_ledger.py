@@ -409,7 +409,7 @@ class PostgresDeliveryLedgerRepository:
         relative_path: str,
         content_sha256: str,
         chat_id: str,
-        parent_id: str,
+        parent_id: str | None,
     ) -> FileDeliveryRecord:
         stamp = _stamp()
         statement = (

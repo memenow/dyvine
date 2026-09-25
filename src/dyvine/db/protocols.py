@@ -93,7 +93,7 @@ class DeliveryLedgerRepository(Protocol):
         relative_path: str,
         content_sha256: str,
         chat_id: str,
-        parent_id: str,
+        parent_id: str | None,
     ) -> FileDeliveryRecord: ...
 
     async def get_file(self, media_id: str) -> FileDeliveryRecord | None: ...

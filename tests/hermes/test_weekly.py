@@ -336,7 +336,7 @@ async def test_one_account_sends_only_unresolved_media_then_completes(
     assert (await repo.get_entry("weekly0913:sec_1")).chat_id == "oc_new"
     assert (await repo.get_entry("weekly0913:sec_1")).status == "completed"
     channel.deliver_file.assert_awaited_once()
-    assert channel.deliver_file.await_args.kwargs["parent_id"] == "om_topic"
+    assert "parent_id" not in channel.deliver_file.await_args.kwargs
     engine.posts.download_new_posts.assert_not_called()
 
 

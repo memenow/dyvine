@@ -121,7 +121,7 @@ async def test_reuse_policy_adopts_verified_chat_and_topic(tmp_path: Path) -> No
     channel.deliver_file.assert_awaited_once()
     assert channel.deliver_file.await_args.kwargs["file_path"] == file_path
     assert channel.deliver_file.await_args.kwargs["chat_id"] == "oc_prior"
-    assert channel.deliver_file.await_args.kwargs["parent_id"] == "om_prior_topic"
+    assert "parent_id" not in channel.deliver_file.await_args.kwargs
 
 
 async def test_reuse_policy_holds_ambiguous_prior_group(tmp_path: Path) -> None:

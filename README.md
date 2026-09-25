@@ -547,6 +547,21 @@ way. Upload names longer than 50 characters are shortened; post media keeps
 its slot suffix, so the images of one post keep distinct names in the group.
 The Feishu audit and the window proof still match legacy uploads by the
 legacy truncation (the first 40 characters of the stem plus the extension).
+Files go to the group as plain messages after the account's profile post,
+as the legacy sender posted them. Earlier deliveries replied to the profile
+post in a thread, so a reused legacy group showed none of that round's files
+in its main chat. `resend_thread_files_flat.py` posts each such file of a
+round once more as a plain chat message, reusing its recorded Feishu file
+key. Each copy has its own ledger record in round `<round>-flat` and a UUID
+that Feishu dedupes for an hour; a copy whose outcome stays unknown after
+that window waits for review. It is a dry run unless `--apply` is given, and
+`--limit` bounds the copies one invocation sends.
+
+```bash
+PYTHONPATH=src uv run python scripts/resend_thread_files_flat.py --round <round>
+PYTHONPATH=src uv run python scripts/resend_thread_files_flat.py \
+  --round <round> --apply --limit 3
+```
 An uncertain send or unadopted legacy chat remains
 on hold for message-level reconciliation; never replay a file merely
 because a summary counter or operation ID is missing.
