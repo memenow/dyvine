@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -765,3 +767,73 @@ async def test_terminal_candidate_requires_latest_complete_snapshot(
     assert row["terminal_candidate"] is False
     assert row["first_seen_safe_sent_paths"] == 1
     assert row["snapshot_sent_entries"] == 1
+
+
+def test_main_reports_unexpected_failure_cause(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _load_script()
+
+    async def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("pg-boom-unique-cause")
+
+    monkeypatch.setattr(script, "run", boom)
+    code = script.main(
+        ["--state-dir", str(tmp_path), "--seed-path", str(tmp_path / "seed.json")]
+    )
+
+    assert code == 2
+    assert "pg-boom-unique-cause" in capsys.readouterr().err
+
+
+async def test_reconciliation_uses_frozen_queue_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _load_script()
+    state, seed, _first, _second = _sources(tmp_path)
+    output = tmp_path / "reconciliation.jsonl"
+    original_write = script._write_reconciliation
+
+    def tampering_write(path: Path, rows: Iterator[dict[str, Any]]) -> None:
+        queue_file = state / "download_queue.json"
+        queue = json.loads(queue_file.read_text(encoding="utf-8"))
+        queue["entries"].append(
+            {
+                "round": "weekly0913",
+                "nickname": "Mallory",
+                "sec_user_id": "sec-mallory",
+                "status": "pending",
+            }
+        )
+        _write_json(queue_file, queue)
+        original_write(path, rows)
+
+    monkeypatch.setattr(script, "_write_reconciliation", tampering_write)
+    args = _args(
+        script,
+        state,
+        seed,
+        tmp_path / "checkpoint.sqlite3",
+        "--dry-run",
+        "--reconcile-output",
+        str(output),
+    )
+
+    await script.run(args)
+
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert len(rows) == 4
+    assert "sec-mallory" not in {row.get("sec_user_id") for row in rows}
+
+
+def test_script_uses_no_runtime_asserts() -> None:
+    tree = ast.parse(
+        (ROOT / "scripts" / "import_legacy_send_progress.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [
+        node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)
+    ] == []

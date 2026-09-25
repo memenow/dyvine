@@ -313,9 +313,9 @@ async def test_list_objects_uses_injected_head_executor() -> None:
 
     assert [r["Key"] for r in results] == [f"videos/u1/clip-{i}.mp4" for i in range(5)]
     assert head_thread_names, "head_object was never invoked"
-    assert all(
-        name.startswith("injected-head") for name in head_thread_names
-    ), f"head_object ran outside the injected pool: {head_thread_names}"
+    assert all(name.startswith("injected-head") for name in head_thread_names), (
+        f"head_object ran outside the injected pool: {head_thread_names}"
+    )
 
 
 @pytest.mark.asyncio
@@ -523,3 +523,147 @@ async def test_list_objects_empty_returns_no_results() -> None:
 
     assert results == []
     svc.client.head_object.assert_not_called()  # type: ignore[union-attr]
+
+
+# ── UGC path budget and extension fallback ───────────────────────────────
+
+
+def test_generate_ugc_path_bounds_pathological_names() -> None:
+    """A huge filename trims to fit the key budget, keeping its tail unique."""
+    from dyvine.services.storage import _MAX_KEY_BYTES
+
+    svc = _build_service()
+    path = svc.generate_ugc_path("user-1", "a." + "b" * 5000, "image/jpeg")
+    assert len(path.encode("utf-8")) <= _MAX_KEY_BYTES
+    assert path.startswith("images/user-1/")
+    assert path.rsplit(".", 1)[-1] == "b" * 16
+
+
+def test_generate_ugc_path_multi_dot_suffix_stays_bounded() -> None:
+    """Only the last-dot suffix survives, capped at 16 chars."""
+    svc = _build_service()
+    path = svc.generate_ugc_path("user-1", "a.b.c." + "d" * 100, "image/jpeg")
+    assert path.rsplit(".", 1)[-1] == "d" * 16
+
+
+def test_generate_ugc_path_falls_back_to_bin_for_unknown_subtype() -> None:
+    """An un-guessable image subtype degrades to ``.bin``, not a crash."""
+    svc = _build_service()
+    path = svc.generate_ugc_path("user-1", "no-suffix-here", "image/x-unknown")
+    assert path.endswith(".bin")
+    assert path.startswith("images/user-1/")
+
+
+# ── upload size cap ─────────────────────────────────────────────────────
+
+
+async def test_upload_file_rejects_over_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Files over the configured cap fail fast, before any upload."""
+    from dyvine.core.settings import settings
+
+    svc = _build_service(with_client=True)
+    blob = tmp_path / "big.bin"
+    blob.write_bytes(b"x" * 1024)
+    monkeypatch.setattr(settings.r2, "max_upload_bytes", 100)
+    with pytest.raises(StorageError, match="too large"):
+        await svc.upload_file(blob, "k", {}, content_type="application/octet-stream")
+    svc.client.upload_file.assert_not_called()
+
+
+# ── P4-33/34/35/36/38 regressions ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_objects_honors_max_keys_cap() -> None:
+    """``max_keys`` caps the total, shrinking each page to the remainder."""
+    svc = _build_service(with_client=True)
+    seen_max_keys: list[int] = []
+
+    def _page(**kwargs: Any) -> dict[str, Any]:
+        seen_max_keys.append(kwargs["MaxKeys"])
+        if kwargs.get("ContinuationToken") is None:
+            return {
+                "Contents": [
+                    {"Key": f"videos/u1/{i}.mp4", "Size": 1} for i in range(3)
+                ],
+                "IsTruncated": True,
+                "NextContinuationToken": "tok",
+            }
+        return {
+            "Contents": [{"Key": f"videos/u1/{i}.mp4", "Size": 1} for i in range(3, 6)],
+            "IsTruncated": True,
+            "NextContinuationToken": "tok2",
+        }
+
+    svc.client.list_objects_v2.side_effect = _page  # type: ignore[union-attr]
+    svc.client.head_object.return_value = {"Metadata": {}}  # type: ignore[union-attr]
+    results = await svc.list_objects("videos/u1/", max_keys=4)
+    assert [r["Key"] for r in results] == [f"videos/u1/{i}.mp4" for i in range(4)]
+    assert seen_max_keys == [4, 1]  # second page asks only for the remainder
+
+
+@pytest.mark.asyncio
+async def test_transport_errors_surface_as_storage_error() -> None:
+    """DNS/connect failures map to StorageError on every read/delete path."""
+    from botocore.exceptions import EndpointConnectionError
+
+    svc = _build_service(with_client=True)
+    failure = EndpointConnectionError(endpoint_url="https://r2.example")
+    svc.client.head_object.side_effect = failure  # type: ignore[union-attr]
+    with pytest.raises(StorageError, match="Error getting metadata"):
+        await svc.get_object_metadata("videos/u1/clip.mp4")
+    svc.client.delete_object.side_effect = failure  # type: ignore[union-attr]
+    with pytest.raises(StorageError, match="Deletion failed"):
+        await svc.delete_object("videos/u1/clip.mp4")
+    svc.client.list_objects_v2.side_effect = failure  # type: ignore[union-attr]
+    with pytest.raises(StorageError, match="List objects failed"):
+        await svc.list_objects("videos/u1/")
+
+
+@pytest.mark.asyncio
+async def test_list_objects_botocore_head_error_degrades_per_key() -> None:
+    """One flaky head degrades to empty metadata instead of aborting."""
+    from botocore.exceptions import EndpointConnectionError
+
+    svc = _build_service(with_client=True)
+    keys = ["videos/u1/a.mp4", "videos/u1/b.mp4"]
+    svc.client.list_objects_v2.return_value = {  # type: ignore[union-attr]
+        "Contents": [{"Key": k, "Size": 1} for k in keys]
+    }
+
+    def head_by_key(**kwargs: Any) -> dict[str, Any]:
+        if kwargs["Key"] == "videos/u1/a.mp4":
+            raise EndpointConnectionError(endpoint_url="https://r2.example")
+        return {"Metadata": {"author": "b"}}
+
+    svc.client.head_object.side_effect = head_by_key  # type: ignore[union-attr]
+    results = await svc.list_objects("videos/u1/")
+    assert [r["Key"] for r in results] == keys
+    assert results[0]["Metadata"] == {}
+    assert results[1]["Metadata"] == {"author": "b"}
+
+
+@pytest.mark.asyncio
+async def test_upload_success_log_omits_presigned_url(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The completion record never persists the bearer URL."""
+    import logging
+
+    svc = _build_service(with_client=True)
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(b"0" * 16)
+    svc.client.generate_presigned_url.return_value = "https://r2.example/signed?x=1"  # type: ignore[union-attr]
+    with caplog.at_level(logging.INFO, logger="dyvine.services.storage"):
+        result = await svc.upload_file(target, "videos/u/clip.mp4", {"category": "t"})
+    assert result["presigned_url"] == "https://r2.example/signed?x=1"
+    completion = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "File uploaded successfully"
+    ]
+    assert len(completion) == 1
+    assert "presigned_url" not in completion[0].__dict__
+    assert "signed?x=1" not in caplog.text

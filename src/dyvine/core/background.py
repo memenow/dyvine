@@ -29,27 +29,38 @@ class BackgroundTaskRegistry:
     """Track long-lived ``asyncio.Task`` handles so shutdown can drain them.
 
     Tasks are registered via :meth:`spawn`, auto-removed from the tracking set
-    on completion, and drained by :meth:`drain` during shutdown. Once
-    :meth:`drain` is entered the registry is closed: subsequent
-    :meth:`spawn` calls raise ``RuntimeError`` rather than silently leaking
-    work past the executor teardown that follows.
+    on completion (failures are logged with their traceback at that
+    point, so no exception is ever left unretrieved), and drained by
+    :meth:`drain` during shutdown. ``drain`` stays open to follow-up
+    work spawned by the tasks it waits for; only once :meth:`drain`
+    has finished is the registry closed, and subsequent :meth:`spawn`
+    calls raise ``RuntimeError`` rather than silently leaking work
+    past the executor teardown that follows.
 
     Attributes:
         drain_timeout: Maximum seconds ``drain`` waits for tasks to finish
             gracefully before cancelling anything still outstanding.
+        cancel_timeout: Maximum seconds ``drain`` waits after cancelling
+            before abandoning tasks that ignore cancellation.
     """
 
-    def __init__(self, *, drain_timeout: float = 20.0) -> None:
+    def __init__(
+        self, *, drain_timeout: float = 20.0, cancel_timeout: float = 5.0
+    ) -> None:
         """Initialize the registry with no tracked tasks.
 
-        The default fits inside a conventional 25s graceful-shutdown
+        The defaults fit inside a conventional 25s graceful-shutdown
         window so a drain never gets SIGKILLed mid-flight.
         """
         self._tasks: set[asyncio.Task[Any]] = set()
         self.drain_timeout = drain_timeout
-        # Set inside ``drain`` so any post-drain ``spawn`` is rejected
-        # explicitly rather than being added to a registry nobody will
-        # await again.
+        self.cancel_timeout = cancel_timeout
+        # Set while ``drain`` runs so ``spawn`` can warn about
+        # shutdown-time follow-ups (which still join the drain set);
+        # ``_closed`` is set when ``drain`` finishes so any post-drain
+        # ``spawn`` is rejected explicitly rather than being added to
+        # a registry nobody will await again.
+        self._draining = False
         self._closed = False
 
     def spawn(
@@ -81,48 +92,96 @@ class BackgroundTaskRegistry:
             coro.close()
             raise RuntimeError(
                 "BackgroundTaskRegistry is closed; cannot spawn new tasks "
-                "after drain has been entered"
+                "after drain has finished"
             )
         task = asyncio.create_task(coro, name=name, context=context)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._on_task_done)
+        if self._draining:
+            logger.warning(
+                "Task spawned while the registry is draining; it joins the drain set",
+                extra={"task_name": task.get_name()},
+            )
         return task
+
+    def _on_task_done(self, task: asyncio.Task[Any]) -> None:
+        """Drop a finished task and record its failure, if any.
+
+        Retrieving the exception here (rather than only for tasks
+        inside a ``drain`` snapshot) keeps ``asyncio`` from emitting
+        ``Task exception was never retrieved`` for failures that land
+        between drains. A failure that reaches the task boundary is
+        unhandled by definition, so it is logged as an error; awaiters
+        still observe the exception itself.
+        """
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Background task failed",
+                extra={
+                    "task_name": task.get_name(),
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     async def drain(self) -> None:
         """Wait for tracked tasks to finish, cancelling anything that overruns.
 
-        Returns once every tracked task has terminated -- successfully, with an
-        exception, or via cancellation. Called during host shutdown before
-        the executor pools are torn down so in-flight dispatches can
-        resolve. The registry is marked closed before awaiting so any
-        concurrent ``spawn`` cannot add work the drain would not see.
+        Called during host shutdown before the executor pools are torn
+        down so in-flight dispatches can resolve. Follow-up work
+        spawned by drained tasks joins the drain set (bounded by the
+        overall ``drain_timeout``); tasks still outstanding past the
+        deadline are cancelled and given ``cancel_timeout`` more
+        seconds, after which stragglers that ignore cancellation are
+        logged and abandoned so shutdown cannot hang. The registry is
+        marked closed only when draining finishes.
+
+        Raises:
+            RuntimeError: If another ``drain`` is already in progress.
         """
-        # Mark closed even when there is nothing to drain so a follow-up
-        # ``spawn`` (e.g. from a stale callback) is rejected consistently.
-        self._closed = True
-        if not self._tasks:
+        if self._closed:
             return
-
-        # Snapshot so we don't iterate a set that the done-callbacks are
-        # concurrently shrinking.
-        pending = set(self._tasks)
-
+        if self._draining:
+            raise RuntimeError("BackgroundTaskRegistry drain already in progress")
+        self._draining = True
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*pending, return_exceptions=True),
-                timeout=self.drain_timeout,
-            )
-        except TimeoutError:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self.drain_timeout
+            # Re-snapshot every round: the done-callback shrinks the set
+            # while follow-up spawns grow it.
+            while self._tasks:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                await asyncio.wait(set(self._tasks), timeout=remaining)
+            if not self._tasks:
+                return
             logger.warning(
                 "Background tasks did not finish before drain timeout; cancelling",
                 extra={
                     "timeout_seconds": self.drain_timeout,
-                    "outstanding": len(pending),
+                    "outstanding": len(self._tasks),
                 },
             )
-            for task in pending:
+            for task in set(self._tasks):
                 task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            _, still_pending = await asyncio.wait(
+                set(self._tasks), timeout=self.cancel_timeout
+            )
+            if still_pending:
+                logger.error(
+                    "Background tasks ignored cancellation; abandoning",
+                    extra={
+                        "tasks": sorted(t.get_name() for t in still_pending),
+                    },
+                )
+        finally:
+            self._draining = False
+            self._closed = True
 
     @property
     def active_count(self) -> int:
@@ -131,7 +190,7 @@ class BackgroundTaskRegistry:
 
     @property
     def is_closed(self) -> bool:
-        """Whether ``drain`` has been entered.
+        """Whether ``drain`` has finished.
 
         Callers can probe this to avoid scheduling work that is
         guaranteed to be rejected by :meth:`spawn`. The flag never flips
@@ -173,9 +232,14 @@ def spawn_or_fallback(
     Each spawned task gets its own correlation ID so background work does
     not pollute the spawning request's log timeline. The ID lives in a
     cloned ``contextvars.Context`` passed to ``asyncio.create_task`` so
-    the spawning request's context is left untouched.
+    the spawning request's context is left untouched. The ID is always
+    unique per spawn (a task ``name`` is only a prefix) so two tasks
+    sharing a name never share a log timeline.
     """
-    correlation_id = name or f"task-{uuid.uuid4()}"
+    if name:
+        correlation_id = f"{name}-{uuid.uuid4().hex[:8]}"
+    else:
+        correlation_id = f"task-{uuid.uuid4()}"
     task_context = _make_task_context(correlation_id)
     if registry is not None:
         return registry.spawn(coro, name=name, context=task_context)

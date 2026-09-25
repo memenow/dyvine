@@ -1,5 +1,5 @@
 name: dyvine
-version: 0.1.0
+version: 1.0.0
 description: Douyin download automation (users, posts, livestreams, queues, Feishu delivery)
 author: memenow
 requires_hermes: ">=0.21"

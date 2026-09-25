@@ -18,9 +18,11 @@ authoritative.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class OperationStatus(StrEnum):
@@ -60,7 +62,9 @@ class OperationResponse(BaseModel):
         description="Operation status (see ``OperationStatus`` for the enum members)",
     )
     message: str = Field(..., description="Human-readable status message")
-    progress: float | None = Field(None, description="Progress percentage (0-100)")
+    progress: float | None = Field(
+        None, ge=0.0, le=100.0, description="Progress percentage (0-100)"
+    )
     total_items: int | None = Field(
         None, description="Total work items in the operation"
     )
@@ -82,16 +86,35 @@ class OperationResponse(BaseModel):
         ),
     )
     error: str | None = Field(None, description="Terminal error message, when failed")
-    created_at: str = Field(..., description="ISO 8601 creation timestamp")
-    updated_at: str = Field(..., description="ISO 8601 last update timestamp")
+    created_at: datetime = Field(..., description="ISO 8601 creation timestamp")
+    updated_at: datetime = Field(..., description="ISO 8601 last update timestamp")
+
+    @field_validator("download_path")
+    @classmethod
+    def _path_must_be_relative(cls, value: str | None) -> str | None:
+        """Reject absolute or escaping paths: the field is root-relative."""
+        if value is None:
+            return None
+        if not value or value.startswith("/") or ".." in PurePosixPath(value).parts:
+            raise ValueError("download_path must be relative to the download root")
+        return value
 
     @model_validator(mode="after")
     def populate_aliases(self) -> OperationResponse:
-        """Populate legacy compatibility aliases from the canonical fields."""
+        """Populate legacy compatibility aliases from the canonical fields.
+
+        Aliases are tolerated spellings of one value: when both sides
+        are supplied they must agree, otherwise every downstream
+        consumer would fork onto a different truth.
+        """
         if self.task_id is None:
             self.task_id = self.operation_id
+        elif self.task_id != self.operation_id:
+            raise ValueError("task_id must equal operation_id")
         if self.downloaded_items is None:
             self.downloaded_items = self.completed_items
+        elif self.downloaded_items != self.completed_items:
+            raise ValueError("downloaded_items must equal completed_items")
         return self
 
     model_config = ConfigDict()

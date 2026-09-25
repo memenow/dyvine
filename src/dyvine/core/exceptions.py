@@ -134,9 +134,20 @@ class DeliveryError(ServiceError):
     or ``retryable`` (transient error worth one more attempt).
     """
 
-    def __init__(self, message: str, *, reason: str = "failed") -> None:
-        """Attach a machine-readable ``reason`` to the message."""
-        super().__init__(message)
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "failed",
+        error_code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """Attach a machine-readable ``reason`` to the message.
+
+        ``error_code``/``details`` pass through to :class:`DyvineError`
+        so callers catching the base type keep working.
+        """
+        super().__init__(message, error_code=error_code, details=details)
         self.reason = reason
 
 

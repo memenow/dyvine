@@ -172,11 +172,136 @@ async def test_spawn_or_fallback_isolates_correlation_id() -> None:
         task = spawn_or_fallback(None, record_id(), name="task-xyz")
         await task
 
-        assert captured["task"] == "task-xyz"
+        assert captured["task"] is not None
+        assert captured["task"].startswith("task-xyz-")
+        assert captured["task"] != "request-abc"
         # Caller's context must be untouched by the spawn.
         assert _correlation_id_var.get() == "request-abc"
     finally:
         set_correlation_id(None)
+
+
+@pytest.mark.asyncio
+async def test_spawn_or_fallback_ids_are_unique_per_spawn() -> None:
+    """Two spawns sharing a task name must not share a log timeline."""
+    from dyvine.core.logging import _correlation_id_var
+
+    seen: list[str | None] = []
+
+    async def record_id() -> None:
+        """Test helper for test_spawn_or_fallback_ids_are_unique_per_spawn."""
+        seen.append(_correlation_id_var.get())
+
+    registry = BackgroundTaskRegistry()
+    first = spawn_or_fallback(registry, record_id(), name="same-name")
+    second = spawn_or_fallback(registry, record_id(), name="same-name")
+    await asyncio.gather(first, second)
+
+    assert seen[0] != seen[1]
+    assert all(item is not None and item.startswith("same-name-") for item in seen)
+
+
+@pytest.mark.asyncio
+async def test_failed_task_is_logged_and_retrieved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failure landing between drains is logged, never left unretrieved.
+
+    Before the fix the done-callback only discarded the handle, so a
+    task failing outside a ``drain`` snapshot surfaced as ``Task
+    exception was never retrieved`` instead of a structured record.
+    """
+    import logging
+
+    registry = BackgroundTaskRegistry()
+
+    async def boom() -> None:
+        """Test helper for test_failed_task_is_logged_and_retrieved."""
+        raise RuntimeError("planned failure")
+
+    with caplog.at_level(logging.ERROR, logger="dyvine.core.background"):
+        registry.spawn(boom(), name="boom")
+        await asyncio.sleep(0.05)
+
+    assert registry.active_count == 0
+    assert "Background task failed" in caplog.text
+    assert "planned failure" in caplog.text
+    assert "never retrieved" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_follow_up_spawned_mid_drain() -> None:
+    """Work spawned by a drained task joins the drain set.
+
+    Closing the registry before waiting turned a follow-up spawn into
+    a ``RuntimeError`` inside the (otherwise successful) parent task.
+    """
+    registry = BackgroundTaskRegistry(drain_timeout=2.0)
+    finished: list[str] = []
+
+    async def child() -> None:
+        """Test helper for test_drain_waits_for_follow_up_spawned_mid_drain."""
+        finished.append("child")
+
+    async def parent() -> None:
+        """Test helper for test_drain_waits_for_follow_up_spawned_mid_drain."""
+        await asyncio.sleep(0.01)
+        registry.spawn(child(), name="child")
+        finished.append("parent")
+
+    registry.spawn(parent(), name="parent")
+    await registry.drain()
+
+    assert finished == ["parent", "child"]
+    assert registry.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_abandons_tasks_ignoring_cancellation() -> None:
+    """A task that swallows ``CancelledError`` cannot hang shutdown.
+
+    After ``cancel_timeout`` the drain gives up and reports the
+    stragglers instead of awaiting them forever.
+    """
+    registry = BackgroundTaskRegistry(drain_timeout=0.02, cancel_timeout=0.02)
+
+    async def stubborn() -> None:
+        """Test helper for test_drain_abandons_tasks_ignoring_cancellation."""
+        try:
+            await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+            pass  # Swallow the drain's cancel; stay pending past the deadline.
+        await asyncio.sleep(10.0)
+
+    task = registry.spawn(stubborn(), name="stubborn")
+    await asyncio.wait_for(registry.drain(), timeout=5.0)
+
+    assert registry.is_closed is True
+    # Still pending (abandoned), so stop it explicitly for a clean loop.
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_drain_raises() -> None:
+    """A second ``drain`` while one is running is a programming error."""
+    registry = BackgroundTaskRegistry(drain_timeout=1.0)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated() -> None:
+        """Test helper for test_concurrent_drain_raises."""
+        started.set()
+        await release.wait()
+
+    registry.spawn(gated())
+    first = asyncio.create_task(registry.drain())
+    await started.wait()
+    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="already in progress"):
+        await registry.drain()
+    release.set()
+    await first
 
 
 @pytest.mark.asyncio

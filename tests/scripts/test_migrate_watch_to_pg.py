@@ -52,7 +52,7 @@ def _legacy_db(path: Path, rows: list[tuple[Any, ...]]) -> Path:
             )
             """)
         connection.execute(
-            "CREATE UNIQUE INDEX idx_watch_user " "ON watch_subscriptions (user_id)"
+            "CREATE UNIQUE INDEX idx_watch_user ON watch_subscriptions (user_id)"
         )
         connection.executemany(
             "INSERT INTO watch_subscriptions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -91,7 +91,7 @@ def _row(
 @pytest.fixture
 async def clean_watch_table(postgres_url: str) -> Any:
     """Truncate the watch table and yield a reader repository."""
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     async with factory.session() as session:
         async with session.begin():
             await session.execute(text("TRUNCATE TABLE watch_subscriptions"))
@@ -284,3 +284,30 @@ def test_migrate_missing_table_is_exit_code_2(tmp_path: Path) -> None:
     sqlite3.connect(empty).close()
     with pytest.raises(ValueError, match="watch_subscriptions"):
         script.load_validated_rows(empty)
+
+
+def test_migrate_database_failure_is_exit_code_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A non-OS database failure maps to exit 2 with its cause. (P6-D)"""
+    script = _load_script()
+    db_path = _legacy_db(tmp_path / "legacy.db", [_row()])
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("password authentication failed")
+
+    monkeypatch.setattr(script, "import_rows", _boom)
+    code = _main_in_thread(
+        script,
+        [
+            "--sqlite-path",
+            str(db_path),
+            "--database-url",
+            "postgresql+asyncpg://u:p@localhost/db",
+        ],
+    )
+    assert code == 2
+    _, err = capsys.readouterr()
+    assert "password authentication failed" in err

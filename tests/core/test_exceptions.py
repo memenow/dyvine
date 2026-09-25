@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dyvine.core.exceptions import (
+    DeliveryError,
     DownloadError,
     DyvineError,
     LivestreamNotFoundError,
@@ -97,3 +98,18 @@ def test_rate_limit_error_inherits_dyvine_error() -> None:
     """Verify rate limit error inherits dyvine error."""
     err = RateLimitError("r")
     assert isinstance(err, DyvineError)
+
+
+def test_delivery_error_passes_through_code_and_details() -> None:
+    """``DeliveryError`` honors the ``DyvineError`` contract.
+
+    Callers catching the base type expect ``error_code``/``details``
+    to survive; dropping them breaks substitution.
+    """
+    err = DeliveryError("gone", reason="failed", details={"op": "send"})
+    assert err.reason == "failed"
+    assert err.error_code == "DeliveryError"
+    assert err.details == {"op": "send"}
+
+    explicit = DeliveryError("gone", reason="retryable", error_code="E_DELIVERY")
+    assert explicit.error_code == "E_DELIVERY"

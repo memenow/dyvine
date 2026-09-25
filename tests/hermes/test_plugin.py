@@ -107,6 +107,51 @@ def test_register_registers_every_tool_async() -> None:
     by_name = {call["name"]: call for call in ctx.calls}
     assert by_name["dyvine.queue.list"]["requires_env"] == ["DATABASE_URL"]
     assert "DOUYIN_COOKIE" in by_name["dyvine.posts.download"]["requires_env"]
+    # Cookie-free delivery/resolution declare DB only; pure notify needs nothing.
+    assert by_name["dyvine.delivery.send_account"]["requires_env"] == ["DATABASE_URL"]
+    assert by_name["dyvine.users.resolve"]["requires_env"] == ["DATABASE_URL"]
+    assert by_name["dyvine.notify.send"]["requires_env"] == []
+
+
+def test_register_rejects_stale_env_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A renamed tool in the env sets fails boot instead of drifting."""
+    import dyvine_hermes.plugin as plugin_mod
+
+    monkeypatch.setattr(
+        plugin_mod, "_DB_ONLY_TOOLS", frozenset({"dyvine.queue.list", "dyvine.typo"})
+    )
+    with pytest.raises(RuntimeError, match="stale env classification.*dyvine.typo"):
+        register(FakeContext())  # type: ignore[arg-type]
+
+
+def test_skill_path_missing_fails_with_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dropped skill file surfaces its resolved path, not a gateway riddle."""
+    import dyvine_hermes.plugin as plugin_mod
+
+    monkeypatch.setattr(plugin_mod, "SKILL_NAME", "no-such-skill")
+    with pytest.raises(FileNotFoundError, match="no-such-skill"):
+        plugin_mod.skill_path()
+
+
+def test_handle_cli_tolerates_bare_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gateway dispatch without the subparser degrades to run defaults."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import dyvine_hermes.plugin as plugin_mod
+
+    run_cli = MagicMock()
+    monkeypatch.setitem(
+        __import__("sys").modules, "dyvine_hermes.weekly", MagicMock(run_cli=run_cli)
+    )
+    plugin_mod._handle_cli(SimpleNamespace())
+    run_cli.assert_called_once_with(round_name=None, dry_run=False)
 
 
 async def test_registered_handlers_return_json_strings(
@@ -222,20 +267,25 @@ def _stub_engine() -> Any:
     """Build an Engine-shaped namespace of async stubs."""
     from types import SimpleNamespace
 
+    async def _list_entries(*args: Any, **kwargs: Any) -> Any:
+        """Paginating queue double honoring round/limit/offset."""
+        rows = [
+            SimpleNamespace(chat_id="x", nickname="x", round="r1", sec_user_id="s1")
+        ]
+        round_name = kwargs.get("round")
+        if round_name is not None:
+            rows = [row for row in rows if row.round == round_name]
+        offset = kwargs.get("offset", 0)
+        limit = kwargs.get("limit", 100)
+        rows = rows[offset:]
+        return rows if limit is None or limit < 0 else rows[:limit]
+
     return SimpleNamespace(
         users=_AsyncStub({"ok": True}),
         posts=_AsyncStub({"ok": True}),
         livestreams=_AsyncStub({"ok": True}),
         queue=_AsyncStub({"ok": True}),
-        queue_repo=SimpleNamespace(
-            list_entries=_AsyncStub(
-                [
-                    SimpleNamespace(
-                        chat_id="x", nickname="x", round="r1", sec_user_id="s1"
-                    )
-                ]
-            ).list_entries
-        ),
+        queue_repo=SimpleNamespace(list_entries=_list_entries),
         profiles=_AsyncStub({"ok": True}),
         send_status=_AsyncStub({"ok": True}),
         delivery_ledger=_AsyncStub(set()),
@@ -328,8 +378,13 @@ def test_get_engine_builds_offline_and_caches() -> None:
         assert engine.posts is not None
         assert engine.livestreams is not None
         assert engine.queue is not None
+        # Shared R2 pools are wired into the eagerly built storage
+        # service so uploads and head fan-outs share bounded budgets.
+        assert engine.r2_executor is engine.users.storage._executor
+        assert engine.r2_head_executor is engine.users.storage._head_executor
     finally:
         asyncio.run(context_mod.close_engine())
+        assert context_mod._ENGINE is None
 
 
 def test_root_shim_exposes_register() -> None:
@@ -393,3 +448,174 @@ async def test_queue_update_rejects_non_object_fields(
     with pytest.raises(ValueError, match="fields must be an object"):
         await _queue_update({"key": "r1:s1", "fields": ["nope"]})
     engine.queue.report_progress.assert_not_called()
+
+
+# ── P5-12/13/14/15/16 regressions ────────────────────────────────────────
+
+
+async def test_queue_update_rejects_reserved_key_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``key`` inside ``fields`` fails cleanly, never a bare TypeError."""
+    from dyvine_hermes.tools import _queue_update
+
+    engine = MagicMock()
+    monkeypatch.setattr(tools_mod, "get_engine", lambda: engine)
+    with pytest.raises(ValueError, match="not an updatable field"):
+        await _queue_update({"key": "r1:s1", "fields": {"key": "r1:evil"}})
+    engine.queue.report_progress.assert_not_called()
+
+
+async def test_profiles_upsert_rejects_reserved_identity_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``sec_user_id`` inside ``fields`` fails cleanly. (P5-12 twin)"""
+    from dyvine_hermes.tools import _profiles_upsert
+
+    engine = MagicMock()
+    monkeypatch.setattr(tools_mod, "get_engine", lambda: engine)
+    with pytest.raises(ValueError, match="not an updatable field"):
+        await _profiles_upsert({"sec_user_id": "s1", "fields": {"sec_user_id": "evil"}})
+    engine.profiles.upsert_profile.assert_not_called()
+
+
+def test_parse_cutoff_shared_semantics() -> None:
+    """Naive passes through, offsets convert, garbage raises. (P5-13)"""
+    from datetime import datetime
+
+    import pytest as _pytest
+
+    from dyvine_hermes.weekly_state import parse_cutoff
+
+    assert parse_cutoff("2026-09-01") == datetime(2026, 9, 1)
+    assert parse_cutoff("2026-09-01 10:00:00") == datetime(2026, 9, 1, 10, 0, 0)
+    assert parse_cutoff("2026-09-01T10:00:00") == datetime(2026, 9, 1, 10, 0, 0)
+    # "2026-09-01T02:00:00Z" is 10:00 in Shanghai.
+    assert parse_cutoff("2026-09-01T02:00:00Z", timezone="Asia/Shanghai") == datetime(
+        2026, 9, 1, 10, 0, 0
+    )
+    with _pytest.raises(ValueError):
+        parse_cutoff("not-a-date")
+    with _pytest.raises(ValueError, match="no timezone"):
+        parse_cutoff("2026-09-01T02:00:00+00:00")
+
+
+def test_send_schema_drops_legacy_path_lists() -> None:
+    """Dead import fields are gone from the schema. (P5-14)"""
+    from dyvine_hermes.tools import TOOL_SPECS
+
+    spec = next(s for s in TOOL_SPECS if s.name == "dyvine.delivery.send_account")
+    for dead in ("already_sent", "already_failed", "known_permanent"):
+        assert dead not in spec.schema["properties"]
+
+
+async def test_delivery_send_rejects_escaping_user_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A user_dir outside the download root fails before any send. (P5-16)"""
+    from dyvine.core.settings import settings as live_settings
+    from dyvine_hermes.tools import _delivery_send_account
+
+    monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
+    monkeypatch.setattr(tools_mod, "get_engine", lambda: _stub_engine())
+    outside = tmp_path.parent / "elsewhere"
+    outside.mkdir(exist_ok=True)
+    with pytest.raises(ValueError, match="outside"):
+        await _delivery_send_account(
+            {
+                "nickname": "x",
+                "chat_id": "c",
+                "homepage": "h",
+                "user_dir": str(outside),
+                "round": "r1",
+                "sec_user_id": "s1",
+            }
+        )
+
+
+async def test_delivery_send_rejects_garbage_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unparseable cutoff raises instead of silently full-delivering."""
+    from unittest.mock import AsyncMock
+
+    import dyvine.services.delivery as delivery_mod
+    from dyvine_hermes.tools import _delivery_send_account
+
+    engine = _stub_engine()
+    engine.delivery_ledger = MagicMock()
+    monkeypatch.setattr(tools_mod, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        delivery_mod.FeishuCredentials,
+        "from_hermes_default",
+        classmethod(lambda cls, env_path=None: MagicMock()),
+    )
+    send = AsyncMock()
+    monkeypatch.setattr("dyvine.services.delivery_durable.send_account_durable", send)
+    with pytest.raises(ValueError, match="Invalid isoformat|does not match"):
+        await _delivery_send_account(
+            {
+                "nickname": "x",
+                "chat_id": "c",
+                "homepage": "h",
+                "user_dir": "x",
+                "round": "r1",
+                "sec_user_id": "s1",
+                "cutoff": "not-a-date",
+            }
+        )
+    send.assert_not_called()
+
+
+async def test_delivery_lookup_pushes_round_and_pages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The identity fallback scopes by round and pages (no -1 dump). (P5-15)"""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import dyvine.services.delivery as delivery_mod
+    from dyvine_hermes.tools import _delivery_send_account
+
+    seen: list[dict[str, Any]] = []
+
+    async def _list_entries(*args: Any, **kwargs: Any) -> Any:
+        seen.append(dict(kwargs))
+        offset = kwargs.get("offset", 0)
+        if offset > 0:
+            return []
+        return [
+            SimpleNamespace(chat_id="c", nickname="n", round="r1", sec_user_id="s1")
+        ]
+
+    engine = _stub_engine()
+    engine.queue_repo = SimpleNamespace(list_entries=_list_entries)
+    monkeypatch.setattr(tools_mod, "get_engine", lambda: engine)
+    monkeypatch.setattr(
+        delivery_mod.FeishuCredentials,
+        "from_hermes_default",
+        classmethod(lambda cls, env_path=None: MagicMock()),
+    )
+    result = SimpleNamespace(
+        nickname="n",
+        chat_id="c",
+        total_files=0,
+        sent_files=0,
+        failed_files=0,
+        status="completed",
+    )
+    send = AsyncMock(return_value=result)
+    monkeypatch.setattr("dyvine.services.delivery_durable.send_account_durable", send)
+    await _delivery_send_account(
+        {
+            "nickname": "n",
+            "chat_id": "c",
+            "homepage": "h",
+            "user_dir": "x",
+            "round": "r1",
+        }
+    )
+    assert seen and all(call.get("round") == "r1" for call in seen)
+    assert all(call.get("limit", 0) > 0 for call in seen)
+    _, kwargs = send.await_args
+    assert kwargs["round"] == "r1" and kwargs["sec_user_id"] == "s1"

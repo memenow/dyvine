@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -118,3 +119,28 @@ def test_conflicting_topics_for_exact_account_chat_stay_held() -> None:
 
     assert rows[0].issue == "missing_or_conflicting_topic"
     assert rows[0].topic_message_id is None
+
+
+def test_incomplete_queue_identity_is_held_without_matching() -> None:
+    entries = [
+        {"round": "r", "sec_user_id": "sec-a", "nickname": "Old"},
+        {"round": "r", "sec_user_id": "", "nickname": "Old", "chat_id": "oc_one"},
+        {"round": "r", "sec_user_id": "sec-a", "nickname": "  ", "chat_id": "oc_one"},
+        "not-an-object",
+    ]
+    topics = [("/f", "r", "Old:oc_one", "om_one")]
+
+    rows, unmatched = candidates._candidates(entries, topics)
+
+    assert [row.issue for row in rows] == ["incomplete_queue_identity"] * 4
+    assert [row.topic_message_id for row in rows] == [None] * 4
+    assert [row["reason"] for row in unmatched] == ["no_exact_queue_identity"]
+
+
+def test_script_uses_no_runtime_asserts() -> None:
+    tree = ast.parse(
+        (ROOT / "scripts" / "legacy_group_candidates.py").read_text(encoding="utf-8")
+    )
+    assert [
+        node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)
+    ] == []

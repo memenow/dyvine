@@ -59,11 +59,13 @@
       padding: 16px 20px;
       margin: 24px 0;
     }
+    nav.toc h2.toc-title { font-size: 1rem; margin: 0 0 8px; }
     nav.toc ol { columns: 2; padding-left: 20px; margin: 0; }
     nav.toc li { break-inside: avoid; padding: 4px 0; }
     table { border-collapse: collapse; width: 100%; margin: 16px 0; }
     th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
     th { background: var(--panel); }
+    caption { text-align: left; font-weight: 600; padding-bottom: 8px; }
     code {
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
       font-size: 0.875em;
@@ -90,18 +92,17 @@
   <main>
     <header>
       <h1>Dyvine</h1>
-      <p class="lede">Hermes-native plugin for Douyin download automation: 35 tools for users, posts, livestreams, queues, Feishu delivery, and profiles, with Postgres state and optional Cloudflare R2 archival.</p>
+      <p class="lede">Hermes-native plugin for Douyin download automation: idempotent tools for users, posts, livestreams, queues, Feishu delivery, and profiles, with Postgres state and optional Cloudflare R2 archival.</p>
       <div class="pillrow">
         <span class="pill">Python 3.12+</span>
         <span class="pill">Hermes plugin</span>
         <span class="pill">Postgres state store</span>
         <span class="pill">Cloudflare R2 optional</span>
-        <span class="pill">Last reviewed: 2026-09-22</span>
       </div>
     </header>
 
-    <nav class="toc">
-      <strong>Contents</strong>
+    <nav class="toc" aria-label="Table of contents">
+      <h2 class="toc-title">Contents</h2>
       <ol>
         <li><a href="#overview">Overview</a></li>
         <li><a href="#install">Install</a></li>
@@ -126,7 +127,7 @@
         a pip package (<code>hermes_agent.plugins</code> entry point).
       </p>
       <ul>
-        <li>35 idempotent, single-shot tools take a JSON object and return a JSON string.</li>
+        <li>Idempotent, single-shot tools take a JSON object and return a JSON string.</li>
         <li>Async, fire-and-forget downloads return an <code>operation_id</code> immediately and continue on tracked background tasks; poll with the matching status tool.</li>
         <li>Persistent state lives in a shared Postgres database (schema versioned by Alembic): operations, download queue, seeds, send status, profiles, rounds, and watch subscriptions.</li>
         <li>Idle-quiet by design: importing the plugin performs zero network I/O and opens zero connections; the engine boots on the first tool call.</li>
@@ -135,8 +136,9 @@
         <li>A bundled <code>dyvine:dyvine-ops</code> skill carries the batch-delivery SOP plus the tool manual.</li>
       </ul>
       <table>
+        <caption>Tool domains and their purpose</caption>
         <thead>
-          <tr><th>Domain</th><th>Purpose</th></tr>
+          <tr><th scope="col">Domain</th><th scope="col">Purpose</th></tr>
         </thead>
         <tbody>
           <tr><td>Users</td><td>Share-link resolution, profile lookup, social graph, login-identity check.</td></tr>
@@ -158,7 +160,8 @@
       <p>From the hermes catalog (once listed):</p>
       <pre><code>hermes plugins install dyvine</code></pre>
       <p>From Git:</p>
-      <pre><code>hermes plugins install &lt;owner&gt;/dyvine --enable</code></pre>
+      <pre><code>hermes plugins install BillDuke13/dyvine --enable</code></pre>
+      <p>Replace <code>BillDuke13</code> with the owner of the fork you deploy from.</p>
       <p>From pip (entry-point distribution):</p>
       <pre><code>pip install dyvine
 # then enable `dyvine` in hermes (`hermes plugins enable dyvine`)</code></pre>
@@ -175,25 +178,14 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
       <p>Apply the schema once before first use (operator-side, from a repo checkout with the same <code>DATABASE_URL</code>):</p>
       <pre><code>uv run alembic upgrade head</code></pre>
       <p>
-        On the current Hermes v0.21.1 host, the plugin doctor reported that
-        Python dependencies require manual installation. The cutover
-        installed only missing versions pinned by <code>plugin.yaml</code>
-        using <code>uv pip --no-deps</code> in the Hermes environment. The
-        published <code>f2</code> dependency metadata conflicts with Hermes's
-        core pins, so the install preserved its existing
-        <code>pydantic</code>, <code>httpx</code>, and
-        <code>websockets</code> versions. Doctor registered all 35 tools and
-        a read-only profile call passed, but neither check caught the missing
-        Playwright dependency <code>pyee==13.0.1</code> from the lockfile.
-        The engine wires its request signer on first use. The initial
-        post-list probe still returned HTTP 403 until that locked dependency
-        was installed. The signer then became ready, a signed read-only
-        post-list call returned four posts, and engine shutdown closed the
-        signer cleanly. On a target host, verify matching
-        Playwright Chromium and all locked runtime dependencies, then read
-        one authorized <code>dyvine.posts.list</code> page before enabling
-        weekly sends. A profile check and doctor alone do not establish
-        post-list readiness.
+        Install every version pinned by <code>plugin.yaml</code>
+        <strong>with dependencies</strong> (never <code>--no-deps</code>:
+        <code>playwright</code> needs its transitive packages such as
+        <code>pyee</code>), plus the matching Playwright Chromium build.
+        Then read one authorized <code>dyvine.posts.list</code> page before
+        enabling weekly sends: a profile check and doctor alone do not
+        establish post-list readiness, and an unsigned signer surfaces as
+        HTTP 403 on Argus-gated endpoints.
       </p>
     </section>
 
@@ -233,8 +225,9 @@ make doctor     # hermes plugins doctor --ci (needs docker)</code></pre>
 DOUYIN_COOKIE=&lt;browser session cookie&gt;
 DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pre>
       <table>
+        <caption>Environment variable prefixes</caption>
         <thead>
-          <tr><th>Prefix</th><th>Purpose</th></tr>
+          <tr><th scope="col">Prefix</th><th scope="col">Purpose</th></tr>
         </thead>
         <tbody>
           <tr><td><code>API_</code></td><td>Debug flag only (<code>API_DEBUG</code>); no HTTP server exists.</td></tr>
@@ -293,8 +286,9 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         The following environment variables set the service-wide watch defaults.
       </p>
       <table>
+        <caption>Watch default environment variables</caption>
         <thead>
-          <tr><th>Variable</th><th>Default</th><th>Bounds</th><th>Description</th></tr>
+          <tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Bounds</th><th scope="col">Description</th></tr>
         </thead>
         <tbody>
           <tr><td><code>DOUYIN_WATCH_LIVE_POLL_SECONDS</code></td><td><code>300</code></td><td>60–3600</td><td>Seconds between live-status checks per subscription.</td></tr>
@@ -309,7 +303,7 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
     <section id="tool-reference">
       <h2>Tool Reference</h2>
       <p>
-        All 35 tools live in the <code>dyvine</code> toolset. Every tool takes a JSON
+        All registered tools live in the <code>dyvine</code> toolset. Every tool takes a JSON
         object and returns a JSON string. DB-only tools need just
         <code>DATABASE_URL</code>; Douyin-backed tools additionally need
         <code>DOUYIN_COOKIE</code>. Long downloads follow submit-then-poll: the
@@ -320,8 +314,9 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>interrupted by upstream error</code> means work remains.
       </p>
       <table>
+        <caption>Tool reference: every registered tool</caption>
         <thead>
-          <tr><th>Tool</th><th>Description</th></tr>
+          <tr><th scope="col">Tool</th><th scope="col">Description</th></tr>
         </thead>
         <tbody>
           <tr><td><code>dyvine.profile.get</code></td><td>Fetch a Douyin user profile by sec_user_id.</td></tr>
@@ -392,6 +387,7 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
   "updated_at": "2026-05-10T10:00:00Z"
 }</code></pre>
       <p>
+        <code>task_id</code> always equals <code>operation_id</code> (the response schema rejects anything else), so poll loops can key on either field.
         Status values come from <code>OperationStatus</code>: <code>pending</code>, <code>running</code>,
         <code>completed</code>, <code>partial</code>, and <code>failed</code>. Bulk-download responses extend this
         shape with per-<code>PostType</code> counters and <code>failed_count</code>.
@@ -448,16 +444,16 @@ hermes dyvine weekly run-once --round weekly-YYYY-MM-DD</code></pre>
         and
         <code>DYVINE_WEEKLY_OWNER_OPEN_ID</code> (a recipient
         <code>ou_</code> ID) in the Hermes runtime environment. The runner
-        uses <code>2026-09-27</code> and a privately configured active
-        legacy round for this cutover; these are deployment values, not
+        uses the configured first-automatic-Sunday date and a privately configured active
+        legacy round for the cutover; these are deployment values, not
         project defaults. It
         also reads <code>DATABASE_URL</code>, <code>DOUYIN_COOKIE</code>,
         <code>FEISHU_APP_ID</code>, <code>FEISHU_APP_SECRET</code>, and
         <code>DOUYIN_DOWNLOAD_ROOT</code>. The plugin declares Playwright as
         a dependency; install its matching Chromium browser on the host.
-        The CLI rejects an unset or unknown group policy. In the frozen
-        cutover inventory, 1,619 of 1,631 accounts present in multiple
-        rounds reused one chat. Returning accounts with missing or conflicting chat or
+        The CLI rejects an unset or unknown group policy.
+        Accounts present in multiple rounds reuse one chat.
+        Returning accounts with missing or conflicting chat or
         topic evidence remain on hold for manual reconciliation.
       </p>
       <h3>Legacy disk-state migration</h3>
@@ -620,8 +616,7 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
       <h3>Cron cutover</h3>
       <p>
         Install <code>scripts/dyvine_weekly_run_once.sh</code> as
-        <code>~/.hermes/scripts/dyvine-weekly.sh</code> for the Hermes user
-        (on the current root-run host, <code>/root/.hermes/scripts/</code>).
+        <code>$HOME/.hermes/scripts/dyvine-weekly.sh</code> for the Hermes user.
         Create a single Hermes no-agent cron that ticks every 10 minutes; the
         runner, not the cron timezone, enforces the original Sunday 08:00
         business time. Keep both old and new cron jobs paused until group
@@ -772,7 +767,7 @@ make doctor        # hermes plugins doctor --ci (needs docker)</code></pre>
         <code>make format &amp;&amp; make lint &amp;&amp; make test</code>, and open a pull request.
       </p>
       <p>
-        License details are available in <a href="../LICENSE">LICENSE</a>.
+        License details are available in <a href="https://github.com/BillDuke13/dyvine/blob/main/LICENSE">LICENSE</a>.
       </p>
     </section>
 

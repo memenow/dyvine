@@ -191,3 +191,113 @@ def test_relative_to_download_root_absolute_outside_root_returns_basename(
 def test_relative_to_download_root_none_passthrough() -> None:
     """Verify relative to download root none passthrough."""
     assert path_safety.relative_to_download_root(None) is None
+
+
+def test_resolve_within_root_rejects_symlink_hidden_behind_dotdot(
+    jail_root: Path, tmp_path: Path
+) -> None:
+    """``nonexistent/../evil`` must be scanned as ``evil``, not skipped.
+
+    The old walk stopped at the first missing segment, so a ``..``
+    after it hid the rest of the path from the symlink scan.
+    """
+    if sys.platform.startswith("win"):
+        pytest.skip("Symlinks on Windows require elevated privileges")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (jail_root / "evil").symlink_to(outside)
+
+    with pytest.raises(ValidationError):
+        path_safety.resolve_within_root("ghost/../evil/payload")
+
+
+def test_resolve_within_root_rejects_symlink_consumed_by_dotdot(
+    jail_root: Path, tmp_path: Path
+) -> None:
+    """``link/../file`` resolves *through* ``link`` on disk.
+
+    Lexical normalization alone would reduce this to ``root/file`` and
+    miss the indirection, so the raw joined path is scanned too.
+    """
+    if sys.platform.startswith("win"):
+        pytest.skip("Symlinks on Windows require elevated privileges")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (jail_root / "link").symlink_to(outside)
+
+    with pytest.raises(ValidationError):
+        path_safety.resolve_within_root("link/../file")
+
+
+def test_resolve_within_root_reports_symlink_loop_as_validation_error(
+    jail_root: Path,
+) -> None:
+    """A symlink loop must surface as ``ValidationError``, not ``RuntimeError``."""
+    if sys.platform.startswith("win"):
+        pytest.skip("Symlinks on Windows require elevated privileges")
+
+    (jail_root / "loop-a").symlink_to(jail_root / "loop-b")
+    (jail_root / "loop-b").symlink_to(jail_root / "loop-a")
+
+    with pytest.raises(ValidationError):
+        path_safety.resolve_within_root("loop-a/payload")
+
+
+def test_resolve_within_root_allows_absolute_path_inside_root(
+    jail_root: Path,
+) -> None:
+    """Containment -- not relative spelling -- is the invariant.
+
+    Absolute inputs resolving inside the jail are legal; only
+    outside-jail resolutions are rejected.
+    """
+    inside = jail_root / "livestreams"
+    assert path_safety.resolve_within_root(str(inside)) == inside
+
+
+def test_ensure_within_root_rejects_in_jail_symlink_ancestor(
+    jail_root: Path,
+) -> None:
+    """Post-mutation re-check applies the same strictness as resolve.
+
+    An in-jail symlink to another in-jail directory is rejected even
+    though the resolved target stays inside the jail.
+    """
+    if sys.platform.startswith("win"):
+        pytest.skip("Symlinks on Windows require elevated privileges")
+
+    real_dir = jail_root / "real"
+    real_dir.mkdir()
+    alias = jail_root / "alias"
+    alias.symlink_to(real_dir)
+
+    with pytest.raises(ValidationError):
+        path_safety.ensure_within_root(alias / "subpath")
+
+
+def test_relative_to_download_root_loop_never_leaks_absolute(
+    jail_root: Path,
+) -> None:
+    """A symlink loop never leaks the absolute path and never fakes a basename.
+
+    On runtimes whose non-strict ``resolve()`` reports loops the
+    ``OSError``/``RuntimeError`` propagates (callers pass freshly
+    created paths inside download flows, so the operation fails with
+    its true cause); otherwise the render must not contain the jail
+    root prefix. Either way the legacy basename fallback is reserved
+    for genuinely outside-jail records.
+    """
+    if sys.platform.startswith("win"):
+        pytest.skip("Symlinks on Windows require elevated privileges")
+
+    (jail_root / "loop-a").symlink_to(jail_root / "loop-b")
+    (jail_root / "loop-b").symlink_to(jail_root / "loop-a")
+
+    try:
+        rendered = path_safety.relative_to_download_root(jail_root / "loop-a" / "x")
+    except (OSError, RuntimeError):
+        return
+    assert rendered is not None
+    assert str(jail_root) not in rendered

@@ -47,6 +47,8 @@ async def test_modern_record_only_resolves_matching_file_content(
     new: list[SimpleNamespace] = []
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         if kwargs.get("round") == "legacy":
             return []
         if kwargs.get("status") == old_status:

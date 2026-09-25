@@ -13,6 +13,6 @@ from __future__ import annotations
 
 from dyvine_hermes.plugin import TOOLSET, register
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 __all__ = ["TOOLSET", "__version__", "register"]

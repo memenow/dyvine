@@ -472,9 +472,9 @@ async def test_process_download_breaks_on_sticky_cursor(
         max_items=50,
     )
 
-    assert (
-        call_count == 1
-    ), f"Sticky-cursor early-exit failed; loop ran {call_count} iterations"
+    assert call_count == 1, (
+        f"Sticky-cursor early-exit failed; loop ran {call_count} iterations"
+    )
     refreshed = await service.get_download_status(operation.operation_id)
     # ``has_aweme=True`` advanced ``downloaded_count`` once before the
     # sticky-cursor branch terminated the loop, so the run records as
@@ -1489,3 +1489,159 @@ async def test_resolve_share_url_transport_error() -> None:
     client.get = AsyncMock(side_effect=httpx.ConnectError("dns down"))
     with pytest.raises(ServiceError, match="Share link fetch failed"):
         await service.resolve_share_url("https://v.douyin.com/x/", client=client)
+
+
+def test_batch_progress_percent_clamps_and_handles_unknown_totals() -> None:
+    """Per-batch progress stays in contract: None/100/clamped."""
+    from dyvine.services.users import _batch_progress_percent
+
+    assert (
+        _batch_progress_percent(downloaded=5, total_posts=10, likes_only=True) is None
+    )
+    assert (
+        _batch_progress_percent(downloaded=0, total_posts=0, likes_only=False) == 100.0
+    )
+    assert (
+        _batch_progress_percent(downloaded=5, total_posts=10, likes_only=False) == 50.0
+    )
+    assert (
+        _batch_progress_percent(downloaded=130, total_posts=100, likes_only=False)
+        == 100.0
+    )
+
+
+# ── P4-39/41/42/43 regressions ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_user_dir_jails_hostile_nicknames(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Traversal/absolute nicknames stay inside the task workspace."""
+    from dyvine.services.users import _task_user_dir
+
+    monkeypatch.chdir(tmp_path)
+    # The autouse fixture jails the download root at tmp/downloads: the
+    # task dir must live under it, like production workspaces do.
+    task_dir = tmp_path / "downloads" / "task-1"
+    task_dir.mkdir(parents=True)
+    assert _task_user_dir(task_dir, "../evil").parent == task_dir
+    assert _task_user_dir(task_dir, "/abs/evil").parent == task_dir
+    assert _task_user_dir(task_dir, "..").parent == task_dir
+    assert not (tmp_path / "downloads" / "evil").exists()
+    assert not (tmp_path / "evil").exists()
+    assert [p.name for p in sorted(task_dir.iterdir())] == [
+        "abs_evil",
+        "evil",
+        "untitled",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_download_closes_handler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The multi-page handler is released even on the early-exit path."""
+    from unittest.mock import AsyncMock
+
+    from dyvine.services import users as users_mod
+
+    monkeypatch.chdir(tmp_path)
+    mock_user_data = MagicMock()
+    mock_user_data.nickname = "NoPostUser"
+    mock_user_data.aweme_count = 0
+    closed = AsyncMock()
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        fetch_user_profile = AsyncMock(return_value=mock_user_data)
+        aclose = closed
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    service = UserService(FakeOperationRepository())
+    operation = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="empty-user",
+        status="pending",
+        message="scheduled",
+    )
+    await service._process_download(
+        operation.operation_id,
+        user_id="empty-user",
+        include_posts=True,
+        include_likes=False,
+        max_items=None,
+    )
+    closed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_download_cancellation_persists_terminal_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A drained download leaves failed/cancelled, never running."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from dyvine.services import users as users_mod
+
+    monkeypatch.chdir(tmp_path)
+
+    class FakeHandler:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        fetch_user_profile = AsyncMock(side_effect=asyncio.CancelledError())
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    service = UserService(FakeOperationRepository())
+    operation = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="u1",
+        status="pending",
+        message="scheduled",
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await service._process_download(
+            operation.operation_id,
+            user_id="u1",
+            include_posts=True,
+            include_likes=False,
+            max_items=None,
+        )
+    refreshed = await service.operation_store.get_operation(operation.operation_id)
+    assert refreshed.status == "failed"
+    assert refreshed.error == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_rejects_off_domain_before_fetch() -> None:
+    """Non-Douyin input fails without issuing any request (SSRF guard)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    service = UserService(FakeOperationRepository())
+    client = MagicMock()
+    client.get = AsyncMock()
+    with pytest.raises(ServiceError, match="Not a shareable URL"):
+        await service.resolve_share_url("https://evil.example/x", client=client)
+    with pytest.raises(ServiceError, match="Not a shareable URL"):
+        await service.resolve_share_url(
+            "http://169.254.169.254/latest/meta-data/", client=client
+        )
+    client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_share_url_rejects_off_domain_landing() -> None:
+    """A redirect chain leaving Douyin fails instead of resolving."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    service = UserService(FakeOperationRepository())
+    request = httpx.Request("GET", "https://evil.example/user/stolen")
+    response = httpx.Response(200, request=request)
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+    with pytest.raises(ServiceError, match="left Douyin"):
+        await service.resolve_share_url("https://v.douyin.com/abc/", client=client)

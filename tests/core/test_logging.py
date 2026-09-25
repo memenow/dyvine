@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -215,6 +217,157 @@ def test_context_logger_shares_correlation_id_across_instances() -> None:
 
     first.add_context(tenant="acme")
     assert second.context["tenant"] == "acme"
+
+
+def test_context_logger_does_not_mutate_caller_extra() -> None:
+    """The caller's ``extra`` dict must be copied, never written into.
+
+    Writing ``correlation_id`` into the caller's mapping leaks one
+    request's ID into the next when the dict is reused.
+    """
+    cl = ContextLogger("test.nomutate")
+    cl.set_correlation_id("cid-1")
+    caller_extra = {"k": "v"}
+    with patch.object(cl.logger, "log") as mock_log:
+        cl.info("msg", extra=caller_extra)
+        _, kwargs = mock_log.call_args
+        assert kwargs["extra"]["correlation_id"] == "cid-1"
+        assert kwargs["extra"]["k"] == "v"
+    assert caller_extra == {"k": "v"}
+
+
+def test_context_logger_accepts_explicit_none_extra() -> None:
+    """An explicit ``extra=None`` must not crash the emit path."""
+    cl = ContextLogger("test.noneextra")
+    cl.set_correlation_id("cid-1")
+    with patch.object(cl.logger, "log") as mock_log:
+        cl.info("msg", extra=None)
+        _, kwargs = mock_log.call_args
+        assert kwargs["extra"]["correlation_id"] == "cid-1"
+
+
+def test_context_logger_rejects_reserved_extra_keys() -> None:
+    """Reserved ``LogRecord`` keys fail fast instead of at emit time."""
+    cl = ContextLogger("test.reserved")
+    with pytest.raises(ValueError, match="collides"):
+        cl.info("msg", extra={"msg": "hijack"})
+    with pytest.raises(ValueError, match="collides"):
+        cl.add_context(levelname="hijack")
+
+
+def test_context_logger_per_call_extra_wins_over_context() -> None:
+    """An explicit per-call key beats the ambient context value."""
+    cl = ContextLogger("test.precedence")
+    cl.add_context(env="ambient")
+    with patch.object(cl.logger, "log") as mock_log:
+        cl.info("msg", extra={"env": "explicit"})
+        _, kwargs = mock_log.call_args
+        assert kwargs["extra"]["env"] == "explicit"
+
+
+def test_context_logger_forwards_stacklevel() -> None:
+    """Records must point at the caller, not the wrapper internals."""
+    cl = ContextLogger("test.stacklevel")
+    with patch.object(cl.logger, "log") as mock_log:
+        cl.info("msg")
+        _, kwargs = mock_log.call_args
+        assert kwargs["stacklevel"] == 3
+
+
+@pytest.mark.asyncio
+async def test_track_time_logs_failure_and_reraises() -> None:
+    """A failing operation must not leave a success record behind."""
+    cl = ContextLogger("test.timefail")
+    with patch.object(cl.logger, "log") as mock_log:
+        with pytest.raises(RuntimeError, match="nope"):
+            async with cl.track_time("op"):
+                raise RuntimeError("nope")
+        level, msg = mock_log.call_args[0][:2]
+        extra = mock_log.call_args[1]["extra"]
+        assert level == logging.ERROR
+        assert msg == "op failed"
+        assert extra["error"] == "nope"
+        assert "duration_ms" in extra
+        assert mock_log.call_args[1]["exc_info"] is True
+
+
+@pytest.mark.asyncio
+async def test_track_memory_logs_failure_and_reraises() -> None:
+    """Memory tracking reports failures without masking the original error."""
+    mock_process = MagicMock()
+    mem_start = MagicMock()
+    mem_start.rss = 100 * 1024 * 1024
+    mock_process.memory_info = MagicMock(side_effect=[mem_start, OSError("gone")])
+
+    cl = ContextLogger("test.memfail")
+    with (
+        patch("psutil.Process", return_value=mock_process),
+        patch.object(cl.logger, "log") as mock_log,
+    ):
+        with pytest.raises(ValueError, match="original"):
+            async with cl.track_memory("op"):
+                raise ValueError("original")
+        level, msg = mock_log.call_args[0][:2]
+        extra = mock_log.call_args[1]["extra"]
+        assert level == logging.ERROR
+        assert msg == "op failed"
+        assert extra["error"] == "original"
+        assert extra["memory_error"] == "gone"
+
+
+@pytest.fixture
+def _preserve_root_logger() -> Iterator[logging.Logger]:
+    """Save and restore root handlers/level around ``setup_logging``."""
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    try:
+        yield root
+    finally:
+        for handler in list(root.handlers):
+            if getattr(handler, "_dyvine_owned", False):
+                root.removeHandler(handler)
+                handler.close()
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+
+
+def test_setup_logging_preserves_foreign_handlers(_preserve_root_logger) -> None:
+    """Host-owned handlers must survive ``setup_logging``."""
+    from dyvine.core.logging import setup_logging
+
+    foreign = logging.StreamHandler()
+    logging.getLogger().addHandler(foreign)
+    setup_logging()
+    assert foreign in logging.getLogger().handlers
+    assert foreign not in [
+        h for h in logging.getLogger().handlers if getattr(h, "_dyvine_owned", False)
+    ]
+    logging.getLogger().removeHandler(foreign)
+
+
+def test_setup_logging_is_idempotent(_preserve_root_logger) -> None:
+    """Repeat calls reconcile owned handlers instead of duplicating."""
+    from dyvine.core.logging import setup_logging
+
+    setup_logging()
+    setup_logging()
+    owned = [
+        h for h in logging.getLogger().handlers if getattr(h, "_dyvine_owned", False)
+    ]
+    assert len(owned) == 1  # console only; no file handler without log_dir
+
+
+def test_setup_logging_writes_file_only_with_log_dir(
+    _preserve_root_logger: logging.Logger, tmp_path: Path
+) -> None:
+    """File rotation is opt-in via an explicit directory."""
+    from dyvine.core.logging import setup_logging
+
+    setup_logging(log_dir=tmp_path / "logs")
+    assert (tmp_path / "logs" / "dyvine.log").exists()
 
 
 def test_json_formatter_emits_flattened_context_fields() -> None:

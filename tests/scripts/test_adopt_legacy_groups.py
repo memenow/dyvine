@@ -167,7 +167,11 @@ async def test_group_reader_unwraps_live_chat_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_group_reader_uses_requested_id_when_chat_response_omits_it() -> None:
+async def test_group_reader_rejects_chat_response_missing_identity() -> None:
+    """A response without chat_id fails the read; echoing the request id
+    would make the caller's identity comparison tautological."""
+    from scripts.feishu_audit_core import AuditError
+
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("tenant_access_token/internal"):
             return httpx.Response(
@@ -186,9 +190,30 @@ async def test_group_reader_uses_requested_id_when_chat_response_omits_it() -> N
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         reader = script.GroupReader(client, FeishuCredentials("app-id", "secret"), 0.1)
-        chat = await reader.get_chat("oc_one")
-    assert chat["chat_id"] == "oc_one"
-    assert chat["owner_id"] == "ou_owner"
+        with pytest.raises(AuditError, match="missing chat_id"):
+            await reader.get_chat("oc_one")
+
+
+@pytest.mark.asyncio
+async def test_verify_holds_row_with_incomplete_frozen_identity() -> None:
+    """Empty frozen chat/topic holds the row; the batch scan continues."""
+    from unittest.mock import AsyncMock
+
+    candidate = candidates.Candidate(
+        row_id="r1",
+        round="weekly-1",
+        sec_user_id="sec_1",
+        nickname="nick",
+        chat_id="",
+        topic_message_id="",
+        source_file="f.csv",
+        issue=None,
+    )
+    reader = AsyncMock()
+    decision, _ = await script._verify(candidate, reader, "app-id", "ou_owner")
+    assert decision == "frozen_identity_incomplete"
+    reader.get_chat.assert_not_called()
+    reader.get_message.assert_not_called()
 
 
 @pytest.mark.asyncio

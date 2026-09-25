@@ -10,11 +10,13 @@ unit tests inject the fakes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, get_args
 
-from ..core.exceptions import QueueEntryNotFoundError, ServiceError
+from ..core.exceptions import ServiceError
 from ..db.protocols import (
     QUEUE_ACTIVE_STATUSES,
+    QueueEntryStatus,
+    QueueMode,
     QueueRepository,
     RoundRepository,
     SeedRepository,
@@ -33,6 +35,27 @@ class RoundStatus:
 
 class QueueService:
     """Seed, claim, and track download-queue entries."""
+
+    #: Fields a progress patch may touch. Identity (``key``/``round``/
+    #: ``sec_user_id``), cohort (``mode``/``cutoff``/``serial_group``), and
+    #: the remaining linkage (``kind``/``nickname``/``homepage``) are owned
+    #: by enqueue/claim and must never move under a progress report: the
+    #: LLM-facing ``dyvine.queue.update`` tool forwards raw caller fields
+    #: here, so this is a trust boundary, not a convenience check.
+    #: ``chat_id`` stays mutable because group resolution persists the
+    #: verified chat onto the entry through this same path (rewriting it
+    #: cannot break the ``key == {round}:{sec}`` invariant).
+    PROGRESS_MUTABLE_FIELDS = frozenset(
+        {
+            "status",
+            "operation_id",
+            "op_status",
+            "op_message",
+            "extra",
+            "attempts",
+            "chat_id",
+        }
+    )
 
     def __init__(
         self,
@@ -80,7 +103,7 @@ class QueueService:
         self,
         round_name: str,
         *,
-        mode: str,
+        mode: QueueMode,
         cutoff: str | None = None,
         note: str | None = None,
         excluded_nicknames: set[str] | None = None,
@@ -89,29 +112,46 @@ class QueueService:
 
         Entries key ``{round}:{sec}`` and start ``pending``; seeds
         already enqueued (any status) are left untouched so a second
-        call never resets progress. Returns the number of new rows.
+        call never resets progress. One round snapshot (matched by
+        account, not by key) decides membership: legacy rows carry
+        non-canonical keys a per-key probe would miss, duplicating
+        the account slot. The snapshot pages through the listing in
+        bounded chunks instead of depending on an undocumented
+        ``limit=-1`` all-rows sentinel no protocol promises. A
+        concurrent double-enqueue still converges because the
+        repository upsert is atomic, and both writers insert the
+        identical pending row. Returns the number of new rows.
+
+        ``mode`` is validated here, at enqueue time: the weekly runner
+        only inlines ``full``/``post``/``incremental``, and a bad mode
+        must fail the seeding call, not surface mid-run as a stuck pair.
         """
+        valid_modes = get_args(QueueMode)
+        if mode not in valid_modes:
+            raise ServiceError(
+                f"Unknown queue mode {mode!r} (expected one of {sorted(valid_modes)})"
+            )
         await self.ensure_round(round_name, note)
         seeds = await self._seeds.list_seeds(include_excluded=False)
         excluded = excluded_nicknames or set()
-        existing_secs = {
-            row.sec_user_id
-            for row in await self._queue.list_entries(round=round_name, limit=-1)
-        }
+        existing_secs: set[str] = set()
+        offset = 0
+        while True:
+            page = await self._queue.list_entries(
+                round=round_name, limit=500, offset=offset
+            )
+            if not page:
+                break
+            existing_secs.update(row.sec_user_id for row in page)
+            offset += len(page)
         created = 0
         for seed in seeds:
             if seed.nickname and seed.nickname in excluded:
                 continue
             if seed.sec_user_id in existing_secs:
                 continue
-            key = f"{round_name}:{seed.sec_user_id}"
-            try:
-                await self._queue.get_entry(key)
-                continue
-            except QueueEntryNotFoundError:
-                pass
             await self._queue.upsert_entry(
-                key=key,
+                key=f"{round_name}:{seed.sec_user_id}",
                 round=round_name,
                 nickname=seed.nickname or seed.sec_user_id,
                 sec_user_id=seed.sec_user_id,
@@ -130,7 +170,19 @@ class QueueService:
         return await self._queue.claim_next(round=round, keys=keys)
 
     async def report_progress(self, key: str, **fields: Any) -> QueueEntryRecord:
-        """Patch a claimed entry (status/checkpoint/counters) and return it."""
+        """Patch a claimed entry (status/checkpoint/counters) and return it.
+
+        Only :data:`PROGRESS_MUTABLE_FIELDS` pass through: anything else
+        (notably identity and cohort fields) is refused loudly so a typo'd
+        tool call can never silently rewrite ``sec_user_id`` and break the
+        ``key == {round}:{sec}`` invariant.
+        """
+        refused = set(fields) - self.PROGRESS_MUTABLE_FIELDS
+        if refused:
+            raise ServiceError(
+                "Refusing to update read-only queue fields: "
+                f"{sorted(refused)} (mutable: {sorted(self.PROGRESS_MUTABLE_FIELDS)})"
+            )
         return await self._queue.update_entry(key, **fields)
 
     async def get_entry(self, key: str) -> QueueEntryRecord:
@@ -141,7 +193,7 @@ class QueueService:
         self,
         *,
         round: str | None = None,
-        status: str | None = None,
+        status: QueueEntryStatus | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[QueueEntryRecord]:
@@ -151,20 +203,16 @@ class QueueService:
         )
 
     async def round_status(self, round: str | None = None) -> RoundStatus:
-        """Tally entries by status for one round (or every round)."""
-        total = await self._queue.count_entries(round=round)
-        by_status: dict[str, int] = {}
-        # Statuses are an open set inherited from legacy data; page the
-        # listing instead of assuming a closed enum.
-        offset = 0
-        while True:
-            page = await self._queue.list_entries(round=round, limit=500, offset=offset)
-            if not page:
-                break
-            for entry in page:
-                by_status[entry.status] = by_status.get(entry.status, 0) + 1
-            offset += len(page)
-        return RoundStatus(round=round, total=total, by_status=by_status)
+        """Tally entries by status for one round (or every round).
+
+        One ``GROUP BY`` snapshot backs both numbers, so ``total`` always
+        equals the tally sum even under concurrent claims (the old
+        count-then-scan read two different instants and could disagree).
+        """
+        by_status = await self._queue.count_by_status(round=round)
+        return RoundStatus(
+            round=round, total=sum(by_status.values()), by_status=by_status
+        )
 
     async def active_count(self, *, round: str | None = None) -> int:
         """Count entries still in flight (pending + downloading)."""
@@ -181,6 +229,10 @@ class QueueService:
         round: str | None = None,
     ) -> int:
         """Requeue entries whose claimer stopped heartbeating."""
+        if not stale_after_seconds > 0:
+            raise ServiceError(f"Invalid stale_after_seconds: {stale_after_seconds!r}")
+        if max_attempts < 0:
+            raise ServiceError(f"Invalid max_attempts: {max_attempts!r}")
         return await self._queue.release_stale(
             stale_after_seconds=stale_after_seconds,
             max_attempts=max_attempts,

@@ -128,3 +128,56 @@ def test_download_response_optional_fields_none() -> None:
     assert resp.total_items is None
     assert resp.completed_items is None
     assert resp.error is None
+
+
+def _download_kwargs(**overrides):  # type: ignore[no-untyped-def]
+    kwargs = {
+        "operation_id": "t1",
+        "operation_type": "user_content_download",
+        "subject_id": "u1",
+        "status": "running",
+        "message": "msg",
+        "created_at": "2026-04-17T00:00:00+00:00",
+        "updated_at": "2026-04-17T00:00:01+00:00",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_download_response_rejects_conflicting_aliases() -> None:
+    """Alias pairs must agree; silent forks are refused."""
+    with pytest.raises(ValidationError, match="task_id"):
+        DownloadResponse(**_download_kwargs(task_id="other"))
+    with pytest.raises(ValidationError, match="downloaded_items"):
+        DownloadResponse(**_download_kwargs(completed_items=3, downloaded_items=4))
+
+
+def test_download_response_rejects_out_of_range_progress() -> None:
+    """Progress outside 0-100 never serializes to clients."""
+    with pytest.raises(ValidationError, match="progress"):
+        DownloadResponse(**_download_kwargs(progress=130.0))
+    with pytest.raises(ValidationError, match="progress"):
+        DownloadResponse(**_download_kwargs(progress=-1.0))
+
+
+def test_download_response_rejects_absolute_path() -> None:
+    """The path field is root-relative; absolute paths leak layout."""
+    with pytest.raises(ValidationError, match="download_path"):
+        DownloadResponse(**_download_kwargs(download_path="/abs/path"))
+    with pytest.raises(ValidationError, match="download_path"):
+        DownloadResponse(**_download_kwargs(download_path="../escape"))
+    assert (
+        DownloadResponse(
+            **_download_kwargs(download_path="nick/2026/a.mp4")
+        ).download_path
+        == "nick/2026/a.mp4"
+    )
+
+
+def test_download_response_parses_iso_timestamps() -> None:
+    """ISO strings become datetimes; garbage is refused."""
+    resp = DownloadResponse(**_download_kwargs())
+    assert resp.created_at.year == 2026
+    assert resp.created_at.tzinfo is not None
+    with pytest.raises(ValidationError, match="created_at"):
+        DownloadResponse(**_download_kwargs(created_at="not-a-time"))

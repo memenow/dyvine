@@ -5,23 +5,28 @@ inputs:
     description: 'Docker image to scan'
     required: true
   severity-threshold:
-    description: 'Minimum severity level to fail the scan'
+    description: 'Comma-separated Trivy severity list to fail the scan (Trivy matches exactly, not >= threshold)'
     required: false
-    default: 'HIGH'
+    default: 'HIGH,CRITICAL'
+  sarif-output:
+    description: 'SARIF output file path (override when invoking this action more than once per job)'
+    required: false
+    default: 'trivy-results.sarif'
 
 runs:
   using: 'composite'
   steps:
     - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@v0.36.0
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         image-ref: ${{ inputs.image }}
         format: 'sarif'
-        output: 'trivy-results.sarif'
+        output: ${{ inputs.sarif-output }}
         severity: ${{ inputs.severity-threshold }}
-    
+        exit-code: '1'
+
     - name: Upload Trivy scan results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v4
-      if: always()
+      uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2c # v4
+      if: always() && hashFiles(inputs.sarif-output) != ''
       with:
-        sarif_file: 'trivy-results.sarif'
+        sarif_file: ${{ inputs.sarif-output }}

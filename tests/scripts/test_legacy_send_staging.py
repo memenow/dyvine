@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 from io import StringIO
@@ -82,3 +83,12 @@ def test_extra_sources_stream_nested_cache_paths_across_small_chunks() -> None:
         ("x", 0),
         ("y", 1),
     ]
+
+
+def test_script_uses_no_runtime_asserts() -> None:
+    tree = ast.parse(
+        (ROOT / "scripts" / "legacy_send_staging.py").read_text(encoding="utf-8")
+    )
+    assert [
+        node.lineno for node in ast.walk(tree) if isinstance(node, ast.Assert)
+    ] == []

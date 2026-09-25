@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -312,7 +313,12 @@ async def test_one_account_sends_only_unresolved_media_then_completes(
         records.append(record)
         return record
 
-    engine.delivery_ledger.list_files = AsyncMock(side_effect=lambda **_: list(records))
+    async def _list_records(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
+        return list(records)
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=_list_records)
     channel = SimpleNamespace(
         ensure_group=AsyncMock(return_value=group),
         ensure_topic=AsyncMock(return_value=group),
@@ -350,6 +356,8 @@ async def test_legacy_confirmed_path_completes_without_new_group(
     )
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         return [historical] if kwargs.get("status") == "legacy_confirmed_sent" else []
 
     engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
@@ -384,6 +392,8 @@ async def test_legacy_permanent_failure_is_not_sent_or_completed(
     )
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         if kwargs.get("round") == "legacy" and kwargs.get("status") == (
             "permanent_failure"
         ):
@@ -423,6 +433,8 @@ async def test_legacy_failure_does_not_hide_other_unsent_media(tmp_path: Path) -
     )
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         if kwargs.get("round") == "legacy" and kwargs.get("status") == (
             "permanent_failure"
         ):
@@ -491,9 +503,13 @@ async def test_missing_uploaded_file_keeps_account_open(tmp_path: Path) -> None:
     repo = FakeQueueRepository()
     await _entry(repo, root=user_dir)
     engine = _engine(repo)
-    engine.delivery_ledger.list_files = AsyncMock(
-        return_value=[SimpleNamespace(relative_path="missing.mp4", status="uploaded")]
-    )
+
+    async def _list_missing(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
+        return [SimpleNamespace(relative_path="missing.mp4", status="uploaded")]
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=_list_missing)
     outcome = await run_once(
         engine=engine, config=_config(tmp_path), round_name="weekly0913"
     )
@@ -529,3 +545,278 @@ async def test_sending_intent_requeues_for_same_uuid_retry(tmp_path: Path) -> No
     assert outcome.status == "pending"
     assert (await repo.get_entry("weekly0913:sec_1")).status == "pending"
     channel.deliver_file.assert_awaited_once()
+
+
+# ── P5-17/18/19/22/23/24/25/27/29 regressions ─────────────────────────────
+
+
+def test_single_runner_lock_falls_back_to_msvcrt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Without fcntl the Windows byte-lock path still excludes contenders."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(weekly_module, "fcntl", None)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    msvcrt = MagicMock()
+    msvcrt.LK_NBLCK = 1
+    msvcrt.LK_UNLCK = 2
+    monkeypatch.setattr(weekly_module, "msvcrt", msvcrt)
+    with weekly_module.single_runner_lock() as acquired:
+        assert acquired is True
+    assert msvcrt.locking.call_count == 2  # lock + unlock
+    msvcrt.locking.reset_mock()
+    msvcrt.locking.side_effect = [OSError("held"), None]
+    with weekly_module.single_runner_lock() as acquired:
+        assert acquired is False
+
+
+def test_single_runner_lock_warns_without_any_primitive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With neither primitive the run proceeds loudly, never crashes."""
+    monkeypatch.setattr(weekly_module, "fcntl", None)
+    monkeypatch.setattr(weekly_module, "msvcrt", None)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    with weekly_module.single_runner_lock() as acquired:
+        assert acquired is True
+    assert "without host lock" in capsys.readouterr().err
+
+
+async def test_current_pair_keys_pages_past_first_chunk() -> None:
+    """Pair selection sees rows beyond the first 500 (no -1 sentinel)."""
+    from dyvine_hermes.weekly import _current_pair_keys
+
+    repo = FakeQueueRepository()
+    for index in range(502):
+        await repo.upsert_entry(
+            key=f"r1:s{index:04d}",
+            round="r1",
+            nickname=f"s{index}",
+            sec_user_id=f"s{index}",
+            mode="incremental",
+            status="completed" if index < 500 else "pending",
+        )
+    keys = await _current_pair_keys(SimpleNamespace(queue=repo), "r1")
+    assert keys == {"r1:s0500", "r1:s0501"}
+
+
+async def test_advance_claimed_dumps_traceback_on_unexpected_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unexpected step failures park the row AND keep the traceback."""
+    from dyvine_hermes.weekly import _advance_claimed
+
+    repo = FakeQueueRepository()
+    await _entry(repo, root=tmp_path / "Account", extra={"weekly": {}})
+    engine = _engine(repo)
+    engine.posts.download_new_posts = AsyncMock(side_effect=RuntimeError("boom-x"))
+    engine.operations.create_operation = AsyncMock(
+        return_value=SimpleNamespace(operation_id="op-1")
+    )
+    entry = await repo.get_entry("weekly0913:sec_1")
+    config = _config(tmp_path)
+    with pytest.raises(RuntimeError, match="boom-x"):
+        await _advance_claimed(
+            engine, entry, config, __import__("time").monotonic() + 3600, None
+        )
+    assert (await repo.get_entry("weekly0913:sec_1")).status == "needs_review"
+    assert "boom-x" in capsys.readouterr().err
+
+
+def test_run_cli_reports_lock_skip_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A contended lock skips with a stderr line (stdout stays empty)."""
+    from contextlib import contextmanager
+
+    from dyvine_hermes.weekly import run_cli
+
+    @contextmanager
+    def _held():  # type: ignore[no-untyped-def]
+        yield False
+
+    monkeypatch.setattr(weekly_module, "single_runner_lock", _held)
+
+    def _no_engine() -> None:
+        raise AssertionError("engine must not boot on a skip")
+
+    monkeypatch.setattr("dyvine_hermes.context.get_engine", _no_engine)
+    assert run_cli(round_name="weekly0913", dry_run=False) is None
+    captured = capsys.readouterr()
+    assert "holds the lock" in captured.err
+    assert captured.out == ""
+
+
+async def test_op_issue_carries_cause_note(tmp_path: Path) -> None:
+    """op_issue outcomes keep the recorded reason for the CLI alert."""
+    repo = FakeQueueRepository()
+    await _entry(repo, root=tmp_path / "Account", extra={"weekly": {}})
+    engine = _engine(repo)
+    result = SimpleNamespace(
+        operation_id="op-1", failed_count=1, truncated=False, new_count=0
+    )
+    engine.posts.download_new_posts = AsyncMock(return_value=result)
+    engine.operations.create_operation = AsyncMock(
+        return_value=SimpleNamespace(operation_id="op-1")
+    )
+    engine.operations.get_operation = AsyncMock(
+        return_value=SimpleNamespace(status="completed")
+    )
+    outcome = await run_once(
+        engine=engine, config=_config(tmp_path), round_name="weekly0913"
+    )
+    assert outcome.status == "op_issue"
+    assert outcome.note == "Incremental download is incomplete; inspect before delivery"
+
+
+async def test_stale_running_operation_is_superseded_without_raise(
+    tmp_path: Path,
+) -> None:
+    """A reclaimed row's stale op fails loudly even at attempts 0. (P5-27)"""
+    from dyvine_hermes.weekly_download import download_entry
+
+    repo = FakeQueueRepository()
+    await _entry(repo, root=tmp_path / "Account", extra={"weekly": {}})
+    await repo.update_entry("weekly0913:sec_1", operation_id="op-stale")
+    engine = _engine(repo)
+    stale = SimpleNamespace(
+        operation_id="op-stale",
+        subject_id="sec_1",
+        operation_type="user_posts_incremental_download",
+        status="running",
+        metadata={},
+    )
+    engine.operations.get_operation = AsyncMock(return_value=stale)
+    engine.operations.update_operation = AsyncMock()
+    engine.operations.create_operation = AsyncMock(
+        return_value=SimpleNamespace(operation_id="op-new")
+    )
+    engine.posts.download_new_posts = AsyncMock(
+        return_value=SimpleNamespace(
+            operation_id="op-new",
+            failed_count=0,
+            truncated=False,
+            new_count=0,
+            newest_aweme_id=None,
+        )
+    )
+    entry = await repo.get_entry("weekly0913:sec_1")
+    assert entry.attempts == 0
+    user_dir = tmp_path / "Account"
+    user_dir.mkdir()
+    fresh = SimpleNamespace(
+        status="completed", download_path=str(user_dir), message="done"
+    )
+
+    async def _get_op(operation_id: str) -> Any:
+        if operation_id == "op-stale":
+            return stale
+        return fresh
+
+    engine.operations.get_operation = AsyncMock(side_effect=_get_op)
+    config = _config(tmp_path)
+    advanced = await download_entry(
+        engine, entry, config, __import__("time").monotonic() + 3600
+    )
+    engine.operations.update_operation.assert_awaited_once()
+    assert advanced.status == "downloading"
+
+
+async def test_download_stops_a_send_window_early(tmp_path: Path) -> None:
+    """Downloads requeue when only the send window remains. (P5-29)"""
+    from dyvine_hermes.weekly_download import download_entry
+
+    repo = FakeQueueRepository()
+    await _entry(repo, root=tmp_path / "Account", extra={"weekly": {}})
+    engine = _engine(repo)
+    engine.operations.create_operation = AsyncMock()
+    entry = await repo.get_entry("weekly0913:sec_1")
+    config = _config(tmp_path)
+    advanced = await download_entry(
+        engine, entry, config, __import__("time").monotonic() + 300
+    )
+    assert advanced.status == "pending"
+    engine.operations.create_operation.assert_not_called()
+
+
+async def test_list_all_files_pages_without_sentinel() -> None:
+    """Ledger scans page in bounded chunks. (P5-24)"""
+    from dyvine_hermes.weekly_account import _list_all_files
+
+    seen: list[dict[str, Any]] = []
+    rows = [SimpleNamespace(media_id=f"m{i}") for i in range(600)]
+
+    async def _list_files(**kwargs: object) -> list[SimpleNamespace]:
+        seen.append(dict(kwargs))
+        offset = kwargs.get("offset", 0)
+        limit = kwargs.get("limit", 500)
+        assert isinstance(offset, int) and isinstance(limit, int)
+        return rows[offset : offset + limit]
+
+    ledger = SimpleNamespace(list_files=_list_files)
+    assert await _list_all_files(ledger, round="r1") == rows
+    assert [call["offset"] for call in seen] == [0, 500, 600]
+    assert all(call["limit"] == 500 for call in seen)
+
+
+async def test_same_content_hashes_off_the_event_loop(tmp_path: Path) -> None:
+    """Reconciliation hashing runs in a worker thread. (P5-23)"""
+    import asyncio
+
+    from dyvine.services.delivery_durable import media_identity
+
+    calls: list[str] = []
+    real_to_thread = asyncio.to_thread
+
+    async def _spy(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        calls.append(getattr(func, "__name__", "?"))
+        return await real_to_thread(func, *args, **kwargs)
+
+    user_dir = tmp_path / "Account"
+    post_dir = user_dir / "2026-09-13 09-00-00 post"
+    post_dir.mkdir(parents=True)
+    video = post_dir / "clip.mp4"
+    video.write_bytes(b"video")
+    digest = media_identity(sec_user_id="sec_1", user_dir=user_dir, file_path=video)[2]
+    repo = FakeQueueRepository()
+    await _entry(repo, root=user_dir)
+    engine = _engine(repo)
+    historical = SimpleNamespace(
+        relative_path=video.relative_to(user_dir).as_posix(),
+        status="sent",
+        content_sha256=digest,
+    )
+
+    async def _list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
+        return [historical] if kwargs.get("status") == "sent" else []
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=_list_files)
+    group = SimpleNamespace(
+        status="ready",
+        chat_id="oc_new",
+        topic_status="ready",
+        topic_message_id="om_topic",
+    )
+    channel = SimpleNamespace(
+        ensure_group=AsyncMock(return_value=group),
+        ensure_topic=AsyncMock(return_value=group),
+        deliver_file=AsyncMock(),
+    )
+    saved_to_thread = asyncio.to_thread
+    asyncio.to_thread = _spy  # type: ignore[method-assign]
+    try:
+        outcome = await run_once(
+            engine=engine,
+            config=_config(tmp_path),
+            round_name="weekly0913",
+            channel=channel,
+        )
+    finally:
+        asyncio.to_thread = saved_to_thread
+    assert outcome.status == "completed"
+    assert "media_identity" in calls

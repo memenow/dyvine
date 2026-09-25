@@ -8,10 +8,22 @@ import pytest
 from sqlalchemy import text
 
 from dyvine.db import (
+    BatchOutcome,
     DatabaseSessionFactory,
+    LegacyEvidenceBatchRow,
+    LegacyFailureBatchRow,
+    LegacySentBatchRow,
     PostgresDeliveryLedgerRepository,
     PostgresQueueRepository,
+    PostgresRoundRepository,
 )
+
+
+async def _seed_rounds(ledger: PostgresDeliveryLedgerRepository, *rounds: str) -> None:
+    """Seed round headers (FK parents of direct queue writes)."""
+    repo = PostgresRoundRepository(ledger._sessions)
+    for name in rounds:
+        await repo.upsert_round(round=name)
 
 
 @pytest.fixture
@@ -21,8 +33,12 @@ async def ledger(postgres_url: str):  # type: ignore[no-untyped-def]
         async with session.begin():
             await session.execute(
                 text(
-                    "TRUNCATE TABLE delivery_files, delivery_groups, download_queue, "
-                    "delivery_legacy_evidence, legacy_excluded_nicknames"
+                    # Children and parents in one statement (see the
+                    # contract suite's fixture note on shared-database
+                    # truncates under the round foreign keys).
+                    "TRUNCATE TABLE delivery_files, delivery_groups, "
+                    "download_queue, delivery_legacy_evidence, "
+                    "legacy_excluded_nicknames, delivery_rounds"
                 )
             )
     try:
@@ -78,7 +94,7 @@ async def test_file_intent_and_legacy_import_are_idempotent(
     assert (await ledger.mark_sent("media-1", "message-1")).status == "sent"
     assert (await ledger.get_file("media-1")).message_id == "message-1"
 
-    rows: list[dict[str, str | None]] = [
+    rows: list[LegacySentBatchRow] = [
         {
             "round": "old-round",
             "sec_user_id": "sec-1",
@@ -87,7 +103,10 @@ async def test_file_intent_and_legacy_import_are_idempotent(
             "legacy_progress_file": "/old/progress.json",
         }
     ]
-    assert await ledger.reserve_legacy_sent_batch(rows) == (1, 0)
+    first_outcome = await ledger.reserve_legacy_sent_batch(rows)
+    assert first_outcome == (1, 0)
+    assert isinstance(first_outcome, BatchOutcome)
+    assert (first_outcome.inserted, first_outcome.skipped) == (1, 0)
     assert await ledger.reserve_legacy_sent_batch(rows) == (0, 1)
     legacy = await ledger.find_legacy_sent(
         sec_user_id="sec-1", relative_path="date/old.mp4"
@@ -95,6 +114,12 @@ async def test_file_intent_and_legacy_import_are_idempotent(
     assert legacy is not None and legacy.content_sha256 is None
     assert legacy.status == "legacy_confirmed_sent"
     assert legacy.legacy_source_path == "/old/date/old.mp4"
+    # Reads normalize like writes: synonym paths hit the same identity.
+    for synonym in ("date//old.mp4", "date/./old.mp4"):
+        found = await ledger.find_legacy_sent(
+            sec_user_id="sec-1", relative_path=synonym
+        )
+        assert found is not None and found.media_id == legacy.media_id
 
     evidence = await ledger.upsert_legacy_evidence(
         source_file="/old/progress.json",
@@ -113,7 +138,7 @@ async def test_file_intent_and_legacy_import_are_idempotent(
         reason="nickname maps to multiple accounts",
     )
     assert evidence.evidence_id == duplicate.evidence_id
-    audit_rows: list[dict[str, str | None]] = [
+    audit_rows: list[LegacyEvidenceBatchRow] = [
         {
             "source_file": "/old/progress.json",
             "legacy_path": "/old/failed.mp4",
@@ -131,13 +156,17 @@ async def test_file_intent_and_legacy_import_are_idempotent(
     await ledger.upsert_excluded_nickname(
         nickname="excluded", source="excluded_accounts.json"
     )
-    assert await ledger.list_excluded_nicknames() == {"excluded"}
+    # Stored stripped, so exact-match filtering hits.
+    await ledger.upsert_excluded_nickname(
+        nickname="  padded  ", source="excluded_accounts.json"
+    )
+    assert await ledger.list_excluded_nicknames() == {"excluded", "padded"}
 
 
 async def test_legacy_permanent_failures_are_idempotent_and_preserve_sent(
     ledger: PostgresDeliveryLedgerRepository,
 ) -> None:
-    rows: list[dict[str, str | None]] = [
+    rows: list[LegacyFailureBatchRow] = [
         {
             "sec_user_id": "sec-1",
             "relative_path": "date/failed.mp4",
@@ -162,7 +191,7 @@ async def test_legacy_permanent_failures_are_idempotent_and_preserve_sent(
         is None
     )
 
-    sent_rows: list[dict[str, str | None]] = [
+    sent_rows: list[LegacySentBatchRow] = [
         {
             "round": "old-round",
             "sec_user_id": "sec-1",
@@ -189,6 +218,28 @@ async def test_legacy_permanent_failures_are_idempotent_and_preserve_sent(
         )
     with pytest.raises(ValueError, match="at most 500"):
         await ledger.reserve_legacy_permanent_failure_batch(rows * 501)
+
+
+async def test_legacy_dot_path_is_rejected_on_every_entry(
+    ledger: PostgresDeliveryLedgerRepository,
+) -> None:
+    """``'.'`` never becomes an account-root file identity."""
+    with pytest.raises(ValueError, match="account-relative"):
+        await ledger.reserve_legacy_sent(
+            round="old-round", sec_user_id="sec-1", relative_path="."
+        )
+    with pytest.raises(ValueError, match="account-relative"):
+        await ledger.reserve_legacy_sent_batch(
+            [
+                {
+                    "round": "old-round",
+                    "sec_user_id": "sec-1",
+                    "relative_path": ".",
+                }
+            ]
+        )
+    with pytest.raises(ValueError, match="account-relative"):
+        await ledger.find_legacy_sent(sec_user_id="sec-1", relative_path=".")
 
 
 async def test_legacy_unverified_hold_matches_exact_path(
@@ -242,6 +293,7 @@ async def test_legacy_group_adoption_requires_matching_queue(
     }
     with pytest.raises(ValueError, match="migrated queue"):
         await ledger.import_legacy_group_topic(**fields)
+    await _seed_rounds(ledger, "r2")
     queue = PostgresQueueRepository(ledger._sessions, owner_id="test")
     await queue.upsert_entry(
         key="r2:sec-2",

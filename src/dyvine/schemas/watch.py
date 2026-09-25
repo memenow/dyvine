@@ -10,7 +10,14 @@ reach the service.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
+
+from dyvine.core.settings import (
+    WATCH_LIVE_POLL_SECONDS_MAX,
+    WATCH_LIVE_POLL_SECONDS_MIN,
+    WATCH_POST_POLL_SECONDS_MAX,
+    WATCH_POST_POLL_SECONDS_MIN,
+)
 
 # Matches the alphabet Douyin emits for sec_user_id values, mirroring the
 # livestream schema so a watch target validates the same way a
@@ -32,8 +39,8 @@ class WatchSubscriptionCreate(BaseModel):
     )
     live_poll_seconds: int | None = Field(
         None,
-        ge=60,
-        le=3600,
+        ge=WATCH_LIVE_POLL_SECONDS_MIN,
+        le=WATCH_LIVE_POLL_SECONDS_MAX,
         description=(
             "Seconds between live-status checks. Omit to use the configured "
             "DOUYIN_WATCH_LIVE_POLL_SECONDS default."
@@ -41,8 +48,8 @@ class WatchSubscriptionCreate(BaseModel):
     )
     post_poll_seconds: int | None = Field(
         None,
-        ge=300,
-        le=86400,
+        ge=WATCH_POST_POLL_SECONDS_MIN,
+        le=WATCH_POST_POLL_SECONDS_MAX,
         description=(
             "Seconds between new-post checks. Omit to use the configured "
             "DOUYIN_WATCH_POST_POLL_SECONDS default."
@@ -68,10 +75,10 @@ class WatchSubscriptionResponse(BaseModel):
         ..., description="Seconds between live-status checks"
     )
     post_poll_seconds: int = Field(..., description="Seconds between new-post checks")
-    last_live_check: str | None = Field(
+    last_live_check: AwareDatetime | None = Field(
         None, description="ISO 8601 timestamp of the last live-status check"
     )
-    last_post_check: str | None = Field(
+    last_post_check: AwareDatetime | None = Field(
         None, description="ISO 8601 timestamp of the last new-post check"
     )
     newest_aweme_id: str | None = Field(
@@ -88,4 +95,4 @@ class WatchSubscriptionList(BaseModel):
     subscriptions: list[WatchSubscriptionResponse] = Field(
         default_factory=list, description="All watch subscriptions"
     )
-    total: int = Field(..., description="Total number of subscriptions")
+    total: int = Field(..., ge=0, description="Total number of subscriptions")

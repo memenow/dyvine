@@ -1,0 +1,14 @@
+# Automated dependency updates: keeps the playwright/Chromium pin and the
+# SHA-pinned GitHub Actions moving instead of rotting in place.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]

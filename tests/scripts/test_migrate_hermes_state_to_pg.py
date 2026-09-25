@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import pytest
 from sqlalchemy import text
@@ -131,7 +132,8 @@ async def _truncate(factory: DatabaseSessionFactory) -> None:
                 text(
                     "TRUNCATE TABLE operations, download_queue, send_status, "
                     "user_send_status, seed_accounts, legacy_excluded_nicknames, "
-                    "user_profiles, delivery_rounds"
+                    "user_profiles, delivery_files, delivery_groups, "
+                    "delivery_legacy_evidence, delivery_rounds"
                 )
             )
 
@@ -142,7 +144,7 @@ async def test_weekly_only_rows_require_reconciliation_and_rerun_is_idempotent(
     """A queue row wins over weekly progress; a rerun changes no row."""
     script = _load_script()
     source = _source_tree(tmp_path)
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     try:
         await _truncate(factory)
         first = script.MigrationReport()
@@ -166,9 +168,7 @@ async def test_weekly_only_rows_require_reconciliation_and_rerun_is_idempotent(
         async with factory.session() as session:
             rows = (
                 await session.execute(
-                    text(
-                        "SELECT key, status, extra FROM download_queue " "ORDER BY key"
-                    )
+                    text("SELECT key, status, extra FROM download_queue ORDER BY key")
                 )
             ).all()
             assert len(rows) == 2
@@ -257,7 +257,7 @@ async def test_distinct_accounts_sharing_legacy_key_are_rekeyed_once(
             ]
         },
     )
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     try:
         await _truncate(factory)
         dry_run = script.MigrationReport()
@@ -323,7 +323,7 @@ async def test_rekey_aborts_when_canonical_key_is_already_in_source(
         },
     ]
     _write_json(queue_path, doc)
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     try:
         await _truncate(factory)
         report = script.MigrationReport()
@@ -349,7 +349,7 @@ async def test_rekey_aborts_when_old_key_is_already_in_target(
     doc = json.loads(queue_path.read_text(encoding="utf-8"))
     doc["entries"][0]["key"] = "round-1:shared-name"
     _write_json(queue_path, doc)
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     try:
         await _truncate(factory)
         first = script.MigrationReport()
@@ -402,7 +402,7 @@ async def test_invalid_source_prevents_every_table_write(
         source["seed_path"],
         [{"sec_user_id": "sec-a"}, {"nickname": "Missing sec"}],
     )
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     try:
         await _truncate(factory)
         report = script.MigrationReport()
@@ -495,3 +495,137 @@ def test_database_url_is_read_from_named_environment_variable(
     )
     assert code == 0
     assert seen == ["postgresql+asyncpg://example"]
+
+
+def test_sqlite_rows_reads_special_character_paths_without_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``?``/``#`` in a db path must not corrupt the read-only SQLite URI."""
+    script = _load_script()
+    names = ["sp ace.db", "we?ird.db", "hash#tag.db", "per%cent.db"]
+    for name in names:
+        connection = sqlite3.connect(tmp_path / name)
+        try:
+            connection.execute("CREATE TABLE send_status (nickname TEXT)")
+            connection.execute("INSERT INTO send_status VALUES (?)", (name,))
+            connection.commit()
+        finally:
+            connection.close()
+    seen: dict[str, Any] = {}
+    real_connect = sqlite3.connect
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        seen["uri"] = args[0]
+        seen["kwargs"] = kwargs
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(script.sqlite3, "connect", _spy)
+    before = {path.name for path in tmp_path.iterdir()}
+    for name in names:
+        seen.clear()
+        assert script._sqlite_rows(tmp_path / name, "send_status") == [
+            {"nickname": name}
+        ]
+        # The path is data; ``mode=ro`` must remain the only URI parameter.
+        parts = urlsplit(str(seen["uri"]))
+        assert parts.query == "mode=ro"
+        assert unquote(parts.path) == str((tmp_path / name).resolve())
+        assert seen["kwargs"] == {"uri": True}
+    # A read-only read must not create stray files beside the source db.
+    assert {path.name for path in tmp_path.iterdir()} == before
+
+
+def test_sqlite_rows_missing_file_names_the_path(tmp_path: Path) -> None:
+    """A missing source db fails fast with its path, not a bare driver error."""
+    script = _load_script()
+    with pytest.raises(FileNotFoundError, match="absent.db"):
+        script._sqlite_rows(tmp_path / "absent.db", "send_status")
+
+
+def test_postgres_failure_reports_the_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A dead Postgres URL must surface the driver error on stderr."""
+    script = _load_script()
+    source = _source_tree(tmp_path)
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://example.invalid/db")
+
+    class _Unreachable:
+        def __init__(self, url: str) -> None:
+            raise RuntimeError("connection refused: db.example:5432")
+
+    monkeypatch.setattr(script, "DatabaseSessionFactory", _Unreachable)
+    code = script.main(
+        [
+            "--state-dir",
+            str(source["state"]),
+            "--seed-path",
+            str(source["seed_path"]),
+            "--users-db",
+            str(source["users_db"]),
+            "--weekly-glob",
+            str(source["weekly_path"]),
+        ]
+    )
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "connection refused" in err
+    assert "db.example:5432" in err
+
+
+@pytest.mark.parametrize(
+    ("raw", "valid"),
+    [
+        ('{"key": "value"}', True),
+        (None, True),
+        ("", True),
+        ('{"unclosed"', False),
+        ('"just a string"', False),
+        ("[1, 2]", False),
+        (5, False),
+    ],
+)
+def test_operation_metadata_validation(tmp_path: Path, raw: Any, valid: bool) -> None:
+    """Unparseable/non-object metadata is a validation issue, not ``{}``."""
+    script = _load_script()
+    row = {
+        "operation_id": "op-1",
+        "operation_type": "download",
+        "subject_id": "sec-a",
+        "status": "done",
+        "message": "ok",
+        "metadata": raw,
+    }
+    payload = script._operation_payload(row)
+    if valid:
+        assert isinstance(payload, dict)
+    else:
+        assert isinstance(payload, str)
+        assert "metadata" in payload
+
+
+async def test_invalid_operations_metadata_aborts_before_any_write(
+    tmp_path: Path,
+) -> None:
+    """A corrupt metadata cell counts as invalid, like any other bad row."""
+    script = _load_script()
+    source = _source_tree(tmp_path)
+    connection = sqlite3.connect(source["state"] / "operations.db")
+    try:
+        connection.execute(
+            "CREATE TABLE operations (operation_id TEXT, operation_type TEXT, "
+            "subject_id TEXT, status TEXT, message TEXT, metadata TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO operations VALUES (?, ?, ?, ?, ?, ?)",
+            ("op-1", "download", "sec-a", "done", "ok", '{"unclosed"'),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    report = script.MigrationReport()
+    await script._run(_args(script, source, "", "--dry-run"), report)
+    assert report.invalid == 1
+    assert report.issues[0].source == "operations"
+    assert "metadata" in report.issues[0].reason
+    assert report.sources["download_queue"].imported == 0

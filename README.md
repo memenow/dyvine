@@ -1,8 +1,8 @@
 # Dyvine
 
-Dyvine is a hermes-native plugin for Douyin download automation: 35
+Dyvine is a hermes-native plugin for Douyin download automation, with
 tools covering users, posts, livestreams, download queues, Feishu group
-delivery, and profile snapshots, with persistent operation tracking in
+delivery, and profile snapshots, plus persistent operation tracking in
 Postgres and optional Cloudflare R2 archival. It wraps the third-party
 `f2` Douyin SDK. There is no HTTP surface.
 
@@ -12,7 +12,7 @@ Architecture diagrams are available in
 
 ## Features
 
-- 35 idempotent, single-shot tools: share-link resolution, profiles,
+- Idempotent, single-shot tools: share-link resolution, profiles,
   social graph, post listing and bulk download (post/like/collection/
   music/mix/collects), comments, stats, feeds, livestream download at
   the highest available quality, live IM, queue and round management,
@@ -75,22 +75,12 @@ checkout with the same `DATABASE_URL`):
 uv run alembic upgrade head
 ```
 
-On the current Hermes v0.21.1 host, the plugin doctor reported that Python
-dependencies require manual installation. The cutover installed only
-missing versions pinned by `plugin.yaml` with `uv pip --no-deps` in the
-Hermes environment. The published `f2` dependency metadata conflicts with
-Hermes's core pins, so the install preserved its existing `pydantic`,
-`httpx`, and `websockets` versions. Doctor registered all 35 tools and a
-read-only profile call passed, but neither check caught the missing
-Playwright dependency `pyee==13.0.1` from `uv.lock`. The engine wires its
-request signer on first use. The initial post-list probe still returned
-HTTP 403 until that locked dependency was installed. The signer then became
-ready, a signed read-only post-list call returned four posts, and engine
-shutdown closed the signer cleanly. On a
-target host, verify the matching Playwright Chromium build and all locked
-runtime dependencies, then read one authorized `dyvine.posts.list` page
-before enabling weekly sends. A profile check and doctor alone do not
-establish post-list readiness.
+Install every version pinned by `plugin.yaml` **with dependencies**
+(never `--no-deps`: `playwright` needs its transitive packages such as
+`pyee`), plus the matching Playwright Chromium build. Then read one
+authorized `dyvine.posts.list` page before enabling weekly sends: a
+profile check and doctor alone do not establish post-list readiness, and
+an unsigned signer surfaces as HTTP 403 on Argus-gated endpoints.
 
 ## Quick Start (development)
 
@@ -197,9 +187,9 @@ Set `DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai`,
 `DYVINE_WEEKLY_FIRST_AUTO_DATE` to the first intended automatic Sunday
 (`YYYY-MM-DD`), `DYVINE_WEEKLY_CUTOVER_ROUND` to the active legacy round,
 and `DYVINE_WEEKLY_OWNER_OPEN_ID=ou_...` in the Hermes runtime
-environment. For this cutover, the first automatic date is `2026-09-27`
-and the active legacy round is supplied privately; these are deployment
-values, not project defaults. The owner ID must be a Feishu `open_id`. The runner
+environment. Set the first automatic date to the cutover Sunday and
+supply the active legacy round privately; these are deployment values,
+not project defaults. The owner ID must be a Feishu `open_id`. The runner
 also uses the existing
 `DATABASE_URL`, `DOUYIN_COOKIE`, `FEISHU_APP_ID`,
 `FEISHU_APP_SECRET`, and `DOUYIN_DOWNLOAD_ROOT` settings. Keep the old

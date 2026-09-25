@@ -24,6 +24,27 @@ from __future__ import annotations
 import importlib
 from typing import Any
 
+# Dunder probes issued by copy/pickle/inspect against arbitrary objects.
+# ``__getattr__`` must answer these with ``AttributeError`` instead of
+# resolving f2: none of them can be satisfied without the real symbol,
+# and resolving would run import-time HTTPS as a side effect. Any other
+# missing attribute still resolves, since only the real symbol can say
+# whether it exists.
+_NON_RESOLVING_DUNDERS = frozenset(
+    {
+        "__copy__",
+        "__deepcopy__",
+        "__getstate__",
+        "__setstate__",
+        "__reduce__",
+        "__reduce_ex__",
+        "__getnewargs__",
+        "__getnewargs_ex__",
+        "__getinitargs__",
+        "__wrapped__",
+    }
+)
+
 
 class LazyF2Symbol:
     """Stand-in for one f2 SDK symbol, resolved on first use.
@@ -40,16 +61,39 @@ class LazyF2Symbol:
         self._resolved: Any = None
 
     def _resolve(self) -> Any:
-        """Import and cache the real SDK symbol."""
-        if self._resolved is None:
-            module = importlib.import_module(self._module_name)
-            self._resolved = getattr(module, self._symbol_name)
-        return self._resolved
+        """Import and cache the real SDK symbol.
+
+        Reads coordinates from ``self.__dict__`` instead of attribute
+        access: during ``__new__``/copy/pickle intermediate states the
+        instance may not have ``_resolved`` set yet, and going through
+        ``__getattr__`` there would recurse forever.
+        """
+        state = self.__dict__
+        resolved = state.get("_resolved")
+        if resolved is None:
+            try:
+                module_name = state["_module_name"]
+                symbol_name = state["_symbol_name"]
+            except KeyError as exc:
+                raise AttributeError(
+                    "LazyF2Symbol is uninitialized; cannot resolve"
+                ) from exc
+            module = importlib.import_module(module_name)
+            resolved = getattr(module, symbol_name)
+            state["_resolved"] = resolved
+        return resolved
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Construct/call the resolved SDK symbol."""
         return self._resolve()(*args, **kwargs)
 
     def __getattr__(self, name: str) -> Any:
-        """Serve class-attribute access (e.g. classmethods) post-resolve."""
+        """Serve class-attribute access (e.g. classmethods) post-resolve.
+
+        Interpreter probes (copy/pickle/inspect dunders) are rejected
+        without resolving: answering them would run f2's import-time
+        HTTPS side effects from an innocent ``copy.copy``.
+        """
+        if name in _NON_RESOLVING_DUNDERS:
+            raise AttributeError(name)
         return getattr(self._resolve(), name)

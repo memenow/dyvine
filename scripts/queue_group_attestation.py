@@ -290,16 +290,32 @@ def attest_group(
     keys_file_sha256: str | None = None,
 ) -> GroupAttestation | str:
     """Require a complete one-chat file-name multiset proof for this account."""
-    key = report["key"]
-    sec = report["sec_user_id"]
+    key = report.get("key")
+    sec = report.get("sec_user_id")
+    identity_round = report.get("round")
+    identity_nickname = report.get("nickname")
+    if (
+        not isinstance(key, str)
+        or not key
+        or not isinstance(sec, str)
+        or not sec
+        or not isinstance(identity_round, str)
+        or not identity_round
+        or not isinstance(identity_nickname, str)
+        or not identity_nickname
+    ):
+        return "report identity is incomplete"
     chat_id = group.chat_id
     if not chat_id or len(current_queues) != 1:
         return "current queue or group is not unique"
     aliases = set(known_aliases or ())
     aliases.update(row.nickname for row in historical_queues)
-    aliases.update(
-        row["nickname"] for row in all_report_rows if row.get("sec_user_id") == sec
-    )
+    for item in all_report_rows:
+        if item.get("sec_user_id") != sec:
+            continue
+        name = item.get("nickname")
+        if isinstance(name, str) and name:
+            aliases.add(name)
     queue_chats = {row.chat_id for row in historical_queues if row.chat_id}
     owners_by_round: dict[tuple[str, str], set[str]] = defaultdict(set)
     owners_by_name: dict[str, set[str]] = defaultdict(set)
@@ -376,9 +392,9 @@ def attest_group(
     if (
         account.get("send_blocked") is not True
         or account.get("key") != key
-        or account.get("round") != report["round"]
+        or account.get("round") != identity_round
         or account.get("sec_user_id") != sec
-        or account.get("nickname") != report["nickname"]
+        or account.get("nickname") != identity_nickname
         or account.get("chat_id") != chat_id
         or account.get("topic_message_id") != group.topic_message_id
         or account.get("legacy_safe_sent_paths")

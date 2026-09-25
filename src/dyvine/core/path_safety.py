@@ -3,9 +3,9 @@
 User-controllable strings (livestream ``output_path``, future bulk
 download targets, etc.) must never be allowed to write outside the
 configured download root. ``resolve_within_root`` enforces that
-invariant in a single place so service/schema callers cannot accidentally
-build a path that escapes the jail via traversal segments or absolute
-prefixes.
+invariant in a single place: relative and absolute inputs alike are
+contained, and anything resolving outside the root -- via traversal
+segments, absolute prefixes, or symlink indirection -- is rejected.
 """
 
 from __future__ import annotations
@@ -28,6 +28,34 @@ def get_task_workspace_root() -> Path:
     return get_download_root() / TASK_WORKSPACE_SUBDIR
 
 
+def _lexical_normalize(path: Path) -> Path:
+    """Collapse ``.``/``..`` segments without touching the disk.
+
+    Purely lexical: ``..`` pops the previous segment, never crossing
+    the anchor of an absolute path. Callers normalize *before* the
+    symlink walk so a ``..`` cannot hide a later segment from the scan
+    (``root/nonexistent/../evil`` is ``root/evil`` and must be scanned
+    as such). Normalization never replaces the resolve-then-contain
+    check below: a ``..`` after a symlink resolves through the link
+    target on disk, which no lexical pass can predict.
+    """
+    stack: list[str] = []
+    for part in path.parts:
+        if part == ".":
+            continue
+        if part == "..":
+            if stack and stack[-1] != ".." and stack[-1] != path.anchor:
+                stack.pop()
+                continue
+            if not path.is_absolute():
+                stack.append(part)
+            continue
+        stack.append(part)
+    if not stack:
+        return Path(path.anchor or ".")
+    return Path(stack[0], *stack[1:])
+
+
 def _reject_symlink_segments(target: Path, root: Path) -> None:
     """Reject *target* if any segment between *root* and *target*
     is a symlink on disk.
@@ -37,16 +65,24 @@ def _reject_symlink_segments(target: Path, root: Path) -> None:
     directory **inside** the root would be considered legal even
     though the indirection is exactly what an attacker needs to
     redirect a follow-up ``mkdir`` / ``open``. Walking the *unresolved*
-    segments rejects that case at validation time. Segments that do
-    not yet exist are skipped because they cannot be symlinks yet —
-    the post-mutation :func:`ensure_within_root` covers the window
-    where a brand-new segment is replaced by a symlink before the
-    next syscall.
+    segments rejects that case at validation time. A missing tail
+    segment ends the walk: it cannot be a symlink yet, and the
+    post-mutation :func:`ensure_within_root` covers the window where a
+    brand-new segment is replaced by a symlink before the next syscall.
+
+    Callers run this scan twice -- once on the raw joined path and once
+    on the lexically normalized path. Either pass alone has a blind
+    spot: the raw walk stops at the first missing segment (missing a
+    symlink hidden behind ``nonexistent/..``), while the normalized
+    walk cannot see a symlink consumed by ``..`` (``root/link/../file``
+    resolves *through* ``link`` on disk even though it normalizes to
+    ``root/file``).
     """
     try:
         relative = target.relative_to(root)
     except ValueError:
-        # ``resolve_within_root`` already raised; defensive guard only.
+        # Outside the jail: the containment check below raises the
+        # real error; there is nothing to scan here.
         return
 
     walked = root
@@ -61,10 +97,48 @@ def _reject_symlink_segments(target: Path, root: Path) -> None:
                 details={"segment": str(walked), "download_root": str(root)},
             )
         if not walked.exists():
-            # Future segments will be created by ``mkdir`` and cannot
-            # be symlinks yet; the rest of the walk has nothing to
-            # check.
             break
+
+
+def _resolve_inside_root(candidate: Path, root: Path, *, after_mutation: bool) -> Path:
+    """Scan, resolve, and contain *candidate* under *root*.
+
+    Single choke point shared by :func:`resolve_within_root` (pre-use
+    check) and :func:`ensure_within_root` (post-mutation re-check):
+
+    1. ``lstat``-walk the raw joined path (catches symlinks a later
+       ``..`` would consume during resolution),
+    2. lexically normalize and ``lstat``-walk again (catches symlinks
+       a ``..`` hides from the raw walk),
+    3. ``resolve()`` and require containment (catches indirections the
+       walks cannot see, e.g. a mount swap under an existing segment).
+
+    ``OSError``/``RuntimeError`` from ``resolve()`` (I/O failures,
+    symlink loops) surface as ``ValidationError`` so callers only ever
+    handle one failure type from the jail.
+    """
+    _reject_symlink_segments(candidate, root)
+    normalized = _lexical_normalize(candidate)
+    _reject_symlink_segments(normalized, root)
+    try:
+        resolved = normalized.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValidationError(
+            "Could not resolve path inside the download root",
+            details={"path": str(candidate), "error": str(exc)},
+        ) from exc
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValidationError(
+            (
+                "Path escaped the download root after mutation"
+                if after_mutation
+                else "Path escapes the configured download root"
+            ),
+            details={"path": str(resolved), "download_root": str(root)},
+        ) from exc
+    return resolved
 
 
 def resolve_within_root(
@@ -93,28 +167,12 @@ def resolve_within_root(
     """
     root = get_download_root()
     if raw is None or raw == "":
-        target_unresolved = root / default_subdir if default_subdir else root
+        candidate = root / default_subdir if default_subdir else root
     else:
-        candidate = Path(raw).expanduser()
-        target_unresolved = candidate if candidate.is_absolute() else root / candidate
+        joined = Path(raw).expanduser()
+        candidate = joined if joined.is_absolute() else root / joined
 
-    # Reject indirection through symlink segments BEFORE ``resolve()``
-    # silently follows them, so an in-jail alias pointing at another
-    # in-jail directory is treated as suspicious rather than legal.
-    _reject_symlink_segments(target_unresolved, root)
-
-    target = target_unresolved.resolve()
-
-    try:
-        target.relative_to(root)
-    except ValueError as exc:
-        raise ValidationError(
-            "Path escapes the configured download root",
-            details={
-                "input": str(raw) if raw is not None else None,
-                "download_root": str(root),
-            },
-        ) from exc
+    target = _resolve_inside_root(candidate, root, after_mutation=False)
 
     if must_exist and not target.exists():
         raise ValidationError(
@@ -132,29 +190,12 @@ def ensure_within_root(path: Path) -> None:
     after :func:`resolve_within_root` should invoke this helper as the
     final step of the jail check. It defends against the residual TOCTOU
     where a directory segment is swapped for a symlink between the
-    initial resolve and the syscall that creates the target. The
-    re-resolve runs ``Path.resolve()`` again so any newly introduced
-    symlink is followed, and the symlink-segment scan rejects any
-    indirection through the freshly-mutated tree.
+    initial resolve and the syscall that creates the target: the
+    unresolved tree is ``lstat``-scanned for newly introduced
+    indirections, then re-resolved and contained again.
     """
     root = get_download_root()
-    try:
-        resolved = path.resolve()
-    except OSError as exc:
-        raise ValidationError(
-            "Could not re-resolve path after filesystem mutation",
-            details={"path": str(path), "error": str(exc)},
-        ) from exc
-
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise ValidationError(
-            "Path escaped the download root after mutation",
-            details={"path": str(resolved), "download_root": str(root)},
-        ) from exc
-
-    _reject_symlink_segments(resolved, root)
+    _resolve_inside_root(Path(path).expanduser(), root, after_mutation=True)
 
 
 def relative_to_download_root(path: str | Path | None) -> str | None:
@@ -169,8 +210,14 @@ def relative_to_download_root(path: str | Path | None) -> str | None:
     if not target.is_absolute():
         return str(target)
     root = get_download_root()
+    # Only the documented legacy case (a path outside the jail) falls
+    # back to the basename. ``OSError``/``RuntimeError`` from
+    # ``resolve()`` (I/O failures, symlink loops) propagate: callers
+    # pass freshly created paths inside download flows, so surfacing
+    # the true cause beats recording a bogus basename.
+    resolved = target.resolve()
     try:
-        return str(target.resolve().relative_to(root))
+        return str(resolved.relative_to(root))
     except ValueError:
         # Path lives outside the jail (legacy records pre-dating the
         # validator). Surface only the basename rather than the full

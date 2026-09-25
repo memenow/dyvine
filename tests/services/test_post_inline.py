@@ -115,3 +115,20 @@ async def test_full_download_checkpoints_next_complete_page_before_retry(
     saved = await store.get_operation(operation_id)
     assert saved.status == "failed"
     assert saved.metadata["resume_cursor"] == 123
+
+
+async def test_inline_bulk_preserves_original_error() -> None:
+    """Inline failures persist the root cause, not a canned string."""
+    from unittest.mock import patch
+
+    service, store, operation_id = await _service()
+    with patch.object(
+        service,
+        "_run_bulk_download",
+        new=AsyncMock(side_effect=RuntimeError("profile exploded")),
+    ):
+        with pytest.raises(RuntimeError, match="profile exploded"):
+            await service.download_bulk_inline("sec_1", operation_id=operation_id)
+    operation = await store.get_operation(operation_id)
+    assert operation.status == "failed"
+    assert operation.error == "profile exploded"

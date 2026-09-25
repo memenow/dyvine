@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
+import socket
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,11 +15,14 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from ..core.exceptions import DeliveryError
+from ..core.logging import ContextLogger
 from ..db.protocols import DeliveryLedgerRepository
 from ..db.records import DeliveryGroupRecord, FileDeliveryRecord
 
 if TYPE_CHECKING:
-    from .delivery import AccountDelivery
+    from .delivery import AccountDelivery, FeishuTransport
+
+logger = ContextLogger(__name__)
 
 _CHATS_URL = "https://open.feishu.cn/open-apis/im/v1/chats?user_id_type=open_id"
 _IM_IMAGES_URL = "https://open.feishu.cn/open-apis/im/v1/images"
@@ -30,7 +34,11 @@ _MAX_AVATAR_BYTES = 5 * 1024 * 1024
 
 
 class _Channel(Protocol):
-    _transport: Any
+    # Typed as the transport protocol (whose methods all return
+    # ``dict``), not ``Any``: every ``data.get(...)`` below is then
+    # contract-safe instead of one untyped ``None`` away from an
+    # ``AttributeError``.
+    _transport: FeishuTransport
 
     async def _auth_token(self) -> str: ...
 
@@ -116,28 +124,84 @@ async def _post_json(
     return dict(data) if isinstance(data, dict) else {}
 
 
+async def _ensure_public_https_host(host: str) -> None:
+    """Resolve ``host`` and require every address to be globally routable.
+
+    The avatar URL comes from an upstream user profile, so a bare
+    literal-IP check is not enough: a domain resolving to loopback,
+    link-local, or RFC 1918 space would otherwise turn this fetch into
+    server-side request forgery. DNS runs in a worker thread because
+    ``getaddrinfo`` blocks. Residual limitation: a hostile DNS owner can
+    still rebind between this check and the fetch (TOCTOU); closing that
+    needs IP-pinned dialing, which httpx does not offer per-request.
+    """
+    try:
+        infos = await asyncio.to_thread(
+            socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM
+        )
+    except socket.gaierror as error:
+        raise DeliveryError(
+            f"Avatar host does not resolve: {host}", reason="failed"
+        ) from error
+    if not infos:
+        raise DeliveryError("Avatar URL host is invalid", reason="failed")
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise DeliveryError("Avatar URL host is invalid", reason="failed") from None
+        if not address.is_global:
+            raise DeliveryError("Avatar URL host is invalid", reason="failed")
+
+
 async def _upload_avatar(channel: _Channel, avatar_url: str) -> str:
     parsed = urlparse(avatar_url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise DeliveryError("Avatar URL must use HTTPS", reason="failed")
-    if parsed.hostname == "localhost":
+    try:
+        port = parsed.port
+    except ValueError:
+        raise DeliveryError("Avatar URL host is invalid", reason="failed") from None
+    host = parsed.hostname
+    if (
+        host == "localhost"
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+    ):
         raise DeliveryError("Avatar URL host is invalid", reason="failed")
     try:
-        literal_ip = ipaddress.ip_address(parsed.hostname)
+        literal_ip = ipaddress.ip_address(host)
     except ValueError:
         literal_ip = None
-    if literal_ip is not None and not literal_ip.is_global:
-        raise DeliveryError("Avatar URL host is invalid", reason="failed")
-    async with httpx.AsyncClient(follow_redirects=False) as client:
-        async with client.stream("GET", avatar_url, timeout=30.0) as response:
-            response.raise_for_status()
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > _MAX_AVATAR_BYTES:
-                    raise DeliveryError("Avatar image size is invalid", reason="failed")
-                chunks.append(chunk)
+    if literal_ip is not None:
+        if not literal_ip.is_global:
+            raise DeliveryError("Avatar URL host is invalid", reason="failed")
+    else:
+        await _ensure_public_https_host(host)
+    # Redirects stay disabled and only 200 is accepted: a redirect body
+    # stored as avatar bytes would launder attacker-chosen content through
+    # a validated URL. Transport failures surface as ``DeliveryError``
+    # (never raw httpx) so ledger callers keep one error contract.
+    try:
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            async with client.stream("GET", avatar_url, timeout=30.0) as response:
+                if response.status_code != 200:
+                    raise DeliveryError(
+                        f"Avatar fetch returned status {response.status_code}",
+                        reason="failed",
+                    )
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > _MAX_AVATAR_BYTES:
+                        raise DeliveryError(
+                            "Avatar image size is invalid", reason="failed"
+                        )
+                    chunks.append(chunk)
+    except httpx.HTTPError as error:
+        raise DeliveryError(f"Avatar fetch failed: {error}", reason="failed") from error
     content = b"".join(chunks)
     if not content or len(content) > _MAX_AVATAR_BYTES:
         raise DeliveryError("Avatar image size is invalid", reason="failed")
@@ -369,8 +433,15 @@ async def deliver_file(
     parent_id: str,
 ) -> FileDeliveryRecord:
     """Send at most once outside Feishu's one-hour UUID dedupe window."""
-    media_id, relative, content_hash = media_identity(
-        sec_user_id=sec_user_id, user_dir=user_dir, file_path=file_path
+    # Hash off the loop: the chunked read walks up to 29 MB of media on
+    # every call, which would stall sibling deliveries sharing this loop.
+    # (Single-syscall probes like ``stat``/``is_dir`` below stay inline;
+    # only bulk I/O earns a thread hop.)
+    media_id, relative, content_hash = await asyncio.to_thread(
+        media_identity,
+        sec_user_id=sec_user_id,
+        user_dir=user_dir,
+        file_path=file_path,
     )
     legacy = await ledger.find_legacy_sent(
         sec_user_id=sec_user_id, relative_path=relative
@@ -423,12 +494,44 @@ async def deliver_file(
             parent_id=parent_id,
             request_uuid=item.send_uuid,
         )
-    except DeliveryError:
+    except DeliveryError as err:
+        if err.reason == "failed":
+            # Terminal client-side failure (never retryable): park for a
+            # human instead of spinning in ``sending`` across weekly runs.
+            logger.warning(
+                "file send failed terminally; flagging for review",
+                extra={
+                    "media_id": media_id,
+                    "chat_id": chat_id,
+                    "error": str(err),
+                },
+            )
+            return await ledger.mark_file_review(media_id)
+        # Transport failure: the send may or may not have landed. Staying
+        # in ``sending`` keeps the UUID valid for a retry inside the
+        # 55-minute window (re-entry past the window self-parks).
+        logger.warning(
+            "file send outcome unknown; keeping sending for retry",
+            extra={
+                "media_id": media_id,
+                "chat_id": chat_id,
+                "error": str(err),
+            },
+        )
         return item
     if error is not None:
+        code = error.get("code") if isinstance(error, dict) else None
+        logger.warning(
+            "file send rejected; keeping sending for retry",
+            extra={"media_id": media_id, "chat_id": chat_id, "code": code},
+        )
         return item
     message_id = (response or {}).get("message_id")
     if not isinstance(message_id, str) or not message_id:
+        logger.warning(
+            "file send acked without message_id; keeping sending for retry",
+            extra={"media_id": media_id, "chat_id": chat_id},
+        )
         return item
     return await ledger.mark_sent(media_id, message_id)
 

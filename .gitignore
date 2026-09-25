@@ -6,19 +6,19 @@ __pycache__/
 *$py.class
 *.so
 
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
+# Distribution / packaging (root-anchored: must not swallow same-named source dirs)
+/.Python
+/build/
+/develop-eggs/
+/dist/
+/downloads/
+/eggs/
+/.eggs/
+/lib/
+/lib64/
+/parts/
+/sdist/
+/var/
 wheels/
 share/python-wheels/
 *.egg-info/
@@ -76,14 +76,14 @@ cython_debug/
 # Environments
 # ==============================================================================
 .env
-.env.local
-.env.*.local
-.venv/
-venv/
-env/
-ENV/
-env.bak/
-venv.bak/
+.env.*
+!.env.example
+/.venv/
+/venv/
+/env/
+/ENV/
+/env.bak/
+/venv.bak/
 
 # ==============================================================================
 # IDEs and Editors
@@ -118,10 +118,11 @@ logs/
 *.sqlite3-shm
 *.sqlite3-wal
 *.sqlite3-journal
+# f2 user cache opened via a CWD-relative path (posts.py); unanchored on
+# purpose so a checkout never commits account data created from any CWD.
 douyin_users.db
 
 # Downloaded content and temp files
-downloads/
 data/douyin/downloads/
 data/douyin/state/
 data/douyin/logs/
@@ -133,17 +134,13 @@ temp_downloads/
 *.temp
 
 # Local batch-download input list (real IDs) and outputs; commit users.txt.example only
-users.txt
-saved_downloads/
+/users.txt
+!/users.txt.example
+/saved_downloads/
 
 # Test data
 test/data/
 tests/fixtures/data/
-
-# ==============================================================================
-# Server runtimes (legacy; the plugin has no HTTP surface)
-# ==============================================================================
-server.log
 
 # ==============================================================================
 # Security & Credentials
@@ -151,9 +148,18 @@ server.log
 *.key
 *.pem
 *.cert
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+*credentials*.json
+service-account*.json
+*secret*.yaml
+*secret*.yml
 config/production.py
+config/*.local.py
 .r2-config
-r2-credentials.json
 
 # ==============================================================================
 # Monitoring & Data
@@ -171,7 +177,6 @@ docs/build/
 /site
 
 # Jupyter notebooks
-*.ipynb_checkpoints
 .ipynb_checkpoints/
 
 # ==============================================================================
@@ -194,5 +199,4 @@ AGENTS.local.md
 *.backup
 
 # Pre-commit hooks
-.pre-commit-config.yaml.backup
 .claude/*.local.md

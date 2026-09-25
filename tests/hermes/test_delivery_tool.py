@@ -21,6 +21,9 @@ class MissingGroupLedger:
 async def test_tool_refuses_unverified_chat(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from dyvine.core.settings import settings as live_settings
+
+    monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
     monkeypatch.setattr(
         tools_mod,
         "get_engine",

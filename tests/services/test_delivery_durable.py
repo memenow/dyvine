@@ -445,6 +445,12 @@ async def test_group_avatar_is_uploaded_before_creation(
         "dyvine.services.delivery_durable.httpx.AsyncClient",
         lambda **kwargs: AvatarClient(),
     )
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.socket.getaddrinfo",
+        lambda *args, **kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
     ledger, transport = Ledger(), Transport()
     channel = _channel(transport)
     group = await channel.ensure_group(
@@ -458,6 +464,163 @@ async def test_group_avatar_is_uploaded_before_creation(
     assert group.avatar_key == "avatar-key-1"
     assert transport.uploads[0]["field"] == "image"
     assert transport.posts[0]["payload"]["avatar"] == "avatar-key-1"
+
+
+def _public_dns(monkeypatch: pytest.MonkeyPatch, ip: str = "93.184.216.34") -> None:
+    """Stub DNS resolution to one address (tests must not touch the net)."""
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", (ip, 443))],
+    )
+
+
+async def test_avatar_domain_resolving_private_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A domain pointing at link-local space never gets an HTTP request."""
+
+    def _no_http(**kwargs: Any) -> Any:
+        raise AssertionError("must not fetch")
+
+    monkeypatch.setattr("dyvine.services.delivery_durable.httpx.AsyncClient", _no_http)
+    _public_dns(monkeypatch, "169.254.169.254")
+    ledger, transport = Ledger(), Transport()
+    channel = _channel(transport)
+    with pytest.raises(DeliveryError, match="host is invalid"):
+        await channel.ensure_group(
+            ledger=ledger,
+            round="r1",
+            sec_user_id="sec-1",
+            nickname="nick",
+            owner_open_id="ou_user",
+            avatar_url="https://evil.example/avatar.jpg",
+        )
+
+
+async def test_avatar_rejects_port_and_userinfo_before_any_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-443 ports and userinfo fail closed without DNS or HTTP."""
+
+    def _no_net(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("must not touch the network")
+
+    monkeypatch.setattr("dyvine.services.delivery_durable.socket.getaddrinfo", _no_net)
+    monkeypatch.setattr("dyvine.services.delivery_durable.httpx.AsyncClient", _no_net)
+    ledger, transport = Ledger(), Transport()
+    channel = _channel(transport)
+    for url in (
+        "https://img.example:8443/avatar.jpg",
+        "https://user:pass@img.example/avatar.jpg",
+        "https://127.0.0.1/avatar.jpg",
+    ):
+        with pytest.raises(DeliveryError, match="host is invalid|must use HTTPS"):
+            await channel.ensure_group(
+                ledger=ledger,
+                round="r1",
+                sec_user_id="sec-1",
+                nickname="nick",
+                owner_open_id="ou_user",
+                avatar_url=url,
+            )
+
+
+async def test_avatar_redirect_body_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 302 body is not stored as avatar bytes (no redirect following)."""
+
+    class RedirectClient:
+        async def __aenter__(self) -> RedirectClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        @asynccontextmanager
+        async def stream(
+            self, method: str, url: str, *, timeout: float
+        ) -> AsyncIterator[httpx.Response]:
+            response = httpx.Response(
+                302,
+                content=b"redirect",
+                headers={"location": "https://evil.example/x"},
+                request=httpx.Request("GET", url),
+            )
+            yield response
+
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.httpx.AsyncClient",
+        lambda **kwargs: RedirectClient(),
+    )
+    _public_dns(monkeypatch)
+    ledger, transport = Ledger(), Transport()
+    channel = _channel(transport)
+    with pytest.raises(DeliveryError, match="status 302"):
+        await channel.ensure_group(
+            ledger=ledger,
+            round="r1",
+            sec_user_id="sec-1",
+            nickname="nick",
+            owner_open_id="ou_user",
+            avatar_url="https://img.example/avatar.jpg",
+        )
+
+
+async def test_terminal_send_failure_parks_for_review(tmp_path: Path) -> None:
+    """A terminal (non-retryable) send error parks instead of spinning."""
+    user_dir, path = _media(tmp_path)
+    ledger, transport = Ledger(), Transport()
+    transport.responses.append(DeliveryError("client misused", reason="failed"))
+    channel = _channel(transport)
+    result = await channel.deliver_file(
+        ledger=ledger,
+        round="r1",
+        sec_user_id="sec-1",
+        user_dir=user_dir,
+        file_path=path,
+        chat_id="chat-1",
+        parent_id="topic-1",
+    )
+    assert result.status == "needs_review"
+
+
+async def test_api_error_send_stays_retryable(tmp_path: Path) -> None:
+    """A Feishu API rejection keeps the UUID for a later retry."""
+    user_dir, path = _media(tmp_path)
+    ledger, transport = Ledger(), Transport()
+    transport.responses.append({"code": 1, "msg": "rate limited"})
+    channel = _channel(transport)
+    kwargs = {
+        "ledger": ledger,
+        "round": "r1",
+        "sec_user_id": "sec-1",
+        "user_dir": user_dir,
+        "file_path": path,
+        "chat_id": "chat-1",
+        "parent_id": "topic-1",
+    }
+    assert (await channel.deliver_file(**kwargs)).status == "sending"
+    assert (await channel.deliver_file(**kwargs)).status == "sent"
+
+
+async def test_send_ack_without_message_id_stays_retryable(tmp_path: Path) -> None:
+    """A malformed success ack keeps sending instead of marking sent."""
+    user_dir, path = _media(tmp_path)
+    ledger, transport = Ledger(), Transport()
+    transport.responses.append({"code": 0, "data": {}})
+    channel = _channel(transport)
+    kwargs = {
+        "ledger": ledger,
+        "round": "r1",
+        "sec_user_id": "sec-1",
+        "user_dir": user_dir,
+        "file_path": path,
+        "chat_id": "chat-1",
+        "parent_id": "topic-1",
+    }
+    assert (await channel.deliver_file(**kwargs)).status == "sending"
+    assert (await channel.deliver_file(**kwargs)).status == "sent"
 
 
 async def test_topic_uses_persisted_uuid() -> None:

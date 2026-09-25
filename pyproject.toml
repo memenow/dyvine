@@ -20,6 +20,8 @@ dev = [
 
 [project]
 name = "dyvine"
+# Single version line: ``plugin.yaml`` + both ``__version__`` values match
+# this (pinned by tests/test_packaging.py). Bump all four together.
 version = "1.0.0"
 description = "Hermes plugin for Douyin download automation (users, posts, livestreams, queues, Feishu delivery)"
 requires-python = ">=3.12"
@@ -38,11 +40,15 @@ dependencies = [
     # hermes installs entry-point plugins from these bounds.
     "pydantic>=2,<3.0.0",
     "pydantic-settings>=2.15.0,<3.0.0",
-    # ``httpx`` floor admits f2 0.0.1.7's ``==0.27.2`` pin: loose
-    # installers (pip, hermes plugin installs) resolve f2's pins,
-    # while ``[tool.uv] override-dependencies`` below lifts the
-    # development lockfile to 0.28+. Dyvine's own httpx usage is
-    # compatible with both surfaces.
+    # ``httpx`` floor MUST keep admitting f2 0.0.1.7's ``==0.27.2``
+    # pin: loose installers (pip, hermes plugin installs) resolve f2's
+    # pins, so raising this floor would make pip installs unresolvable.
+    # ``[tool.uv] override-dependencies`` below lifts the development
+    # lockfile to 0.28+. Both surfaces are safe: 0.27.2 -> 0.28.1 only
+    # *removes* the deprecated ``app``/``proxies`` Client kwargs, which
+    # neither dyvine nor f2 uses (verified by signature diff; pinned by
+    # tests/test_packaging.py). Do not raise this floor until f2 loosens
+    # its ``==`` metadata upstream.
     "httpx>=0.27.2,<1.0.0",
     "python-dotenv>=1.2.3,<2.0.0",
 
@@ -105,11 +111,17 @@ filterwarnings = [
     # dependency still imports the old path at module scope. Drop this
     # once the import moves.
     "ignore:The anyio\\.abc\\.BlockingPortal alias is deprecated:DeprecationWarning",
-    # pytest 9 promotes unraisable exceptions (e.g. GC-time SSL socket
-    # cleanup) to a warning. Older test environments did not surface
-    # these; the underlying socket is closed by the OS regardless.
-    # CPython phrases the notice two ways depending on where finalization
-    # runs ("in ..." vs "while finalizing ..."); ignore both spellings.
+    # pytest 9 promotes unraisable exceptions to warnings. The SSLSocket
+    # ignores below silence exactly one proven source: f2's import-time
+    # msToken fetch (``TokenManager.gen_real_msToken`` runs a real HTTPS
+    # POST from a pydantic model class body at import and never closes
+    # its one-shot sync client; see tests/test_import_time_network.py).
+    # The dropped client is unreachable from dyvine, and GC timing makes
+    # per-module narrowing unsound (first f2 import happens once per
+    # session; the warning can surface in any later test), so the ignore
+    # stays global. TODO: drop once f2 closes that client or defers the
+    # fetch off the import path. CPython phrases the notice two ways
+    # ("in ..." vs "while finalizing ..."); ignore both spellings.
     "ignore:Exception ignored in.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
     "ignore:Exception ignored while finalizing.*ssl\\.SSLSocket:pytest.PytestUnraisableExceptionWarning",
 ]
@@ -118,11 +130,20 @@ markers = [
 ]
 
 [project.entry-points."hermes_agent.plugins"]
-# Entry-point (pip) distribution: ``dyvine_hermes`` exposes register().
+# Host convention: hermes loads this module and then calls its
+# ``register(PluginContext)`` (see src/dyvine_hermes/__init__.py), so the
+# value is deliberately a bare module, not ``dyvine_hermes:register``.
 dyvine = "dyvine_hermes"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dyvine", "src/dyvine_hermes"]
+# NOTE: plugin.yaml and alembic/ are intentionally directory-distribution
+# only (verified: `uv build --wheel` ships just the two packages above).
+# plugin.yaml is read from repo checkouts by directory installs (pip
+# installs use entry_points.txt instead), and migrations run operator-side
+# from a checkout (`uv run alembic upgrade head`), never in the gateway
+# host — see plugin.yaml. Do not force-include either without revisiting
+# that contract (pinned by tests/test_packaging.py).
 
 [tool.uv]
 # f2 0.0.1.7 (the upstream Douyin SDK) pins the packages below with ``==``
@@ -177,7 +198,25 @@ select = [
     "B",  # flake8-bugbear
     "C4", # flake8-comprehensions
     "UP", # pyupgrade
+    "S",  # flake8-bandit
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: asserts are pytest's mechanism; /tmp paths, fake secrets, list-arg
+# subprocess, and constant-table SQL are fixture idioms, not findings.
+"tests/**" = ["S101", "S106", "S108", "S603", "S608"]
+# Operator migration scripts: SQL interpolates module-constant table names
+# only (no user input reaches the query). Remaining asserts are
+# provably-held narrowing with per-line noqa + proof comments.
+"scripts/**" = ["S608"]
+# FP: "0.0.0.0" is a loopback-host *string* in a comparison set, not a bind.
+"src/dyvine/core/settings.py" = ["S104"]
+# FP: Feishu token *endpoint URL*, not a credential.
+"src/dyvine/services/delivery.py" = ["S105"]
+# FP: random.uniform is poll-interval jitter, not cryptography.
+"src/dyvine/services/watch.py" = ["S311"]
+# FP: all three except-pass sites are documented best-effort cleanup.
+"src/dyvine/services/websign.py" = ["S110"]
 
 [tool.ruff.lint.isort]
 # Mirror the [tool.isort] override: ./alembic/ is a repo-local package

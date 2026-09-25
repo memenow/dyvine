@@ -9,6 +9,7 @@ interface. ``send_via_hermes`` uses the gateway's other channels.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -98,6 +99,9 @@ class HttpxFeishuTransport:
         timeout: float,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        # Cancellation (BaseException) deliberately propagates: a
+        # cancelled send must abort, never convert into a retryable
+        # error that the weekly loop would re-queue.
         try:
             if self._client is not None:
                 response = await self._client.request(
@@ -110,9 +114,25 @@ class HttpxFeishuTransport:
                     )
             data = response.json()
             return dict(data) if isinstance(data, dict) else {}
-        except Exception as error:
+        except (httpx.HTTPError, ValueError) as error:
+            # Transport failures (timeouts, connects) and undecodable
+            # bodies (transient gateway HTML): worth another attempt.
             raise DeliveryError(
                 f"Feishu {method} {url} failed: {error}", reason="retryable"
+            ) from error
+        except RuntimeError as error:
+            # Client misuse (used after close, shutdown pool): the same
+            # call can never succeed, so fail terminally instead of
+            # burning the weekly retry budget on a deterministic error.
+            raise DeliveryError(
+                f"Feishu {method} {url} failed: {error}", reason="failed"
+            ) from error
+        except Exception as error:
+            # Unexpected transport bugs surface terminally (chained, so
+            # the traceback survives) rather than masquerading as
+            # retryable work.
+            raise DeliveryError(
+                f"Feishu {method} {url} failed: {error}", reason="failed"
             ) from error
 
     async def post_json(
@@ -139,18 +159,22 @@ class HttpxFeishuTransport:
         file_field: str = "file",
         timeout: float = 300.0,
     ) -> dict[str, Any]:
-        """POST a multipart file upload and return the decoded response."""
+        """POST a multipart file upload and return the decoded response.
+
+        Streams the open handle (constant memory) instead of reading
+        the whole file: callers gate size upstream, but the transport
+        must not turn a concurrently growing file into an OOM.
+        """
         with file_path.open("rb") as handle:
-            content = handle.read()
-        files = {file_field: (file_name, content, "application/octet-stream")}
-        return await self._request(
-            "POST",
-            url,
-            headers=headers,
-            timeout=timeout,
-            files=files,
-            data=fields or {},
-        )
+            files = {file_field: (file_name, handle, "application/octet-stream")}
+            return await self._request(
+                "POST",
+                url,
+                headers=headers,
+                timeout=timeout,
+                files=files,
+                data=fields or {},
+            )
 
     async def put_json(
         self,
@@ -537,10 +561,14 @@ async def send_via_hermes(
     """
     if not target or not target.strip():
         raise DeliveryError("hermes send target is required", reason="failed")
-    command = ["hermes", "send", "--to", target, "--json"]
+    # Option values use the ``--opt=value`` form and the positional message
+    # sits behind ``--``: targets (``-100…`` group ids), subjects, and
+    # messages are all external strings, and a leading ``-`` would otherwise
+    # be parsed as a hermes flag (option injection / failed sends).
+    command = ["hermes", "send", f"--to={target}", "--json"]
     if subject:
-        command += ["--subject", subject]
-    command.append(message)
+        command += [f"--subject={subject}"]
+    command += ["--", message]
     try:
         process = await asyncio.create_subprocess_exec(
             *command,
@@ -552,14 +580,23 @@ async def send_via_hermes(
                 process.communicate(), timeout=timeout_seconds
             )
         except TimeoutError as error:
+            # Reap the child: kill without wait leaves a zombie and leaks
+            # the stdout/stderr pipes. (On Python >= 3.11
+            # ``asyncio.TimeoutError`` IS ``TimeoutError``, so this one
+            # clause covers ``wait_for`` on this codebase's >= 3.12 floor.)
             process.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             raise DeliveryError(
                 f"hermes send timed out after {timeout_seconds}s",
                 reason="retryable",
             ) from error
     except FileNotFoundError as error:
         raise DeliveryError("hermes CLI not found on PATH", reason="failed") from error
-    assert process.returncode is not None
+    if process.returncode is None:
+        # Never ``assert``: it compiles out under ``python -O`` and would
+        # leave the exit-code branch below unguarded.
+        raise DeliveryError("hermes send returncode unknown", reason="retryable")
     stdout = raw_out.decode("utf-8", "replace")
     stderr = raw_err.decode("utf-8", "replace")
     if process.returncode != 0:

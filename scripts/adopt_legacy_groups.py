@@ -33,6 +33,7 @@ import json
 import os
 import sqlite3
 import sys
+import traceback
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
@@ -72,7 +73,11 @@ class GroupReader(FeishuReader):
         chat = data.get("chat")
         details = chat if isinstance(chat, dict) else data
         if "chat_id" not in details:
-            return {**details, "chat_id": chat_id}
+            # Never backfill the identity under check: echoing the
+            # request id would make the caller's
+            # ``chat_id != candidate.chat_id`` comparison tautological
+            # and launder error responses as verified reads.
+            raise AuditError("chat details are missing chat_id")
         return details
 
 
@@ -107,7 +112,11 @@ async def _verify(
 ) -> tuple[str, dict[str, Any]]:
     if candidate.issue:
         return candidate.issue, {}
-    assert candidate.chat_id and candidate.topic_message_id
+    if not candidate.chat_id or not candidate.topic_message_id:
+        # Frozen-input guard, never ``assert`` (stripped under -O):
+        # hold the row with its own decision instead of crashing the
+        # batch scan or probing Feishu with an empty identity.
+        return "frozen_identity_incomplete", {}
     try:
         chat = await reader.get_chat(candidate.chat_id)
         if chat.get("chat_id") != candidate.chat_id:
@@ -387,9 +396,14 @@ async def _run_with_reader(
                         }
                     )
                     continue
-                assert ledger is not None
-                assert candidate.round and candidate.sec_user_id and candidate.nickname
-                assert candidate.chat_id
+                if ledger is None:
+                    raise AuditError("apply requires a delivery ledger")
+                if not (
+                    candidate.round and candidate.sec_user_id and candidate.nickname
+                ):
+                    raise AuditError("verified account identity is incomplete")
+                if not candidate.chat_id:
+                    raise AuditError("verified chat identity is incomplete")
                 topic_id = (
                     _nonempty(evidence.get("discovered_topic_message_id"))
                     if discovered
@@ -496,6 +510,7 @@ def main(argv: list[str] | None = None) -> int:
             "legacy group adoption failed; inspect target before retrying",
             file=sys.stderr,
         )
+        traceback.print_exc()
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0

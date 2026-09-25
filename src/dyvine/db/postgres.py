@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Concatenate, Protocol
 
 from sqlalchemy import and_, delete, desc, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from ..core.exceptions import (
@@ -183,6 +184,20 @@ def _tracked[SelfT: _HealthTrackable, **P, R](
 def _now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(UTC).isoformat()
+
+
+def _checked_fields(
+    allowed: frozenset[str], fields: dict[str, Any], *, method: str
+) -> dict[str, Any]:
+    """Return ``fields`` unchanged, rejecting unknown names loudly.
+
+    A silently dropped ``**fields`` typo reads as success while losing
+    the write; fail fast with the offending names instead.
+    """
+    unknown = sorted(name for name in fields if name not in allowed)
+    if unknown:
+        raise ValueError(f"{method} got unknown field(s): {', '.join(unknown)}")
+    return dict(fields)
 
 
 def _operation_to_record(row: OperationRow) -> OperationRecord:
@@ -453,16 +468,15 @@ class PostgresOperationRepository:
 
         Stored metadata is preserved when the caller passes no explicit
         ``metadata`` value (an explicit ``None`` clears it to ``{}``
-        instead of raising); unknown-only field sets verify existence and
-        return the row unchanged. Every update refreshes ``heartbeat_at``
+        instead of raising); unknown field names raise ``ValueError``
+        and an empty field set verifies existence, returning the row
+        unchanged. Every update refreshes ``heartbeat_at``
         (but not ``updated_at`` semantics beyond the write itself) so
         active tasks are never mistaken for orphans.
         """
-        requested = {
-            key: value
-            for key, value in fields.items()
-            if key in _OPERATION_UPDATABLE_FIELDS
-        }
+        requested = _checked_fields(
+            _OPERATION_UPDATABLE_FIELDS, fields, method="update_operation"
+        )
         async with self._sessions.session() as session:
             async with session.begin():
                 row = await session.get(OperationRow, operation_id)
@@ -666,7 +680,7 @@ class PostgresWatchRepository:
                     ).scalar_one_or_none()
                     if duplicate is not None:
                         raise WatchDuplicateError(
-                            f"Watch subscription for user {user_id} " "already exists",
+                            f"Watch subscription for user {user_id} already exists",
                             details={"user_id": user_id},
                         )
                     total = (
@@ -740,12 +754,14 @@ class PostgresWatchRepository:
     async def update_subscription(
         self, subscription_id: str, **fields: Any
     ) -> WatchSubscriptionRecord:
-        """Update allowed fields and return the new state."""
-        requested = {
-            key: value
-            for key, value in fields.items()
-            if key in _SUBSCRIPTION_UPDATABLE_FIELDS
-        }
+        """Update allowed fields and return the new state.
+
+        Unknown field names raise ``ValueError``; an empty field set
+        verifies existence and returns the row unchanged.
+        """
+        requested = _checked_fields(
+            _SUBSCRIPTION_UPDATABLE_FIELDS, fields, method="update_subscription"
+        )
         async with self._sessions.session() as session:
             async with session.begin():
                 row = await session.get(WatchSubscriptionRow, subscription_id)
@@ -808,57 +824,71 @@ class PostgresQueueRepository:
         operation_id: str | None = None,
         op_status: str | None = None,
         op_message: str | None = None,
-        attempts: int = 0,
+        attempts: int | None = None,
         serial_group: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> QueueEntryRecord:
-        """Insert or replace the entry at ``key`` and return it."""
+        """Insert or replace the entry at ``key`` and return it.
+
+        One atomic ``INSERT ... ON CONFLICT DO UPDATE``: concurrent
+        upserts of the same key converge instead of racing a
+        check-then-act into ``IntegrityError``. The conflict branch
+        rewrites the payload but never touches liveness (``owner_id``
+        and ``heartbeat_at`` belong to the claim/release paths), and
+        ``attempts``/``extra`` change only when explicitly passed, so a
+        field-patching call cannot zero the retry budget.
+        """
         stamp = _now_iso()
+        statement = (
+            pg_insert(DownloadQueueRow)
+            .values(
+                key=key,
+                round=round,
+                kind=kind,
+                nickname=nickname,
+                sec_user_id=sec_user_id,
+                chat_id=chat_id,
+                homepage=homepage,
+                mode=mode,
+                cutoff=cutoff,
+                status=status,
+                operation_id=operation_id,
+                op_status=op_status,
+                op_message=op_message,
+                attempts=0 if attempts is None else attempts,
+                serial_group=serial_group,
+                owner_id=self._owner_id,
+                heartbeat_at=stamp,
+                extra=dict(extra or {}),
+                created_at=stamp,
+                updated_at=stamp,
+            )
+            .on_conflict_do_update(
+                index_elements=["key"],
+                set_={
+                    "round": round,
+                    "kind": kind,
+                    "nickname": nickname,
+                    "sec_user_id": sec_user_id,
+                    "chat_id": chat_id,
+                    "homepage": homepage,
+                    "mode": mode,
+                    "cutoff": cutoff,
+                    "status": status,
+                    "operation_id": operation_id,
+                    "op_status": op_status,
+                    "op_message": op_message,
+                    **({"attempts": attempts} if attempts is not None else {}),
+                    "serial_group": serial_group,
+                    **({"extra": dict(extra)} if extra is not None else {}),
+                    "updated_at": stamp,
+                },
+            )
+            .returning(DownloadQueueRow)
+        )
         async with self._sessions.session() as session:
             async with session.begin():
-                row = await session.get(DownloadQueueRow, key)
-                if row is None:
-                    row = DownloadQueueRow(
-                        key=key,
-                        round=round,
-                        kind=kind,
-                        nickname=nickname,
-                        sec_user_id=sec_user_id,
-                        chat_id=chat_id,
-                        homepage=homepage,
-                        mode=mode,
-                        cutoff=cutoff,
-                        status=status,
-                        operation_id=operation_id,
-                        op_status=op_status,
-                        op_message=op_message,
-                        attempts=attempts,
-                        serial_group=serial_group,
-                        owner_id=self._owner_id,
-                        heartbeat_at=stamp,
-                        extra=dict(extra or {}),
-                        created_at=stamp,
-                        updated_at=stamp,
-                    )
-                    session.add(row)
-                else:
-                    row.round = round
-                    row.kind = kind
-                    row.nickname = nickname
-                    row.sec_user_id = sec_user_id
-                    row.chat_id = chat_id
-                    row.homepage = homepage
-                    row.mode = mode
-                    row.cutoff = cutoff
-                    row.status = status
-                    row.operation_id = operation_id
-                    row.op_status = op_status
-                    row.op_message = op_message
-                    row.attempts = attempts
-                    row.serial_group = serial_group
-                    row.extra = dict(extra or {})
-                    row.updated_at = stamp
-                    row.heartbeat_at = stamp
+                row = (await session.execute(statement)).scalars().one()
         return _queue_to_record(row)
 
     @_tracked
@@ -909,6 +939,20 @@ class PostgresQueueRepository:
         return int(total or 0)
 
     @_tracked
+    async def count_by_status(self, *, round: str | None = None) -> dict[str, int]:
+        """Tally entries by status in one ``GROUP BY`` snapshot."""
+        statement = (
+            select(DownloadQueueRow.status, func.count())
+            .select_from(DownloadQueueRow)
+            .group_by(DownloadQueueRow.status)
+        )
+        if round is not None:
+            statement = statement.where(DownloadQueueRow.round == round)
+        async with self._sessions.session() as session:
+            rows = (await session.execute(statement)).all()
+        return {str(status): int(count) for status, count in rows}
+
+    @_tracked
     async def claim_next(
         self, *, round: str | None = None, keys: set[str] | None = None
     ) -> QueueEntryRecord | None:
@@ -918,6 +962,16 @@ class PostgresQueueRepository:
         concurrent claimers never collide; entries whose
         ``serial_group`` already has a ``downloading`` row are skipped.
         The optional key filter is evaluated inside the locked scan.
+
+        The busy-group pre-filter only sees *committed* rows, so a
+        same-group claim racing us is invisible to it. Grouped
+        candidates therefore take a transaction-scoped advisory lock
+        on their group and recheck before flipping: exactly one
+        replica can hold a group at a time, and the loser rolls back
+        and reports ``None`` (the caller retries on its next round).
+        Lock order is always row-then-advisory with at most one
+        advisory per claim, so no deadlock cycle is possible, and the
+        lock dies with the transaction.
         """
         async with self._sessions.session() as session:
             async with session.begin():
@@ -946,6 +1000,28 @@ class PostgresQueueRepository:
                 row = (await session.execute(statement)).scalars().first()
                 if row is None:
                     return None
+                if row.serial_group is not None:
+                    await session.execute(
+                        select(
+                            func.pg_advisory_xact_lock(
+                                func.hashtext(f"dyvine_serial_group:{row.serial_group}")
+                            )
+                        )
+                    )
+                    busy = (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(DownloadQueueRow)
+                            .where(DownloadQueueRow.serial_group == row.serial_group)
+                            .where(DownloadQueueRow.status == "downloading")
+                            .where(DownloadQueueRow.key != row.key)
+                        )
+                    ).scalar()
+                    if int(busy or 0) > 0:
+                        # Lost the race: roll back so the candidate row
+                        # is freed immediately, and report empty.
+                        await session.rollback()
+                        return None
                 stamp = _now_iso()
                 row.status = "downloading"
                 row.owner_id = self._owner_id
@@ -955,12 +1031,14 @@ class PostgresQueueRepository:
 
     @_tracked
     async def update_entry(self, key: str, **fields: Any) -> QueueEntryRecord:
-        """Update allowed fields, refresh liveness, return the new state."""
-        requested = {
-            name: value
-            for name, value in fields.items()
-            if name in _QUEUE_UPDATABLE_FIELDS
-        }
+        """Update allowed fields, refresh liveness, return the new state.
+
+        Unknown field names raise ``ValueError``; an empty field set
+        verifies existence and returns the row unchanged.
+        """
+        requested = _checked_fields(
+            _QUEUE_UPDATABLE_FIELDS, fields, method="update_entry"
+        )
         async with self._sessions.session() as session:
             async with session.begin():
                 row = await session.get(DownloadQueueRow, key)
@@ -992,7 +1070,9 @@ class PostgresQueueRepository:
         ``attempts`` bump stay exact even when several rows share one
         write stamp (frozen clocks in tests); stale sets are small
         enough that one select plus per-row writes beats stamp
-        matching.
+        matching. The scan locks its rows (``SKIP LOCKED``) so two
+        replicas sweeping together split the stale set instead of
+        double-bumping ``attempts`` and double-counting.
         """
         cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
         cutoff_iso = cutoff.isoformat()
@@ -1013,6 +1093,7 @@ class PostgresQueueRepository:
                 (DownloadQueueRow.owner_id.is_(None))
                 | (DownloadQueueRow.owner_id != self._owner_id)
             )
+            .with_for_update(skip_locked=True)
         )
         if round is not None:
             statement = statement.where(DownloadQueueRow.round == round)
@@ -1056,34 +1137,45 @@ class PostgresSendStatusRepository:
         failed_files: int | None = None,
         status: str | None = None,
     ) -> SendStatusRecord:
-        """Insert or replace the row for ``nickname`` and return it."""
+        """Insert or replace the row for ``nickname`` and return it.
+
+        One atomic ``INSERT ... ON CONFLICT DO UPDATE`` so concurrent
+        writers converge instead of racing check-then-act into
+        ``IntegrityError``.
+        """
         stamp = _now_iso()
+        statement = (
+            pg_insert(SendStatusRow)
+            .values(
+                nickname=nickname,
+                sec_user_id=sec_user_id,
+                chat_id=chat_id,
+                batch=batch,
+                total_files=total_files,
+                sent_files=sent_files,
+                failed_files=failed_files,
+                status=status,
+                created_at=stamp,
+                updated_at=stamp,
+            )
+            .on_conflict_do_update(
+                index_elements=["nickname"],
+                set_={
+                    "sec_user_id": sec_user_id,
+                    "chat_id": chat_id,
+                    "batch": batch,
+                    "total_files": total_files,
+                    "sent_files": sent_files,
+                    "failed_files": failed_files,
+                    "status": status,
+                    "updated_at": stamp,
+                },
+            )
+            .returning(SendStatusRow)
+        )
         async with self._sessions.session() as session:
             async with session.begin():
-                row = await session.get(SendStatusRow, nickname)
-                if row is None:
-                    row = SendStatusRow(
-                        nickname=nickname,
-                        sec_user_id=sec_user_id,
-                        chat_id=chat_id,
-                        batch=batch,
-                        total_files=total_files,
-                        sent_files=sent_files,
-                        failed_files=failed_files,
-                        status=status,
-                        created_at=stamp,
-                        updated_at=stamp,
-                    )
-                    session.add(row)
-                else:
-                    row.sec_user_id = sec_user_id
-                    row.chat_id = chat_id
-                    row.batch = batch
-                    row.total_files = total_files
-                    row.sent_files = sent_files
-                    row.failed_files = failed_files
-                    row.status = status
-                    row.updated_at = stamp
+                row = (await session.execute(statement)).scalars().one()
         return _send_to_record(row)
 
     @_tracked
@@ -1159,30 +1251,41 @@ class PostgresSeedRepository:
         batch: str | None = None,
         excluded: bool = False,
     ) -> SeedAccountRecord:
-        """Insert or replace the seed row and return it."""
+        """Insert or replace the seed row and return it.
+
+        One atomic ``INSERT ... ON CONFLICT DO UPDATE`` so concurrent
+        writers converge instead of racing check-then-act into
+        ``IntegrityError``.
+        """
         stamp = _now_iso()
+        statement = (
+            pg_insert(SeedAccountRow)
+            .values(
+                sec_user_id=sec_user_id,
+                nickname=nickname,
+                source_url=source_url,
+                source=source,
+                batch=batch,
+                excluded=excluded,
+                created_at=stamp,
+                updated_at=stamp,
+            )
+            .on_conflict_do_update(
+                index_elements=["sec_user_id"],
+                set_={
+                    "nickname": nickname,
+                    "source_url": source_url,
+                    "source": source,
+                    "batch": batch,
+                    "excluded": excluded,
+                    "updated_at": stamp,
+                },
+            )
+            .returning(SeedAccountRow)
+        )
         async with self._sessions.session() as session:
             async with session.begin():
-                row = await session.get(SeedAccountRow, sec_user_id)
-                if row is None:
-                    row = SeedAccountRow(
-                        sec_user_id=sec_user_id,
-                        nickname=nickname,
-                        source_url=source_url,
-                        source=source,
-                        batch=batch,
-                        excluded=excluded,
-                        created_at=stamp,
-                        updated_at=stamp,
-                    )
-                    session.add(row)
-                else:
-                    row.nickname = nickname
-                    row.source_url = source_url
-                    row.source = source
-                    row.batch = batch
-                    row.excluded = excluded
-                    row.updated_at = stamp
+                row = (await session.execute(statement)).scalars().one()
         return _seed_to_record(row)
 
     @_tracked
@@ -1237,23 +1340,53 @@ class PostgresProfileRepository:
     async def upsert_profile(
         self, *, sec_user_id: str, **fields: Any
     ) -> UserProfileRecord:
-        """Insert or patch the snapshot row and return it."""
-        known = {
-            name: value for name, value in fields.items() if name in _PROFILE_COLUMNS
-        }
+        """Insert or patch the snapshot row and return it.
+
+        Unknown field names raise ``ValueError``. One atomic
+        ``INSERT ... ON CONFLICT`` so concurrent writers converge; an
+        empty field set inserts a bare row when missing and otherwise
+        leaves the row untouched.
+        """
+        known = _checked_fields(_PROFILE_COLUMNS, fields, method="upsert_profile")
         stamp = _now_iso()
+        if not known:
+            # Nothing to write: insert a bare row when missing, else
+            # leave the stored row untouched (not even ``updated_at``).
+            bare = (
+                pg_insert(UserProfileRow)
+                .values(
+                    sec_user_id=sec_user_id,
+                    created_at=stamp,
+                    updated_at=stamp,
+                )
+                .on_conflict_do_nothing(index_elements=["sec_user_id"])
+            )
+            async with self._sessions.session() as session:
+                async with session.begin():
+                    await session.execute(bare)
+                    row = await session.get(UserProfileRow, sec_user_id)
+                    if row is None:
+                        raise UserProfileNotFoundError(
+                            f"Profile upsert lost its own row for {sec_user_id}"
+                        )
+            return _profile_to_record(row)
+        statement = (
+            pg_insert(UserProfileRow)
+            .values(
+                sec_user_id=sec_user_id,
+                **known,
+                created_at=stamp,
+                updated_at=stamp,
+            )
+            .on_conflict_do_update(
+                index_elements=["sec_user_id"],
+                set_={**known, "updated_at": stamp},
+            )
+            .returning(UserProfileRow)
+        )
         async with self._sessions.session() as session:
             async with session.begin():
-                row = await session.get(UserProfileRow, sec_user_id)
-                if row is None:
-                    row = UserProfileRow(sec_user_id=sec_user_id, **known)
-                    row.created_at = stamp
-                    row.updated_at = stamp
-                    session.add(row)
-                elif known:
-                    for name, value in known.items():
-                        setattr(row, name, value)
-                    row.updated_at = stamp
+                row = (await session.execute(statement)).scalars().one()
         return _profile_to_record(row)
 
     @_tracked
@@ -1283,23 +1416,32 @@ class PostgresRoundRepository:
     async def upsert_round(
         self, *, round: str, note: str | None = None
     ) -> DeliveryRoundRecord:
-        """Insert or touch the round header and return it."""
+        """Insert or touch the round header and return it.
+
+        One atomic ``INSERT ... ON CONFLICT DO UPDATE`` so concurrent
+        writers converge; a ``None`` note keeps the stored one.
+        """
         stamp = _now_iso()
+        conflict_set: dict[str, Any] = {"updated_at": stamp}
+        if note is not None:
+            conflict_set["note"] = note
+        statement = (
+            pg_insert(DeliveryRoundRow)
+            .values(
+                round=round,
+                note=note,
+                created_at=stamp,
+                updated_at=stamp,
+            )
+            .on_conflict_do_update(
+                index_elements=["round"],
+                set_=conflict_set,
+            )
+            .returning(DeliveryRoundRow)
+        )
         async with self._sessions.session() as session:
             async with session.begin():
-                row = await session.get(DeliveryRoundRow, round)
-                if row is None:
-                    row = DeliveryRoundRow(
-                        round=round,
-                        note=note,
-                        created_at=stamp,
-                        updated_at=stamp,
-                    )
-                    session.add(row)
-                else:
-                    if note is not None:
-                        row.note = note
-                    row.updated_at = stamp
+                row = (await session.execute(statement)).scalars().one()
         return _round_to_record(row)
 
     @_tracked

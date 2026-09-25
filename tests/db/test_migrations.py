@@ -32,7 +32,10 @@ def _alembic(fn_name: str, cfg: Config, target: str) -> None:
 
 
 async def _table_exists(url: str, table: str) -> bool:
-    factory = DatabaseSessionFactory(url, pool_size=1)
+    # Single-shot probe: the default NullPool opens one connection and
+    # holds none. (A ``pool_size`` here would be a placebo — queue-only
+    # knobs are rejected under ``pool_class="null"``.)
+    factory = DatabaseSessionFactory(url)
     try:
         async with factory.session() as session:
             row = (

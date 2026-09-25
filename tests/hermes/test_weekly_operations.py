@@ -142,6 +142,8 @@ async def test_group_attested_incremental_rechecks_nonempty_dir_without_old_anch
     )
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         return [historical] if kwargs.get("status") == "legacy_confirmed_sent" else []
 
     engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)

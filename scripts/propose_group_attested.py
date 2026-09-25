@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import traceback
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,9 @@ def _adopted_destination(
         or (topic is not None and topic != group.topic_message_id)
     ):
         return None
-    assert group.chat_id is not None and group.topic_message_id is not None
+    # Provably-held narrowing: the guard above returns unless both fields
+    # are non-empty strings, so this only guides the type checker.
+    assert group.chat_id is not None and group.topic_message_id is not None  # noqa: S101
     return group.chat_id, group.topic_message_id
 
 
@@ -220,7 +223,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"proposal failed: {error}", file=sys.stderr)
         return 2
     except Exception as error:
-        print(f"proposal database failure: {type(error).__name__}", file=sys.stderr)
+        print(
+            f"proposal database failure: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        traceback.print_exc()
         return 2
     print(json.dumps(result, sort_keys=True))
     return 0

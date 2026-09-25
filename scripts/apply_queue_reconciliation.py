@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import tempfile
+import traceback
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,30 +113,36 @@ async def _inspect_row(
         files: list[DeliveryFileRow] = []
         evidence: list[DeliveryLegacyEvidenceRow] = []
     else:
-        nickname = row.get("nickname")
-        queue_ids = (
-            (
-                await session.execute(
-                    select(DownloadQueueRow.sec_user_id).where(
-                        DownloadQueueRow.nickname == nickname
+        nickname = _string(row.get("nickname"))
+        if nickname:
+            queue_ids = (
+                (
+                    await session.execute(
+                        select(DownloadQueueRow.sec_user_id).where(
+                            DownloadQueueRow.nickname == nickname
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        seed_ids = (
-            (
-                await session.execute(
-                    select(SeedAccountRow.sec_user_id).where(
-                        SeedAccountRow.nickname == nickname
+            seed_ids = (
+                (
+                    await session.execute(
+                        select(SeedAccountRow.sec_user_id).where(
+                            SeedAccountRow.nickname == nickname
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-        identity_ids = set(queue_ids) | set(seed_ids)
+            identity_ids = set(queue_ids) | set(seed_ids)
+        else:
+            # A missing/blank nickname must skip the identity queries:
+            # ``nickname == None`` degrades to IS NULL, which sweeps
+            # every null-nickname seed row into the identity set.
+            identity_ids = set()
         group = await session.get(DeliveryGroupRow, row["key"], with_for_update=lock)
         file_query = select(DeliveryFileRow).where(
             DeliveryFileRow.round == row.get("round"),
@@ -144,16 +151,21 @@ async def _inspect_row(
         if lock:
             file_query = file_query.with_for_update()
         files = list((await session.execute(file_query)).scalars().all())
-        evidence = list(
-            (
-                await session.execute(
-                    select(DeliveryLegacyEvidenceRow).where(
-                        DeliveryLegacyEvidenceRow.nickname == nickname
+        # Same IS NULL guard as above: the evidence nickname is nullable.
+        evidence = (
+            list(
+                (
+                    await session.execute(
+                        select(DeliveryLegacyEvidenceRow).where(
+                            DeliveryLegacyEvidenceRow.nickname == nickname
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
+            if nickname
+            else []
         )
     group_attestation: GroupAttestation | str | None = None
     if (
@@ -163,53 +175,68 @@ async def _inspect_row(
         if group_inputs is None or group is None:
             group_attestation = "group attestation sources or adopted group are missing"
         else:
-            sec = row["sec_user_id"]
-            queue_query = select(DownloadQueueRow).where(
-                DownloadQueueRow.sec_user_id == sec
-            )
-            history_query = select(DeliveryFileRow).where(
-                DeliveryFileRow.sec_user_id == sec
-            )
-            if lock:
-                queue_query = queue_query.with_for_update()
-                history_query = history_query.with_for_update()
-            history_queues = list((await session.execute(queue_query)).scalars().all())
-            history_files = list((await session.execute(history_query)).scalars().all())
-            seed_aliases = set(
-                (
-                    await session.execute(
-                        select(SeedAccountRow.nickname).where(
-                            SeedAccountRow.sec_user_id == sec
+            sec = _string(row.get("sec_user_id"))
+            round_name = _string(row.get("round"))
+            row_key = _string(row.get("key"))
+            if sec is None or round_name is None or row_key is None:
+                # A frozen row missing identity must hold via _assess,
+                # not KeyError out of the batch as a database failure.
+                group_attestation = "frozen report row is missing queue identity"
+            elif row_key not in group_inputs.source_rows:
+                group_attestation = "group attestation inputs lack this queue row"
+            else:
+                queue_query = select(DownloadQueueRow).where(
+                    DownloadQueueRow.sec_user_id == sec
+                )
+                history_query = select(DeliveryFileRow).where(
+                    DeliveryFileRow.sec_user_id == sec
+                )
+                if lock:
+                    queue_query = queue_query.with_for_update()
+                    history_query = history_query.with_for_update()
+                history_queues = list(
+                    (await session.execute(queue_query)).scalars().all()
+                )
+                history_files = list(
+                    (await session.execute(history_query)).scalars().all()
+                )
+                seed_aliases = set(
+                    (
+                        await session.execute(
+                            select(SeedAccountRow.nickname).where(
+                                SeedAccountRow.sec_user_id == sec
+                            )
                         )
                     )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            current_queues = [
-                item for item in history_queues if item.round == row["round"]
-            ]
-            legacy_files = [
-                item for item in history_files if item.status == "legacy_confirmed_sent"
-            ]
-            if len(legacy_files) != len(history_files):
-                group_attestation = "account has non-legacy file ledger states"
-            else:
-                journal, keys_sha256 = group_inputs.journal_for(row["key"])
-                group_attestation = attest_group(
-                    report=row,
-                    original=group_inputs.source_rows[row["key"]],
-                    all_report_rows=group_inputs.all_rows,
-                    group=group,
-                    current_queues=current_queues,
-                    current_files=files,
-                    historical_queues=history_queues,
-                    historical_files=legacy_files,
-                    work_chats=group_inputs.work_chats,
-                    journal=journal,
-                    known_aliases=seed_aliases,
-                    keys_file_sha256=keys_sha256,
-                )
+                current_queues = [
+                    item for item in history_queues if item.round == round_name
+                ]
+                legacy_files = [
+                    item
+                    for item in history_files
+                    if item.status == "legacy_confirmed_sent"
+                ]
+                if len(legacy_files) != len(history_files):
+                    group_attestation = "account has non-legacy file ledger states"
+                else:
+                    journal, keys_sha256 = group_inputs.journal_for(row_key)
+                    group_attestation = attest_group(
+                        report=row,
+                        original=group_inputs.source_rows[row_key],
+                        all_report_rows=group_inputs.all_rows,
+                        group=group,
+                        current_queues=current_queues,
+                        current_files=files,
+                        historical_queues=history_queues,
+                        historical_files=legacy_files,
+                        work_chats=group_inputs.work_chats,
+                        journal=journal,
+                        known_aliases=seed_aliases,
+                        keys_file_sha256=keys_sha256,
+                    )
     decision = _assess(
         row,
         queue,
@@ -266,7 +293,10 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     outcome = "held"
                     if decision.status is not None:
                         if args.apply:
-                            assert queue is not None
+                            if queue is None:
+                                raise ValueError(
+                                    f"apply requires a queue row for {row.get('key')}"
+                                )
                             stamp = datetime.now(UTC).isoformat()
                             extra = dict(queue.extra)
                             extra.pop("migration_needs_reconciliation", None)
@@ -281,8 +311,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                 ),
                             }
                             if decision.action == "release_pending_group_attested":
-                                assert group_inputs is not None
-                                assert decision.group_attestation is not None
+                                if group_inputs is None:
+                                    raise ValueError(
+                                        "apply requires group attestation inputs"
+                                    )
+                                if decision.group_attestation is None:
+                                    raise ValueError(
+                                        "apply requires a verified group attestation"
+                                    )
                                 extra["reconciliation"].update(
                                     audit_sha256=(
                                         decision.group_attestation.audit_sha256
@@ -355,6 +391,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                                         DeliveryFileRow.parent_id == file.parent_id,
                                         DeliveryFileRow.message_id == file.message_id,
                                         DeliveryFileRow.send_uuid.is_(None),
+                                        DeliveryFileRow.send_started_at.is_(None),
                                     )
                                     .values(
                                         chat_id=queue.chat_id,
@@ -494,9 +531,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except Exception as error:
         print(
-            f"error: queue reconciliation database failure: {type(error).__name__}",
+            f"error: queue reconciliation database failure: {error}",
             file=sys.stderr,
         )
+        traceback.print_exc()
         return 2
     payload = json.dumps(result, ensure_ascii=False, sort_keys=True)
     if args.output:

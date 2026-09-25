@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -176,6 +178,97 @@ def test_settings_accepts_explicit_database_url_in_production(
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://db.internal:5432/dyvine")
     s = Settings()
     assert s.database.url == "postgresql+asyncpg://db.internal:5432/dyvine"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine",
+        "postgresql+asyncpg://dyvine:dyvine@127.0.0.1:5432/dyvine",
+        "postgresql+asyncpg://other:other@localhost:5432/other/",
+        "postgresql+asyncpg://dyvine:dyvine@[::1]:5432/dyvine",
+        "",
+        "not a url",
+    ],
+)
+def test_settings_rejects_loopback_database_urls_in_production(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    """Loopback synonyms cannot smuggle a local DB into production.
+
+    Matching the raw default string let ``127.0.0.1``, trailing
+    slashes, or different credentials bypass the guard; the check now
+    parses the hostname.
+    """
+    monkeypatch.setenv("API_DEBUG", "false")
+    monkeypatch.setenv("DATABASE_URL", url)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_nested_settings_read_dotenv_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Direct construction reads the same `.env` as the composite.
+
+    Nested groups previously ignored `env_file`, so `Settings()` and
+    `DatabaseSettings()` disagreed whenever a value lived in `.env`
+    rather than the real environment.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DATABASE_POOL_SIZE", raising=False)
+    (tmp_path / ".env").write_text("DATABASE_POOL_SIZE=7\n")
+    assert DatabaseSettings().pool_size == 7
+    monkeypatch.setenv("API_DEBUG", "true")
+    assert Settings().database.pool_size == 7
+
+
+def test_settings_proxy_tracks_cache_resets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `settings` binding always reflects the cached instance.
+
+    A directly bound singleton goes stale for early importers after
+    `cache_clear()`; the proxy delegates every read to whatever
+    `get_settings()` currently returns.
+    """
+    import dyvine.core.settings as settings_module
+
+    monkeypatch.setenv("API_DEBUG", "true")
+    first = settings_module.settings.runtime
+    assert first is get_settings().runtime
+    get_settings.cache_clear()
+    second = settings_module.settings.runtime
+    assert second is get_settings().runtime
+    assert second is not first
+    get_settings.cache_clear()
+
+
+def test_importing_settings_module_never_validates() -> None:
+    """Importing the module must not validate, even when misconfigured.
+
+    Runs in a subprocess with a production env and no database URL:
+    attribute access would raise, but the bare import (plus proxy
+    creation) must exit cleanly.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    env = dict(os.environ)
+    env["API_DEBUG"] = "false"
+    env.pop("DATABASE_URL", None)
+    env["PYTHONPATH"] = str(repo_root / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    completed = subprocess.run(
+        [sys.executable, "-c", "from dyvine.core.settings import settings"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=repo_root,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 # ── Settings (composite) ────────────────────────────────────────────────

@@ -78,3 +78,41 @@ def test_list_envelope_defaults_to_empty() -> None:
     envelope = WatchSubscriptionList(total=0)
     assert envelope.subscriptions == []
     assert envelope.total == 0
+
+
+def test_list_rejects_negative_total() -> None:
+    """Envelope totals are never negative."""
+    with pytest.raises(ValidationError, match="total"):
+        WatchSubscriptionList(subscriptions=[], total=-1)
+
+
+def test_create_rejects_out_of_bounds_intervals() -> None:
+    """Poll overrides share the scheduler bounds on both ends."""
+    with pytest.raises(ValidationError, match="live_poll_seconds"):
+        WatchSubscriptionCreate(user_id="user01", live_poll_seconds=30)
+    with pytest.raises(ValidationError, match="live_poll_seconds"):
+        WatchSubscriptionCreate(user_id="user01", live_poll_seconds=99999)
+    with pytest.raises(ValidationError, match="post_poll_seconds"):
+        WatchSubscriptionCreate(user_id="user01", post_poll_seconds=60)
+    with pytest.raises(ValidationError, match="post_poll_seconds"):
+        WatchSubscriptionCreate(user_id="user01", post_poll_seconds=999999)
+
+
+def test_response_rejects_naive_check_timestamps() -> None:
+    """Check stamps must be timezone-aware ISO instants."""
+    base = {
+        "subscription_id": "sub-1",
+        "user_id": "user01",
+        "enabled": True,
+        "live_poll_seconds": 300,
+        "post_poll_seconds": 2700,
+        "created_at": "2026-06-22T00:00:00+00:00",
+        "updated_at": "2026-06-22T00:00:00+00:00",
+    }
+    with pytest.raises(ValidationError, match="last_live_check"):
+        WatchSubscriptionResponse(**base, last_live_check="2026-06-22T00:00:00")
+    with pytest.raises(ValidationError, match="last_post_check"):
+        WatchSubscriptionResponse(**base, last_post_check="garbage")
+    ok = WatchSubscriptionResponse(**base, last_live_check="2026-06-22T00:00:00+00:00")
+    assert ok.last_live_check is not None
+    assert ok.last_post_check is None

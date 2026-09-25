@@ -337,3 +337,23 @@ def test_large_audit_is_indexed_without_retaining_page_payloads(tmp_path: Path) 
         output.write("\n")
     with pytest.raises(ValueError, match="changed after indexing"):
         journal.rows_for(key)
+
+
+@pytest.mark.parametrize("field", ["key", "round", "sec_user_id", "nickname"])
+def test_attestation_holds_malformed_report_identity_without_crash(
+    field: str,
+) -> None:
+    """Missing identity returns a hold string; never a KeyError. (P6-C)"""
+    values = _proof_inputs(["one.mp4"])
+    del values["report"][field]
+    assert attest_group(**values) == "report identity is incomplete"
+
+
+def test_attestation_ignores_sibling_row_without_nickname() -> None:
+    """A nickname-less sibling for the same account cannot crash aliasing. (P6-C)"""
+    values = _proof_inputs(["one.mp4"])
+    sibling = dict(values["report"])
+    del sibling["nickname"]
+    sibling["first_seen_safe_sent_paths"] = 0
+    values["all_report_rows"].append(sibling)
+    assert isinstance(attest_group(**values), GroupAttestation)

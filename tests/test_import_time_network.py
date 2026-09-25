@@ -53,5 +53,5 @@ def test_importing_plugin_performs_no_network_io() -> None:
         timeout=180,
     )
     assert proc.returncode == 0, (
-        "importing the plugin attempted network I/O:\n" f"{proc.stdout}\n{proc.stderr}"
+        f"importing the plugin attempted network I/O:\n{proc.stdout}\n{proc.stderr}"
     )

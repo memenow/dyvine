@@ -136,14 +136,20 @@ async def backend(request: pytest.FixtureRequest) -> Any:
         )
         return
     postgres_url: str = request.getfixturevalue("postgres_url")
-    factory = DatabaseSessionFactory(postgres_url, pool_size=2)
+    factory = DatabaseSessionFactory(postgres_url)
     async with factory.session() as session:
         async with session.begin():
             await session.execute(
                 text(
+                    # One statement naming children and parents together:
+                    # Postgres forbids truncating a referenced parent
+                    # alone, and the session database is shared with the
+                    # ledger suites.
                     "TRUNCATE TABLE operations, watch_subscriptions, "
                     "download_queue, send_status, user_send_status, "
-                    "seed_accounts, user_profiles, delivery_rounds"
+                    "seed_accounts, user_profiles, delivery_files, "
+                    "delivery_groups, delivery_legacy_evidence, "
+                    "legacy_excluded_nicknames, delivery_rounds"
                 )
             )
     try:
@@ -336,10 +342,10 @@ async def test_update_operation_none_metadata_clears(
     assert updated.metadata == {}
 
 
-async def test_update_operation_ignores_unknown_fields(
+async def test_update_operation_rejects_unknown_fields(
     backend: BackendContext,
 ) -> None:
-    """Unknown-only updates verify existence and return the row unchanged."""
+    """Unknown fields raise; empty updates return the row unchanged."""
     repo = backend.make_ops("owner-a")
     created = await repo.create_operation(
         operation_type="t",
@@ -347,10 +353,12 @@ async def test_update_operation_ignores_unknown_fields(
         status="pending",
         message="queued",
     )
-    unchanged = await repo.update_operation(created.operation_id, not_a_column="x")
+    with pytest.raises(ValueError, match="not_a_column"):
+        await repo.update_operation(created.operation_id, not_a_column="x")
+    unchanged = await repo.update_operation(created.operation_id)
     assert unchanged == created
     with pytest.raises(OperationNotFoundError):
-        await repo.update_operation("no-such-op", not_a_column="x")
+        await repo.update_operation("no-such-op", message="x")
 
 
 async def test_update_operation_missing_raises(
@@ -425,7 +433,7 @@ async def _null_heartbeat(
         owner._heartbeats.pop(operation_id, None)  # type: ignore[attr-defined]
         return
     url: str = request.getfixturevalue("postgres_url")
-    factory = DatabaseSessionFactory(url, pool_size=1)
+    factory = DatabaseSessionFactory(url)
     try:
         async with factory.session() as session:
             async with session.begin():
@@ -475,6 +483,55 @@ async def test_sweep_spares_null_heartbeat_with_fresh_creation(
     await _null_heartbeat(backend, request, created.operation_id)
     assert await owner_b.sweep_orphans(stale_after_seconds=60.0) == 0
     assert (await owner_a.get_operation(created.operation_id)).status == "running"
+
+
+async def _read_heartbeat(
+    backend: BackendContext,
+    request: pytest.FixtureRequest,
+    operation_id: str,
+) -> str | None:
+    """Read a row's raw heartbeat the way the sweep sees it.
+
+    Fake leg reads the sidecar entry; Postgres leg selects the
+    column over its own short-lived session.
+    """
+    if backend.name == "fake":
+        owner = backend.make_ops("owner-a")
+        return owner._heartbeats.get(operation_id)  # type: ignore[attr-defined]
+    url: str = request.getfixturevalue("postgres_url")
+    factory = DatabaseSessionFactory(url)
+    try:
+        async with factory.session() as session:
+            return await session.scalar(
+                text("SELECT heartbeat_at FROM operations WHERE operation_id = :id"),
+                {"id": operation_id},
+            )
+    finally:
+        await factory.aclose()
+
+
+async def test_sweep_preserves_stale_heartbeat(
+    backend: BackendContext,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """A swept row keeps its stale heartbeat for the next sweep.
+
+    The sweep rewrites status/message/error/updated_at only; if it
+    refreshed the heartbeat (e.g. via ``update_operation``), a
+    resurrected row would look alive and escape the next sweep.
+    """
+    owner_a = backend.make_ops("owner-a")
+    owner_b = backend.make_ops("owner-b")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        created = await owner_a.create_operation(
+            operation_type="t",
+            subject_id="stale-beat",
+            status="running",
+            message="live",
+        )
+    assert await owner_b.sweep_orphans(stale_after_seconds=60.0) == 1
+    assert await _read_heartbeat(backend, request, created.operation_id) == OLD_STAMP
 
 
 async def test_latest_breaks_full_timestamp_ties_by_id(
@@ -677,8 +734,9 @@ async def test_create_subscription_duplicate_user_raises(
     """One subscription per user; the second create raises."""
     repo = backend.make_watch()
     await repo.create_subscription(**_subscription_kwargs("user-3"))
-    with pytest.raises(WatchDuplicateError):
+    with pytest.raises(WatchDuplicateError) as exc_info:
         await repo.create_subscription(**_subscription_kwargs("user-3"))
+    assert exc_info.value.details == {"user_id": "user-3"}
 
 
 async def test_get_subscription_missing_raises(
@@ -821,26 +879,29 @@ async def test_create_subscription_duplicate_id_raises(
         **_subscription_kwargs("user-a"),
         subscription_id="fixed-id",
     )
-    with pytest.raises(WatchDuplicateError):
+    with pytest.raises(WatchDuplicateError) as exc_info:
         await repo.create_subscription(
             **_subscription_kwargs("user-b"),
             subscription_id="fixed-id",
         )
+    # Both backends map an explicit-ID collision to the same
+    # user-keyed error; callers converge on the user row.
+    assert exc_info.value.details == {"user_id": "user-b"}
     assert await repo.count_subscriptions() == 1
 
 
-async def test_update_subscription_ignores_unknown_fields(
+async def test_update_subscription_rejects_unknown_fields(
     backend: BackendContext,
 ) -> None:
-    """Unknown-only updates verify existence and return the row unchanged."""
+    """Unknown fields raise; empty updates return the row unchanged."""
     repo = backend.make_watch()
     created = await repo.create_subscription(**_subscription_kwargs("user-8"))
-    unchanged = await repo.update_subscription(
-        created.subscription_id, not_a_column="x"
-    )
+    with pytest.raises(ValueError, match="not_a_column"):
+        await repo.update_subscription(created.subscription_id, not_a_column="x")
+    unchanged = await repo.update_subscription(created.subscription_id)
     assert unchanged == created
     with pytest.raises(WatchSubscriptionNotFoundError):
-        await repo.update_subscription("no-such-sub", not_a_column="x")
+        await repo.update_subscription("no-such-sub", enabled=False)
 
 
 async def test_update_subscription_missing_raises(
@@ -901,6 +962,21 @@ def _queue_kwargs(key: str, **overrides: Any) -> dict[str, Any]:
     return kwargs
 
 
+async def _ensure_round(backend: BackendContext, *rounds: str) -> None:
+    """Seed round headers on the Postgres leg (FK parents).
+
+    The fake leg has no foreign keys; the Postgres leg rejects queue
+    rows whose round header is missing, so queue tests seed every
+    round they touch. Mirrors the production ``enqueue_round``-first
+    ordering.
+    """
+    if backend.name == "fake":
+        return
+    repo = backend.make_round()
+    for name in rounds:
+        await repo.upsert_round(round=name)
+
+
 async def _seed_legacy(backend: BackendContext, username: str, **fields: Any) -> None:
     """Seed one legacy row on either leg (fake seeder is sync)."""
     result = backend.seed_legacy(username, **fields)
@@ -911,6 +987,7 @@ async def _seed_legacy(backend: BackendContext, username: str, **fields: Any) ->
 async def test_queue_upsert_round_trip(backend: BackendContext) -> None:
     """Upserted fields echo back; a second upsert replaces the row."""
     repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1")
     created = await repo.upsert_entry(
         **_queue_kwargs("k1", chat_id="chat-1", extra={"note": "x"})
     )
@@ -928,6 +1005,34 @@ async def test_queue_upsert_round_trip(backend: BackendContext) -> None:
     assert replaced.created_at == created.created_at
     assert await repo.count_entries() == 1
 
+    # Omitted attempts/extra keep their stored values on conflict.
+    patched = await repo.upsert_entry(**_queue_kwargs("k1", status="pending"))
+    assert patched.attempts == 2
+    assert patched.extra == {"note": "x"}
+    wiped = await repo.upsert_entry(**_queue_kwargs("k1", extra={}))
+    assert wiped.extra == {}
+    assert wiped.attempts == 2
+
+
+async def test_queue_upsert_preserves_existing_owner(
+    backend: BackendContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upsert over a live claim touches neither owner nor heartbeat.
+
+    After replica B upserts a row replica A claimed, B's own release
+    still sees the row as foreign (owner A) with a stale heartbeat
+    and frees it; if the upsert stole the claim or refreshed the
+    beat, B would spare a row whose owner is gone.
+    """
+    owner_a = backend.make_queue("owner-a")
+    owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        await owner_a.upsert_entry(**_queue_kwargs("owned", status="downloading"))
+        await owner_b.upsert_entry(**_queue_kwargs("owned", status="downloading"))
+    assert await owner_b.release_stale(stale_after_seconds=60.0, max_attempts=3) == 1
+    assert (await owner_a.get_entry("owned")).status == "pending"
+
 
 async def test_queue_get_missing_raises(backend: BackendContext) -> None:
     """Unknown keys raise ``QueueEntryNotFoundError``."""
@@ -935,11 +1040,47 @@ async def test_queue_get_missing_raises(backend: BackendContext) -> None:
         await backend.make_queue("owner-a").get_entry("no-such-key")
 
 
+async def test_queue_upsert_concurrent_same_key_converges(
+    backend: BackendContext,
+) -> None:
+    """Concurrent upserts of one key converge; none raises."""
+    repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1")
+    await asyncio.gather(
+        *[
+            repo.upsert_entry(**_queue_kwargs("race", nickname=f"nick-{index}"))
+            for index in range(6)
+        ]
+    )
+    assert await repo.count_entries() == 1
+    final = await repo.get_entry("race")
+    assert final.nickname in {f"nick-{index}" for index in range(6)}
+    assert final.attempts == 0
+
+
+async def test_queue_upsert_leaves_stale_heartbeat_untouched(
+    backend: BackendContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A metadata upsert over a stale row does not extend its lease."""
+    owner_a = backend.make_queue("owner-a")
+    owner_b = backend.make_queue("owner-b")
+    owner_c = backend.make_queue("owner-c")
+    await _ensure_round(backend, "round-1")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        await owner_a.upsert_entry(**_queue_kwargs("stale-row", status="downloading"))
+    await owner_b.upsert_entry(
+        **_queue_kwargs("stale-row", status="downloading", op_message="patch")
+    )
+    assert await owner_c.release_stale(stale_after_seconds=60.0, max_attempts=3) == 1
+    assert (await owner_a.get_entry("stale-row")).status == "pending"
+
+
 async def test_queue_list_filters_and_counts(
     backend: BackendContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Listing filters by round/status, oldest-first, with pagination."""
     repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1", "round-2")
     with _freeze(backend, monkeypatch, "2020-01-01T00:00:00+00:00"):
         await repo.upsert_entry(**_queue_kwargs("old"))
     with _freeze(backend, monkeypatch, "2020-01-01T00:00:01+00:00"):
@@ -960,6 +1101,13 @@ async def test_queue_list_filters_and_counts(
     assert [row.key for row in await repo.list_entries(limit=1, offset=1)] == ["r2-a"]
     assert await repo.count_entries() == 3
     assert await repo.count_entries(round="round-2", status="pending") == 1
+    tallies = await repo.count_by_status()
+    assert tallies == {"pending": 2, "op_done": 1}
+    assert await repo.count_by_status(round="round-2") == {
+        "pending": 1,
+        "op_done": 1,
+    }
+    assert await repo.count_by_status(round="round-9") == {}
 
 
 async def test_queue_claim_takes_oldest_pending(
@@ -967,6 +1115,7 @@ async def test_queue_claim_takes_oldest_pending(
 ) -> None:
     """Claims pop oldest-first and flip the winner to downloading."""
     repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1", "round-9")
     with _freeze(backend, monkeypatch, "2020-01-01T00:00:00+00:00"):
         await repo.upsert_entry(**_queue_kwargs("first"))
     with _freeze(backend, monkeypatch, "2020-01-01T00:00:01+00:00"):
@@ -989,6 +1138,7 @@ async def test_queue_claim_skips_busy_serial_groups(
 ) -> None:
     """Same-nickname accounts never run concurrently."""
     repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1")
     await repo.upsert_entry(**_queue_kwargs("solo"))
     await repo.upsert_entry(**_queue_kwargs("pair-a", serial_group="g1"))
     await repo.upsert_entry(**_queue_kwargs("pair-b", serial_group="g1"))
@@ -1006,6 +1156,7 @@ async def test_queue_claim_never_double_issues(
     """Concurrent claimers split rows exactly, none shared."""
     owner_a = backend.make_queue("owner-a")
     owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
     for index in range(4):
         await owner_a.upsert_entry(**_queue_kwargs(f"c{index}"))
     results = await asyncio.gather(
@@ -1025,6 +1176,7 @@ async def test_queue_claim_filter_is_atomic_and_cannot_take_next_batch(
     """Concurrent workers stay within the selected account pair."""
     owner_a = backend.make_queue("owner-a")
     owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
     for key in ("pair-a", "pair-b", "next-a"):
         await owner_a.upsert_entry(**_queue_kwargs(key))
     allowed = {"pair-a", "pair-b"}
@@ -1037,11 +1189,53 @@ async def test_queue_claim_filter_is_atomic_and_cannot_take_next_batch(
     assert (await owner_a.get_entry("next-a")).status == "pending"
 
 
-async def test_queue_update_merges_and_ignores_unknown(
+async def test_queue_claim_serial_group_is_mutually_exclusive_under_race(
     backend: BackendContext,
 ) -> None:
-    """Known fields merge; unknown-only updates return the row unchanged."""
+    """Two replicas racing one group split it: at most one downloading.
+
+    The busy-group pre-filter only sees committed rows, so without the
+    claim-time group lock both racers would lock different same-group
+    rows and flip both to downloading.
+    """
+    owner_a = backend.make_queue("owner-a")
+    owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
+    await owner_a.upsert_entry(**_queue_kwargs("g-a", serial_group="g1"))
+    await owner_a.upsert_entry(**_queue_kwargs("g-b", serial_group="g1"))
+    first, second = await asyncio.gather(owner_a.claim_next(), owner_b.claim_next())
+    winners = [row for row in (first, second) if row is not None]
+    assert len(winners) == 1
+    assert await owner_a.count_entries(status="downloading") == 1
+
+
+async def test_queue_release_stale_splits_between_replicas(
+    backend: BackendContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two replicas sweeping together split the stale set: no double bump."""
+    owner_a = backend.make_queue("owner-a")
+    owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
+    with _freeze(backend, monkeypatch, OLD_STAMP):
+        await owner_a.upsert_entry(**_queue_kwargs("sweep-a", status="downloading"))
+        await owner_a.upsert_entry(**_queue_kwargs("sweep-b", status="downloading"))
+    first, second = await asyncio.gather(
+        owner_b.release_stale(stale_after_seconds=60.0, max_attempts=8),
+        owner_b.release_stale(stale_after_seconds=60.0, max_attempts=8),
+    )
+    assert first + second == 2
+    for key in ("sweep-a", "sweep-b"):
+        freed = await owner_a.get_entry(key)
+        assert freed.status == "pending"
+        assert freed.attempts == 1
+
+
+async def test_queue_update_merges_and_rejects_unknown(
+    backend: BackendContext,
+) -> None:
+    """Known fields merge; unknown fields raise loud typos."""
     repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1")
     created = await repo.upsert_entry(**_queue_kwargs("u1"))
     updated = await repo.update_entry(
         "u1", status="op_done", op_status="completed", attempts=3
@@ -1051,7 +1245,9 @@ async def test_queue_update_merges_and_ignores_unknown(
     assert updated.attempts == 3
     assert updated.nickname == created.nickname
     assert updated.created_at == created.created_at
-    unchanged = await repo.update_entry("u1", not_a_column="x")
+    with pytest.raises(ValueError, match="not_a_column"):
+        await repo.update_entry("u1", not_a_column="x")
+    unchanged = await repo.update_entry("u1")
     assert unchanged == updated
     with pytest.raises(QueueEntryNotFoundError):
         await repo.update_entry("no-such-key", status="failed")
@@ -1060,6 +1256,7 @@ async def test_queue_update_merges_and_ignores_unknown(
 async def test_queue_update_none_extra_clears(backend: BackendContext) -> None:
     """An explicit ``extra=None`` clears to ``{}``, not ``TypeError``."""
     repo = backend.make_queue("owner-a")
+    await _ensure_round(backend, "round-1")
     await repo.upsert_entry(**_queue_kwargs("e1", extra={"a": 1}))
     updated = await repo.update_entry("e1", extra=None)
     assert updated.extra == {}
@@ -1071,6 +1268,7 @@ async def test_queue_release_stale_requeues_with_backoff(
     """Stale foreign rows return to pending with attempts bumped."""
     owner_a = backend.make_queue("owner-a")
     owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
     with _freeze(backend, monkeypatch, OLD_STAMP):
         await owner_a.upsert_entry(**_queue_kwargs("stale"))
     claimed = await owner_a.claim_next()
@@ -1092,6 +1290,7 @@ async def test_queue_release_stale_only_touches_selected_round(
     """A weekly runner does not mutate frozen work in another round."""
     owner_a = backend.make_queue("owner-a")
     owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1", "round-2")
     with _freeze(backend, monkeypatch, OLD_STAMP):
         await owner_a.upsert_entry(**_queue_kwargs("old-r1", round="round-1"))
         await owner_a.upsert_entry(**_queue_kwargs("old-r2", round="round-2"))
@@ -1115,6 +1314,7 @@ async def test_queue_release_stale_exhausts_and_spares(
     """Exhausted rows flip to op_issue; own and fresh rows are spared."""
     owner_a = backend.make_queue("owner-a")
     owner_b = backend.make_queue("owner-b")
+    await _ensure_round(backend, "round-1")
     with _freeze(backend, monkeypatch, OLD_STAMP):
         await owner_a.upsert_entry(**_queue_kwargs("tired", attempts=8))
         await owner_a.upsert_entry(**_queue_kwargs("mine", attempts=0))
@@ -1203,7 +1403,7 @@ async def test_seed_round_trip_and_exclusion(backend: BackendContext) -> None:
 
 
 async def test_profile_upsert_patches_columns(backend: BackendContext) -> None:
-    """Snapshots insert fully and patch partially; unknowns are ignored."""
+    """Snapshots insert fully and patch partially."""
     repo = backend.make_profile()
     created = await repo.upsert_profile(
         sec_user_id="sec-1", nickname="nick-1", follower_count=100
@@ -1212,7 +1412,7 @@ async def test_profile_upsert_patches_columns(backend: BackendContext) -> None:
     assert created.follower_count == 100
     assert created.avatar_url is None
     patched = await repo.upsert_profile(
-        sec_user_id="sec-1", avatar_url="https://img/x.jpg", not_a_column="z"
+        sec_user_id="sec-1", avatar_url="https://img/x.jpg"
     )
     assert patched.avatar_url == "https://img/x.jpg"
     assert patched.nickname == "nick-1"
@@ -1220,6 +1420,15 @@ async def test_profile_upsert_patches_columns(backend: BackendContext) -> None:
     assert (await repo.get_profile("sec-1")) == patched
     with pytest.raises(UserProfileNotFoundError):
         await repo.get_profile("ghost-sec")
+
+
+async def test_profile_upsert_rejects_unknown_fields(
+    backend: BackendContext,
+) -> None:
+    """Unknown snapshot columns raise instead of vanishing."""
+    repo = backend.make_profile()
+    with pytest.raises(ValueError, match="not_a_column"):
+        await repo.upsert_profile(sec_user_id="sec-9", not_a_column="z")
 
 
 async def test_round_upsert_and_list(backend: BackendContext) -> None:

@@ -229,6 +229,39 @@ def test_provider_close_idempotent_and_stops_thread() -> None:
     provider.invalidate()  # No-op once closed.
 
 
+def test_sign_uses_init_budget_despite_stale_ready() -> None:
+    """A stale ready flag never truncates the wait to the sign budget."""
+    import time
+
+    factory = _factory_for(
+        lambda url: {"url": url, "headers": {}},
+        on_open=lambda: time.sleep(0.3),
+    )
+    provider = _provider(factory, init_timeout_seconds=5.0, sign_timeout_seconds=0.05)
+    # Simulate the stale-flag race: set, but no session exists yet, so this
+    # sign pays a 0.3s cold open against a 0.05s sign budget.
+    provider._ready.set()
+    with provider:
+        result = provider.sign("https://www.douyin.com/x/")
+    assert result.url.endswith("/x/")
+
+
+def test_open_fits_inside_init_budget(
+    fake_playwright: _RecordingPlaywright,
+) -> None:
+    """The worst-case open never outlasts the caller's init wait."""
+    page, closer = websign_mod._open_signing_page(
+        page_url="https://www.douyin.com/",
+        user_agent="fake-agent",
+        init_timeout_seconds=60.0,
+        snippet_timeout_ms=25000,
+    )
+    closer()
+    budgets = page.budgets
+    assert set(budgets) == {"goto", "idle", "settle", "predicate"}
+    assert sum(budgets.values()) <= 60_000
+
+
 def test_provider_timeout_abandons_without_wedging() -> None:
     """Verify a timed-out sign never wedges later signs."""
     gate = threading.Event()
@@ -511,21 +544,26 @@ class _RecordingPage:
         self.fail_idle = False
         self.gotos: list[str] = []
         self.evaluated: list[tuple[str, dict[str, Any]]] = []
+        self.budgets: dict[str, int] = {}
 
     def goto(self, url: str, **kwargs: Any) -> None:
         self.gotos.append(url)
+        self.budgets["goto"] = int(kwargs.get("timeout", 0))
         if self.fail_goto:
             raise RuntimeError("navigation failed")
 
     def wait_for_load_state(self, *args: Any, **kwargs: Any) -> None:
+        self.budgets["idle"] = int(kwargs.get("timeout", 0))
         if self.fail_idle:
             raise RuntimeError("idle timeout")
         return None
 
     def wait_for_timeout(self, ms: int) -> None:
+        self.budgets["settle"] = ms
         return None
 
     def wait_for_function(self, snippet: str, **kwargs: Any) -> None:
+        self.budgets["predicate"] = int(kwargs.get("timeout", 0))
         return None
 
     def evaluate(self, snippet: str, arg: dict[str, Any]) -> Any:
@@ -928,7 +966,7 @@ async def test_fetch_retry_install_idempotent() -> None:
 
 def test_uninstall_tolerates_dead_owner() -> None:
     """Verify uninstall skips owners that reject attribute restore."""
-    websign_mod._PATCHED.append((object(), "missing", None))
+    websign_mod._PATCHED.append((object(), "missing", None, None))
     uninstall_websign_patch()
     assert not is_websign_patched()
 
@@ -1015,3 +1053,71 @@ def test_invalidate_preserves_backoff() -> None:
         with pytest.raises(WebSignError, match="backing off"):
             provider.sign("https://www.douyin.com/x/")
         assert opens["n"] == 3
+
+
+# ── sign/close ordering and loop hygiene ──────────────────────────────
+
+
+def test_sign_after_close_fails_fast_without_waiting() -> None:
+    """A sign racing a lost close raises closed, never blocks to timeout."""
+    import time
+
+    factory = _factory_for(lambda url: {"url": url, "headers": {}})
+    provider = _provider(factory, init_timeout_seconds=30.0, sign_timeout_seconds=30.0)
+    provider.sign("https://www.douyin.com/x/")
+    provider.close()
+    started = time.monotonic()
+    with pytest.raises(WebSignError, match="closed"):
+        provider.sign("https://www.douyin.com/x/")
+    assert time.monotonic() - started < 5.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_resign_yields_the_event_loop() -> None:
+    """Re-signing offloads to a thread; the loop stays responsive."""
+    import asyncio
+
+    gate = threading.Event()
+    script_calls: list[str] = []
+
+    def script(url: str) -> _StubResponse:
+        script_calls.append(url)
+        if len(script_calls) == 1:
+            return _StubResponse(403, "Blocked by ArgusSecurityPlugin")
+        return _StubResponse(200, '{"status_code":0}')
+
+    crawler_cls = _make_crawler(script)
+    provider = MagicMock()
+    provider.sign.side_effect = lambda url: (
+        gate.wait(timeout=10),
+        SignedResult(url=SIGNED_URL, headers={}),
+    )[1]
+    install_fetch_retry(provider, crawler_cls=crawler_cls)
+    try:
+        crawler = crawler_cls()
+        fetch_task = asyncio.create_task(
+            crawler.get_fetch_data("https://www.douyin.com/e/?a=1")
+        )
+        ticks = 0
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            ticks += 1
+            if len(script_calls) >= 1 and ticks >= 5:
+                break
+        # The loop ticked while the re-sign was still gated: proof the
+        # blocking sign ran off-loop.
+        assert ticks >= 5
+        assert not fetch_task.done()
+        gate.set()
+        response = await asyncio.wait_for(fetch_task, timeout=10)
+        assert response.status_code == 200
+    finally:
+        uninstall_websign_patch()
+
+
+def test_check_op_rejects_foreign_queue_items() -> None:
+    """A queue-protocol violation raises TypeError, never silently proceeds."""
+    op = websign_mod._SignOp(url="https://www.douyin.com/", reply=None)
+    assert websign_mod._check_op(op) is op
+    with pytest.raises(TypeError, match="unexpected websign queue item"):
+        websign_mod._check_op(object())
