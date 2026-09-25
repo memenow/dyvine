@@ -86,7 +86,11 @@ async def _setup(
     channel = SimpleNamespace(
         ensure_group=AsyncMock(return_value=_ready_group("oc_new")),
         ensure_topic=AsyncMock(return_value=_ready_group("oc_new")),
-        deliver_file=AsyncMock(return_value=SimpleNamespace(status="sent")),
+        deliver_file=AsyncMock(
+            return_value=SimpleNamespace(
+                status="sent", relative_path=file_path.relative_to(user_dir).as_posix()
+            )
+        ),
     )
     return repo, engine, channel, file_path
 
@@ -117,7 +121,7 @@ async def test_reuse_policy_adopts_verified_chat_and_topic(tmp_path: Path) -> No
     channel.deliver_file.assert_awaited_once()
     assert channel.deliver_file.await_args.kwargs["file_path"] == file_path
     assert channel.deliver_file.await_args.kwargs["chat_id"] == "oc_prior"
-    assert channel.deliver_file.await_args.kwargs["parent_id"] == "om_prior_topic"
+    assert "parent_id" not in channel.deliver_file.await_args.kwargs
 
 
 async def test_reuse_policy_holds_ambiguous_prior_group(tmp_path: Path) -> None:

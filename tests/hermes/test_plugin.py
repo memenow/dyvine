@@ -95,6 +95,36 @@ def test_manifest_dependencies_pinned_and_complete() -> None:
     }
 
 
+# Versions the Hermes Agent venv pins (core ``python-dotenv``, bedrock
+# extra ``boto3``). Hermes resolves the plugin's declared dependencies
+# together with them and refuses, or on ``hermes update`` disables, a
+# plugin whose union has no solution.
+_HERMES_PINS = {"boto3": "1.42.89", "python-dotenv": "1.2.2"}
+
+
+@pytest.mark.parametrize("dist", sorted(_HERMES_PINS))
+def test_dependency_floors_admit_hermes_pins(dist: str) -> None:
+    """Both declared dependency lists accept the Hermes-pinned version."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    root = _repo_root()
+    declared = {
+        "pyproject.toml": tomllib.loads((root / "pyproject.toml").read_text())[
+            "project"
+        ]["dependencies"],
+        "plugin.yaml": yaml.safe_load((root / "plugin.yaml").read_text())[
+            "python_dependencies"
+        ],
+    }
+    for source, requirements in declared.items():
+        (req,) = [r for r in map(Requirement, requirements) if r.name == dist]
+        assert req.specifier.contains(_HERMES_PINS[dist]), (
+            f"{source}: {req} rejects the Hermes pin {dist}=={_HERMES_PINS[dist]}"
+        )
+
+
 def test_register_registers_every_tool_async() -> None:
     """Every spec registers once, async, on the dyvine toolset."""
     ctx = FakeContext()
@@ -388,7 +418,12 @@ def test_get_engine_builds_offline_and_caches() -> None:
 
 
 def test_root_shim_exposes_register() -> None:
-    """The repo-root ``__init__.py`` re-exports ``register``."""
+    """The repo-root ``__init__.py`` re-exports ``register``.
+
+    Loaded as a package (hermes, or pytest claiming ``dyvine``), the
+    shim prepends the engine tree to ``__path__`` so ``dyvine.*``
+    submodules resolve to ``src/dyvine``.
+    """
     root = _repo_root()
     spec = importlib.util.spec_from_file_location(
         "dyvine_plugin_root", root / "__init__.py"
@@ -397,6 +432,29 @@ def test_root_shim_exposes_register() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(module.register)
+    assert module.__path__ == [str(root / "src" / "dyvine"), str(root)]
+
+
+def test_root_shim_imports_as_plain_module() -> None:
+    """The shim also loads as a non-package module (no ``__path__``).
+
+    pytest's importlib mode imports the root ``__init__.py`` as a plain
+    ``__init__`` module when the checkout directory name is not a valid
+    identifier (``dyvine-main``, hyphenated worktree names); a bare
+    ``__path__`` reference there failed every test's setup.
+    """
+    root = _repo_root()
+    spec = importlib.util.spec_from_file_location(
+        "dyvine_plugin_root_module",
+        root / "__init__.py",
+        submodule_search_locations=None,
+    )
+    assert spec is not None and spec.loader is not None
+    assert spec.submodule_search_locations is None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert callable(module.register)
+    assert not hasattr(module, "__path__")
 
 
 def test_jsonable_converts_service_shapes() -> None:

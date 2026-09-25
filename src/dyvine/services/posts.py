@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -83,6 +83,10 @@ PostServiceError = ServiceError
 # spinning forever. The fallback covers ``MAX_PAGES_FALLBACK * PAGE_SIZE``
 # items when ``total_posts`` is unknown.
 PAGE_SIZE = 20
+
+# f2 renders post times as UTC+8 wall-clock strings (``timestamp_2_str``),
+# which is also the form they take in media folder names.
+_F2_NAMING_ZONE = timezone(timedelta(hours=8))
 
 #: Bulk-downloadable per-user feeds, mapped to the f2 handler iterator
 #: each one paginates. ``post``/``like`` iterators take a target
@@ -1416,6 +1420,7 @@ class PostService:
         known_aweme_ids: set[str] | None = None,
         subscription_id: str | None = None,
         operation_id: str | None = None,
+        posted_after: datetime | None = None,
     ) -> IncrementalDownloadResult:
         """Download only the posts newer than the caller's checkpoint.
 
@@ -1442,6 +1447,11 @@ class PostService:
                 operation metadata for correlation.
             operation_id: Optional pending operation already persisted by a
                 caller that also records the ID on its own queue row.
+            posted_after: Optional naive post time in f2's naming zone
+                (UTC+8). Posts at or before it are not downloaded, and
+                pagination stops after a page with no newer post, so a
+                run without ``since_aweme_id`` does not walk the whole
+                feed history.
 
         Returns:
             IncrementalDownloadResult: counts plus the newly downloaded
@@ -1530,6 +1540,7 @@ class PostService:
                 user_path,
                 known=known,
                 since_aweme_id=since_aweme_id,
+                posted_after=posted_after,
             )
         except asyncio.CancelledError:
             # The watch loop was cancelled (DELETE or shutdown) mid-download.
@@ -1586,6 +1597,7 @@ class PostService:
             metadata={
                 "subscription_id": subscription_id,
                 "since_aweme_id": since_aweme_id,
+                "posted_after": posted_after.isoformat() if posted_after else None,
                 "new_count": new_count,
                 "failed_count": failed_count,
                 "truncated": truncated,
@@ -1610,6 +1622,7 @@ class PostService:
         *,
         known: set[str],
         since_aweme_id: str | None,
+        posted_after: datetime | None = None,
     ) -> tuple[list[str], int, bool]:
         """Paginate newest-first and download posts until a known id appears.
 
@@ -1621,6 +1634,12 @@ class PostService:
         upstream feed is newest-first, so that boundary marks
         previously-seen territory. ``MAX_PAGES_FALLBACK`` bounds a first run
         with an empty checkpoint so a misbehaving cursor cannot pin the loop.
+
+        With ``posted_after``, posts at or before it (or without a readable
+        post time) are skipped, and pagination stops after the first page
+        with no newer post. Pinned posts can sit old at the top of the first
+        page, so a single old post never ends the scan; a whole old page
+        does, because the rest of the feed is older still.
         """
         new_aweme_ids: list[str] = []
         failed_count = 0
@@ -1638,6 +1657,7 @@ class PostService:
                 break
 
             reached_known = False
+            page_in_window = False
             for post in aweme_list:
                 aweme_id = str(post.get("aweme_id") or "")
                 if aweme_id and (aweme_id in known or aweme_id == since_aweme_id):
@@ -1645,6 +1665,11 @@ class PostService:
                     # the start of previously-downloaded territory.
                     reached_known = True
                     break
+                if posted_after is not None:
+                    posted = _post_created_at(post)
+                    if posted is None or posted <= posted_after:
+                        continue
+                    page_in_window = True
                 try:
                     post_type = self._determine_post_type(post)
                     await self._download_post_content(post, post_type, user_path)
@@ -1657,7 +1682,7 @@ class PostService:
                         extra={"aweme_id": post.get("aweme_id"), "error": str(e)},
                     )
 
-            if reached_known:
+            if reached_known or (posted_after is not None and not page_in_window):
                 break
 
             has_more = batch.get("has_more", False)
@@ -1992,6 +2017,19 @@ def _new_or_changed_files(
         if before.get(path.resolve()) != (stat.st_size, stat.st_mtime_ns):
             found.append(path)
     return found
+
+
+def _post_created_at(post: dict[str, Any]) -> datetime | None:
+    """Post time as f2 writes it into media folder names (naive UTC+8)."""
+    value = post.get("create_time")
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value[:19], "%Y-%m-%d %H-%M-%S")
+        except ValueError:
+            return None
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value, _F2_NAMING_ZONE).replace(tzinfo=None)
+    return None
 
 
 def _prepare_post_for_downloader(post: dict[str, Any]) -> dict[str, Any]:

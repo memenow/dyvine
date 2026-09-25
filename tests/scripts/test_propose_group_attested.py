@@ -19,7 +19,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts import propose_group_attested as proposer  # noqa: E402
-from scripts.queue_group_attestation import AuditJournal  # noqa: E402
+from scripts.queue_group_attestation import (  # noqa: E402
+    AuditJournal,
+    FeishuAdoption,
+)
 from scripts.queue_group_inputs import GroupInputs  # noqa: E402
 from scripts.queue_reconciliation_policy import Decision  # noqa: E402
 
@@ -217,3 +220,91 @@ def test_main_reports_database_failure_cause_and_traceback(
     captured = capsys.readouterr()
     assert "connection reset by peer" in captured.err
     assert "Traceback" in captured.err
+
+
+def test_feishu_adoption_proposal_carries_the_recomputed_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frozen = _source()
+    source = tmp_path / "frozen.jsonl"
+    output = tmp_path / "reviewed.jsonl"
+    source.write_text(json.dumps(frozen) + "\n", encoding="utf-8")
+    journal = AuditJournal("main-sha", "main-source", {frozen["key"]: []})
+    inputs = GroupInputs(
+        source_rows={frozen["key"]: frozen},
+        all_rows=[frozen],
+        source_sha256="source-sha",
+        work_sha256="work-sha",
+        work_chats={},
+        journal=journal,
+    )
+    monkeypatch.setattr(proposer, "load_group_inputs", lambda **_kw: inputs)
+    monkeypatch.setattr(
+        proposer, "DatabaseSessionFactory", lambda *_a, **_kw: _Factory(_group())
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://placeholder")
+    adoption = FeishuAdoption("audit", "target", "full", None, (), ("media-1",))
+    seen: list[dict[str, Any]] = []
+
+    async def inspect(
+        _session: Any, candidate: dict[str, Any], *_args: Any, **kwargs: Any
+    ) -> tuple[Decision, None]:
+        assert kwargs["timezone"] == "Asia/Shanghai"
+        seen.append(dict(candidate["resolution"]))
+        if candidate["resolution"].get("plan") != adoption.payload():
+            return (
+                Decision(None, "held", "plan differs", feishu_adoption=adoption),
+                None,
+            )
+        return (
+            Decision(
+                "pending",
+                "release_pending_feishu_adopted",
+                "adopted",
+                feishu_adoption=adoption,
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(proposer, "_inspect_row", inspect)
+    args = argparse.Namespace(
+        source_report=str(source),
+        feishu_audit="main.jsonl",
+        legacy_work_db="work.sqlite3",
+        active_round="weekly0913",
+        output=str(output),
+        database_url_env="DATABASE_URL",
+        action="release_pending_feishu_adopted",
+        timezone="Asia/Shanghai",
+    )
+    result = asyncio.run(proposer.propose(args))
+    reviewed = [json.loads(line) for line in output.read_text().splitlines()]
+    assert result["proposed"] == 1
+    assert [("plan" in item) for item in seen] == [False, True]
+    assert reviewed[0]["resolution"]["plan"] == adoption.payload()
+
+
+@pytest.mark.parametrize(
+    "action", ["release_pending_window_attested", "release_pending_feishu_adopted"]
+)
+def test_window_action_requires_the_weekly_timezone(
+    tmp_path: Path, action: str
+) -> None:
+    argv = [
+        "--source-report",
+        str(tmp_path / "frozen.jsonl"),
+        "--feishu-audit",
+        str(tmp_path / "audit.jsonl"),
+        "--legacy-work-db",
+        str(tmp_path / "work.sqlite3"),
+        "--active-round",
+        "weekly0913",
+        "--output",
+        str(tmp_path / "proposal.jsonl"),
+        "--action",
+        action,
+    ]
+    with pytest.raises(SystemExit):
+        proposer.parse_args(argv)
+    args = proposer.parse_args([*argv, "--timezone", "Asia/Shanghai"])
+    assert (args.action, args.timezone) == (action, "Asia/Shanghai")

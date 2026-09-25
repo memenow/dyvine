@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, date, datetime
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ import pytest
 
 from dyvine.services.queue import QueueService
 from dyvine_hermes import weekly as weekly_module
+from dyvine_hermes import weekly_account as weekly_account_module
 from dyvine_hermes.weekly import WeeklyConfig, due_round, run_once
 from tests.fake_repos import (
     FakeQueueRepository,
@@ -53,7 +55,12 @@ def _engine(repo: FakeQueueRepository) -> SimpleNamespace:
                 )
             )
         ),
-        users=SimpleNamespace(get_user_info=AsyncMock()),
+        users=SimpleNamespace(
+            get_user_info=AsyncMock(),
+            get_author_state=AsyncMock(
+                return_value=SimpleNamespace(available=True, reason=None)
+            ),
+        ),
         posts=SimpleNamespace(download_new_posts=AsyncMock()),
         operations=SimpleNamespace(get_operation=AsyncMock()),
     )
@@ -93,13 +100,12 @@ async def _entry(
 def test_due_round_uses_explicit_shanghai_sunday_eight() -> None:
     before = datetime(2026, 9, 26, 23, 59, tzinfo=UTC)
     after = datetime(2026, 9, 27, 0, 0, tzinfo=UTC)
-    name_before, due_before, _ = due_round(before, "Asia/Shanghai")
-    name_after, due_after, cutoff = due_round(after, "Asia/Shanghai")
+    name_before, due_before = due_round(before, "Asia/Shanghai")
+    name_after, due_after = due_round(after, "Asia/Shanghai")
     assert name_before == "weekly-2026-09-20"
     assert due_before.isoformat() == "2026-09-20T08:00:00+08:00"
     assert name_after == "weekly-2026-09-27"
     assert due_after.isoformat() == "2026-09-27T08:00:00+08:00"
-    assert cutoff.isoformat() == "2026-09-20T08:00:00+08:00"
 
 
 async def test_dry_run_does_not_claim_or_send(tmp_path: Path) -> None:
@@ -189,9 +195,14 @@ async def test_unfinished_first_pair_prevents_next_pair_claim(tmp_path: Path) ->
     assert (await repo.get_entry("weekly0913:sec_3")).status == "pending"
 
 
-async def test_one_run_finishes_current_pair_without_claiming_third(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("budget", "spent"), [("PAIR_START_WINDOW_SECONDS", 0), ("MAX_STEPS_PER_RUN", 2)]
+)
+async def test_spent_run_budget_finishes_current_pair_without_claiming_third(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: str, spent: int
 ) -> None:
+    """A closed start window or a used-up step cap holds the next pair."""
+    monkeypatch.setattr(weekly_module, budget, spent)
     repo = FakeQueueRepository()
     for index in range(1, 4):
         user_dir = tmp_path / f"Account-{index}"
@@ -216,6 +227,7 @@ async def test_one_run_finishes_current_pair_without_claiming_third(
         engine=engine, config=_config(tmp_path), round_name="weekly0913"
     )
     assert outcome.status == "pair_complete"
+    assert outcome.note == "pairs=1 steps=2"
     assert (await repo.get_entry("weekly0913:sec_1")).status == "completed"
     assert (await repo.get_entry("weekly0913:sec_2")).status == "completed"
     assert (await repo.get_entry("weekly0913:sec_3")).status == "pending"
@@ -335,8 +347,172 @@ async def test_one_account_sends_only_unresolved_media_then_completes(
     assert (await repo.get_entry("weekly0913:sec_1")).chat_id == "oc_new"
     assert (await repo.get_entry("weekly0913:sec_1")).status == "completed"
     channel.deliver_file.assert_awaited_once()
-    assert channel.deliver_file.await_args.kwargs["parent_id"] == "om_topic"
+    assert "parent_id" not in channel.deliver_file.await_args.kwargs
     engine.posts.download_new_posts.assert_not_called()
+
+
+async def test_parked_partner_does_not_mark_a_finished_pair_for_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(weekly_account_module, "MAX_FILES_PER_RUN", 1)
+    user_dir = tmp_path / "Account"
+    post_dir = user_dir / "2026-09-13 09-00-00 post"
+    post_dir.mkdir(parents=True)
+    for name in ("a.mp4", "b.mp4"):
+        (post_dir / name).write_bytes(name.encode())
+    repo = FakeQueueRepository()
+    await _entry(repo, root=user_dir, cutoff="2026-09-12T08:00:00")
+    await repo.upsert_entry(
+        key="weekly0913:sec_2",
+        round="weekly0913",
+        nickname="Parked",
+        sec_user_id="sec_2",
+        mode="incremental",
+        status="needs_reconciliation",
+    )
+    engine = _engine(repo)
+    records: list[SimpleNamespace] = []
+
+    async def deliver(**kwargs: Path) -> SimpleNamespace:
+        path = kwargs["file_path"]
+        record = SimpleNamespace(
+            round="weekly0913",
+            status="sent",
+            relative_path=path.relative_to(user_dir).as_posix(),
+            content_sha256=sha256(path.read_bytes()).hexdigest(),
+        )
+        records.append(record)
+        return record
+
+    async def list_files(**kwargs: Any) -> list[SimpleNamespace]:
+        if kwargs.get("round") == "legacy":
+            return []
+        rows = [r for r in records if kwargs.get("status") in (None, r.status)]
+        offset = kwargs.get("offset", 0) or 0
+        limit = kwargs.get("limit", -1)
+        rows = rows[offset:]
+        return rows if limit is None or limit < 0 else rows[:limit]
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
+    group = SimpleNamespace(
+        status="ready",
+        chat_id="oc_new",
+        topic_status="ready",
+        topic_message_id="om_topic",
+    )
+    channel = SimpleNamespace(
+        ensure_group=AsyncMock(return_value=group),
+        ensure_topic=AsyncMock(return_value=group),
+        deliver_file=AsyncMock(side_effect=deliver),
+    )
+    # Later steps find the group the first step recorded in the ledger.
+    engine.delivery_ledger.get_group = AsyncMock(
+        side_effect=lambda **_: group if channel.ensure_group.await_count else None
+    )
+    outcome = await run_once(
+        engine=engine,
+        config=_config(tmp_path),
+        round_name="weekly0913",
+        channel=channel,
+    )
+    assert outcome.status == "pair_complete"
+    assert outcome.note == "pairs=1 steps=2"
+    assert outcome.files == 2
+    assert (await repo.get_entry("weekly0913:sec_2")).status == "needs_reconciliation"
+
+
+async def test_prior_send_under_an_edited_caption_is_not_counted_as_sent(
+    tmp_path: Path,
+) -> None:
+    user_dir = tmp_path / "Account"
+    stamp = "2026-09-13 09-00-00"
+    post_dir = user_dir / f"{stamp}_new caption"
+    post_dir.mkdir(parents=True)
+    (post_dir / f"{stamp}_new caption_video.mp4").write_bytes(b"video")
+    repo = FakeQueueRepository()
+    await _entry(repo, root=user_dir, cutoff="2026-09-12T08:00:00")
+    engine = _engine(repo)
+    group = SimpleNamespace(
+        status="ready",
+        chat_id="oc_new",
+        topic_status="ready",
+        topic_message_id="om_topic",
+    )
+    prior = SimpleNamespace(
+        status="sent",
+        relative_path=f"{stamp}_old caption/{stamp}_old caption_video.mp4",
+    )
+    channel = SimpleNamespace(
+        ensure_group=AsyncMock(return_value=group),
+        ensure_topic=AsyncMock(return_value=group),
+        deliver_file=AsyncMock(return_value=prior),
+    )
+    outcome = await run_once(
+        engine=engine,
+        config=_config(tmp_path),
+        round_name="weekly0913",
+        channel=channel,
+    )
+    assert outcome.status == "completed"
+    assert outcome.files == 0
+    channel.deliver_file.assert_awaited_once()
+
+
+async def test_post_covered_media_never_takes_the_send_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(weekly_account_module, "MAX_FILES_PER_RUN", 2)
+    user_dir = tmp_path / "Account"
+    adopted, fresh = "2026-09-13 09-00-00", "2026-09-14 09-00-00"
+    adopted_dir = user_dir / f"{adopted}_caption"
+    adopted_dir.mkdir(parents=True)
+    for index in (1, 2, 3):
+        (adopted_dir / f"{adopted}_caption_image_{index}.webp").write_bytes(
+            f"image {index}".encode()
+        )
+    fresh_dir = user_dir / f"{fresh}_clip"
+    fresh_dir.mkdir()
+    video = fresh_dir / f"{fresh}_clip_video.mp4"
+    video.write_bytes(b"video")
+    repo = FakeQueueRepository()
+    await _entry(repo, root=user_dir, cutoff="2026-09-12T08:00:00")
+    engine = _engine(repo)
+    post_level = SimpleNamespace(
+        relative_path=f"{adopted}_feishu/{adopted}_feishu_post",
+        status="legacy_confirmed_sent",
+    )
+
+    async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
+        return [post_level] if kwargs.get("status") == "legacy_confirmed_sent" else []
+
+    engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
+    group = SimpleNamespace(
+        status="ready",
+        chat_id="oc_new",
+        topic_status="ready",
+        topic_message_id="om_topic",
+    )
+
+    async def deliver_file(**kwargs: Path) -> SimpleNamespace:
+        relative = kwargs["file_path"].relative_to(user_dir).as_posix()
+        return SimpleNamespace(status="sent", relative_path=relative)
+
+    channel = SimpleNamespace(
+        ensure_group=AsyncMock(return_value=group),
+        ensure_topic=AsyncMock(return_value=group),
+        deliver_file=AsyncMock(side_effect=deliver_file),
+    )
+    outcome = await run_once(
+        engine=engine,
+        config=_config(tmp_path),
+        round_name="weekly0913",
+        channel=channel,
+    )
+    assert (outcome.status, outcome.files) == ("completed", 1)
+    channel.deliver_file.assert_awaited_once()
+    assert channel.deliver_file.await_args.kwargs["file_path"] == video
 
 
 async def test_legacy_confirmed_path_completes_without_new_group(
@@ -451,7 +627,11 @@ async def test_legacy_failure_does_not_hide_other_unsent_media(tmp_path: Path) -
     channel = SimpleNamespace(
         ensure_group=AsyncMock(return_value=group),
         ensure_topic=AsyncMock(return_value=group),
-        deliver_file=AsyncMock(return_value=SimpleNamespace(status="sent")),
+        deliver_file=AsyncMock(
+            return_value=SimpleNamespace(
+                status="sent", relative_path=unsent.relative_to(user_dir).as_posix()
+            )
+        ),
     )
     outcome = await run_once(
         engine=engine,

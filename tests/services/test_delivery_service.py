@@ -13,6 +13,7 @@ from dyvine.core.exceptions import DeliveryError
 from dyvine.services.delivery import (
     FeishuCredentials,
     FeishuGroupChannel,
+    legacy_upload_file_name,
     post_datetime_from_path,
     scan_media_files,
     send_via_hermes,
@@ -86,10 +87,25 @@ def _channel(transport: FakeTransport | None = None) -> FeishuGroupChannel:
 
 
 def test_upload_file_name_truncates_long_stems() -> None:
-    """Names over 50 chars shrink to stem[:40] + ext."""
+    """Names over 50 chars without an f2 media slot shrink to stem[:40] + ext."""
     long = Path("x" * 48 + ".mp4")
     assert upload_file_name(long) == "x" * 40 + ".mp4"
     assert upload_file_name(Path("short.mp4")) == "short.mp4"
+
+
+def test_upload_file_name_keeps_the_media_slot_of_long_post_names() -> None:
+    """Images of one long-caption post keep distinct upload names."""
+    folder = "2026-09-15 10-00-00_" + "a caption long enough to be truncated" * 2
+    images = [Path(folder) / f"{folder}_image_{n}.webp" for n in (1, 2, 12)]
+    names = [upload_file_name(path) for path in images]
+    assert len(set(names)) == len(names)
+    for name, n in zip(names, (1, 2, 12), strict=True):
+        assert name.startswith("2026-09-15 10-00-00_a caption")
+        assert name.endswith(f"_image_{n}.webp")
+        assert len(name) == 50
+    # Audits still match the legacy sender's names, which lost the slot.
+    assert len({legacy_upload_file_name(path) for path in images}) == 1
+    assert legacy_upload_file_name(images[0]) == folder[:40] + ".webp"
 
 
 def test_post_datetime_from_path_parses_first_segment(tmp_path: Path) -> None:

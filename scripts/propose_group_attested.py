@@ -1,9 +1,13 @@
-"""Propose reviewed group-attested decisions without changing Postgres.
+"""Propose reviewed attested release decisions without changing Postgres.
 
 The output is a private JSONL copy of the frozen report. Only rows with a
-complete group-level proof receive ``release_pending_group_attested``. Run
-``apply_queue_reconciliation.py`` in preview mode against this output before
-any separately authorized apply.
+complete proof receive the chosen action: ``release_pending_group_attested``
+(the whole chat matches imported history) or, with ``--action``,
+``release_pending_window_attested`` (the chat matches the legacy ledger for
+media posted after the queue cutoff) or ``release_pending_feishu_adopted``
+(the chat is taken as the record of what was sent, and the proposal carries
+the ledger rows to adopt and demote). Run ``apply_queue_reconciliation.py``
+in preview mode against this output before any separately authorized apply.
 """
 
 from __future__ import annotations
@@ -86,6 +90,8 @@ def _adopted_destination(
 
 async def propose(args: argparse.Namespace) -> dict[str, Any]:
     """Evaluate every active-round account against immutable audit evidence."""
+    action = getattr(args, "action", "release_pending_group_attested")
+    timezone = getattr(args, "timezone", None)
     source_rows, source_sha256 = _report_rows(Path(args.source_report))
     if any("resolution" in row for row in source_rows):
         raise ValueError("proposal source must be the original frozen report")
@@ -109,6 +115,11 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
         supplemental_keys_path=(
             Path(args.supplemental_keys_file)
             if getattr(args, "supplemental_keys_file", None)
+            else None
+        ),
+        other_chat_audit_path=(
+            Path(args.other_chat_audit)
+            if getattr(args, "other_chat_audit", None)
             else None
         ),
     )
@@ -145,7 +156,7 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
                         candidate = {
                             **source,
                             "resolution": {
-                                "action": "release_pending_group_attested",
+                                "action": action,
                                 "chat_id": destination[0],
                                 "topic_message_id": destination[1],
                             },
@@ -158,7 +169,27 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
                             set(),
                             inputs,
                             lock=False,
+                            timezone=timezone,
                         )
+                        if (
+                            decision.status is None
+                            and decision.feishu_adoption is not None
+                        ):
+                            # Carry the plan the audit and Postgres imply, then
+                            # confirm the row releases with exactly that plan.
+                            candidate["resolution"]["plan"] = (
+                                decision.feishu_adoption.payload()
+                            )
+                            decision, _queue = await _inspect_row(
+                                session,
+                                candidate,
+                                args.active_round,
+                                False,
+                                set(),
+                                inputs,
+                                lock=False,
+                                timezone=timezone,
+                            )
             if decision.status == "pending" and candidate is not None:
                 proposed.append(candidate)
                 count += 1
@@ -170,12 +201,14 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
     _write_private_jsonl(Path(args.output), proposed)
     return {
         "mode": "proposal",
+        "action": action,
         "source_sha256": source_sha256,
         "feishu_audit_sha256": inputs.journal.sha256,
         "supplemental_audit_sha256": (
             inputs.supplemental_journal.sha256 if inputs.supplemental_journal else None
         ),
         "supplemental_keys_sha256": inputs.keys_file_sha256,
+        "other_chat_audit_sha256": inputs.other_chat_audit_sha256,
         "legacy_work_sha256": inputs.work_sha256,
         "total_rows": len(source_rows),
         "active_rows": len(selected),
@@ -190,11 +223,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--feishu-audit", required=True)
     parser.add_argument("--supplemental-feishu-audit")
     parser.add_argument("--supplemental-keys-file")
+    parser.add_argument("--other-chat-audit")
     parser.add_argument("--legacy-work-db", required=True)
     parser.add_argument("--active-round", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--action",
+        choices=(
+            "release_pending_group_attested",
+            "release_pending_window_attested",
+            "release_pending_feishu_adopted",
+        ),
+        default="release_pending_group_attested",
+    )
+    parser.add_argument(
+        "--timezone",
+        help="weekly runner timezone (DYVINE_WEEKLY_TIMEZONE) for window cutoffs",
+    )
     parser.add_argument("--database-url-env", default="DATABASE_URL")
     args = parser.parse_args(argv)
+    if args.action != "release_pending_group_attested" and not args.timezone:
+        parser.error("window attestation requires --timezone")
     if bool(args.supplemental_feishu_audit) != bool(args.supplemental_keys_file):
         parser.error("supplemental audit and keys file must be supplied together")
     output = Path(args.output).resolve()
@@ -205,6 +254,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.feishu_audit,
             args.supplemental_feishu_audit,
             args.supplemental_keys_file,
+            args.other_chat_audit,
             args.legacy_work_db,
         )
         if value

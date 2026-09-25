@@ -20,6 +20,7 @@ import httpx
 
 from ..core.exceptions import DeliveryError
 from ..core.logging import ContextLogger
+from ..db.delivery_ledger import post_media_slot
 from ..db.protocols import DeliveryLedgerRepository
 from ..db.records import DeliveryGroupRecord, FileDeliveryRecord
 
@@ -28,7 +29,7 @@ logger = ContextLogger(__name__)
 #: Extensions the sender ever ships.
 MEDIA_EXTS = frozenset({".mp4", ".webp", ".jpg", ".jpeg", ".png"})
 
-#: Upload names longer than this are truncated to stem[:40] + ext.
+#: Upload names longer than this are shortened (see ``upload_file_name``).
 LONG_NAME_CHARS = 50
 TRUNCATED_STEM_CHARS = 40
 
@@ -37,7 +38,6 @@ _TOKEN_URL = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/inter
 _IM_MESSAGES_URL = (
     "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
 )
-_IM_REPLY_URL = "https://open.feishu.cn/open-apis/im/v1/messages/{message_id}/reply"
 
 #: Hermes default env file carrying FEISHU_APP_ID / FEISHU_APP_SECRET.
 _HERMES_ENV_PATH = Path.home() / ".hermes" / ".env"
@@ -292,13 +292,33 @@ def post_datetime_from_path(path: Path, user_dir: Path) -> datetime | None:
         return None
 
 
-def upload_file_name(file_path: Path) -> str:
-    """Return the Feishu upload name (truncated, on-disk name untouched)."""
+def legacy_upload_file_name(file_path: Path) -> str:
+    """Return the name the legacy sender uploaded: ``stem[:40] + ext`` if long.
+
+    Audits match historical Feishu files by this name, so it must not change.
+    """
     name = file_path.name
     if len(name) > LONG_NAME_CHARS:
         stem, ext = file_path.stem, file_path.suffix
         return stem[:TRUNCATED_STEM_CHARS] + ext
     return name
+
+
+def upload_file_name(file_path: Path) -> str:
+    """Return the Feishu upload name (on-disk name untouched).
+
+    A long f2 media name keeps its media slot (``_image_3.webp``) and drops
+    caption characters instead, so the images of one post keep distinct names
+    in the group. Other long names keep the legacy truncation.
+    """
+    name = file_path.name
+    if len(name) <= LONG_NAME_CHARS:
+        return name
+    media = post_media_slot(f"{file_path.parent.name}/{name}")
+    if media is None or len(media[0]) + len(media[1]) > LONG_NAME_CHARS:
+        return legacy_upload_file_name(file_path)
+    slot = media[1]
+    return name[: LONG_NAME_CHARS - len(slot)] + slot
 
 
 class FeishuGroupChannel:
@@ -369,9 +389,8 @@ class FeishuGroupChannel:
         user_dir: Path,
         file_path: Path,
         chat_id: str,
-        parent_id: str,
     ) -> FileDeliveryRecord:
-        """Deliver a media file with durable pre-send intent."""
+        """Deliver a media file to the chat with durable pre-send intent."""
         from .delivery_durable import deliver_file
 
         return await deliver_file(
@@ -382,7 +401,6 @@ class FeishuGroupChannel:
             user_dir=user_dir,
             file_path=file_path,
             chat_id=chat_id,
-            parent_id=parent_id,
         )
 
     async def _auth_token(self) -> str:
@@ -453,23 +471,18 @@ class FeishuGroupChannel:
         msg_type: str,
         content: dict[str, Any],
         *,
-        parent_id: str | None,
         request_uuid: str,
     ) -> tuple[dict[str, Any] | None, Any]:
-        """Send one message; refresh the token once on auth errors."""
+        """Send one plain chat message; refresh the token once on auth errors."""
         import json as _json
 
         payload: dict[str, Any] = {
+            "receive_id": chat_id,
             "msg_type": msg_type,
             "content": _json.dumps(content, ensure_ascii=False),
+            "uuid": request_uuid,
         }
-        if parent_id:
-            url = _IM_REPLY_URL.format(message_id=parent_id)
-            payload["reply_in_thread"] = True
-        else:
-            url = _IM_MESSAGES_URL
-            payload["receive_id"] = chat_id
-        payload["uuid"] = request_uuid
+        url = _IM_MESSAGES_URL
         token = await self._auth_token()
         headers = {
             "Authorization": f"Bearer {token}",

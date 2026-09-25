@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import PurePosixPath
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +76,33 @@ def _checked_legacy_path(relative_path: str) -> str:
     return path.as_posix()
 
 
+# f2 saves post media as ``<create>_<desc>/<create>_<desc><slot>``, where the
+# slot suffix names the media (``_video.mp4``, ``_image_3.webp``, ...).
+_POST_CREATE_STAMP = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}")
+
+
+# A Feishu history adoption that knows a post but not which of its media the
+# chat holds records this slot; it stands for every media slot of the post.
+POST_LEVEL_SLOT = "_post"
+
+
+def post_media_slot(relative_path: str) -> tuple[str, str] | None:
+    """Return the post creation stamp and media slot of an f2 media path.
+
+    Authors can edit a caption after a legacy send, so a re-download of the
+    same media gets a different folder and file name; the creation stamp and
+    the slot suffix stay the same. Any other path shape returns ``None`` so
+    callers match exactly instead of guessing.
+    """
+    folder, separator, name = relative_path.partition("/")
+    if not separator or "/" in name or not name.startswith(folder):
+        return None
+    stamp, slot = folder[:19], name[len(folder) :]
+    if not _POST_CREATE_STAMP.fullmatch(stamp) or not slot:
+        return None
+    return stamp, slot
+
+
 def _group_record(row: DeliveryGroupRow) -> DeliveryGroupRecord:
     return DeliveryGroupRecord(
         key=row.key,
@@ -118,6 +146,28 @@ def _file_record(row: DeliveryFileRow) -> FileDeliveryRecord:
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+async def _same_post_media(
+    session: AsyncSession,
+    candidates: Select[tuple[DeliveryFileRow]],
+    relative_path: str,
+) -> FileDeliveryRecord | None:
+    """Return the first candidate holding the same post media as this path.
+
+    A candidate recorded at ``POST_LEVEL_SLOT`` covers every slot of its post.
+    """
+    slot = post_media_slot(relative_path)
+    if slot is None:
+        return None
+    covering = {slot, (slot[0], POST_LEVEL_SLOT)}
+    same_post = candidates.where(
+        DeliveryFileRow.relative_path.startswith(slot[0], autoescape=True)
+    ).order_by(DeliveryFileRow.relative_path)
+    for candidate in (await session.execute(same_post)).scalars():
+        if post_media_slot(candidate.relative_path) in covering:
+            return _file_record(candidate)
+    return None
 
 
 def _evidence_record(row: DeliveryLegacyEvidenceRow) -> LegacyEvidenceRecord:
@@ -412,7 +462,7 @@ class PostgresDeliveryLedgerRepository:
         relative_path: str,
         content_sha256: str,
         chat_id: str,
-        parent_id: str,
+        parent_id: str | None,
     ) -> FileDeliveryRecord:
         stamp = _stamp()
         statement = (
@@ -610,19 +660,47 @@ class PostgresDeliveryLedgerRepository:
     async def find_legacy_sent(
         self, *, sec_user_id: str, relative_path: str
     ) -> FileDeliveryRecord | None:
-        """Find confirmed legacy history by its normalized identity.
+        """Find the legacy send of this media, tolerating caption renames.
 
         Writers store the normalized path, so reads normalize first:
-        ``a//b`` and ``a/./b`` resolve to the same ``media_id`` as
-        ``a/b`` instead of missing.
+        ``a//b`` and ``a/./b`` resolve to the same identity as ``a/b``.
+        An exact normalized-path match wins. Otherwise a legacy send of
+        the same post creation stamp and media slot (see
+        ``post_media_slot``) is the same media under an edited caption,
+        so sending it again would duplicate it in the group.
         """
         normalized = _checked_legacy_path(relative_path)
-        media_id = sha256(f"legacy\0{sec_user_id}\0{normalized}".encode()).hexdigest()
+        legacy_sends = (
+            select(DeliveryFileRow)
+            .where(DeliveryFileRow.sec_user_id == sec_user_id)
+            .where(DeliveryFileRow.status == "legacy_confirmed_sent")
+        )
         async with self._sessions.session() as session:
-            row = await session.get(DeliveryFileRow, media_id)
-            if row is None or row.status != "legacy_confirmed_sent":
-                return None
-            return _file_record(row)
+            exact = legacy_sends.where(
+                DeliveryFileRow.relative_path == normalized
+            ).limit(1)
+            row = (await session.execute(exact)).scalars().first()
+            if row is not None:
+                return _file_record(row)
+            return await _same_post_media(session, legacy_sends, normalized)
+
+    async def find_prior_sent(
+        self, *, sec_user_id: str, relative_path: str
+    ) -> FileDeliveryRecord | None:
+        """Find this runner's confirmed send of the same post media.
+
+        ``reserve_file`` dedupes only the exact path and content. Weekly
+        windows overlap, so a caption edited between two downloads renames
+        the file; a ``sent`` record with the same post creation stamp and
+        media slot (see ``post_media_slot``) is the same media.
+        """
+        sends = (
+            select(DeliveryFileRow)
+            .where(DeliveryFileRow.sec_user_id == sec_user_id)
+            .where(DeliveryFileRow.status == "sent")
+        )
+        async with self._sessions.session() as session:
+            return await _same_post_media(session, sends, relative_path)
 
     async def find_legacy_permanent_failure(
         self, *, sec_user_id: str, relative_path: str

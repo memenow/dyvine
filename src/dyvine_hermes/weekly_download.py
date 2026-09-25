@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from dyvine.core.exceptions import ServiceError
 from dyvine.services.delivery import MEDIA_EXTS
 
 from .weekly_state import (
@@ -14,6 +17,8 @@ from .weekly_state import (
     MIN_SEND_WINDOW_SECONDS,
     _checkpoint,
     _path_within_root,
+    entry_cutoff,
+    media_after_cutoff,
     patch_queue,
 )
 from .weekly_types import WeeklyConfig
@@ -26,6 +31,41 @@ def _has_local_media(user_dir: Path) -> bool:
     )
 
 
+async def _skip_unavailable_author(engine: Any, entry: Any) -> Any | None:
+    """Skip the row for good when Douyin reports its author gone.
+
+    A deactivated or banned author, or one without posts, can never be
+    delivered: the row becomes ``skipped`` with the evidence in
+    ``author_unavailable``, and the seed is excluded from later rounds. The
+    Feishu group and file ledger are kept. A failed or unclear check never
+    skips; ``None`` lets the download proceed.
+    """
+    try:
+        state = await engine.users.get_author_state(entry.sec_user_id)
+    except ServiceError:
+        return None
+    if state.available:
+        return None
+    seed_excluded = await engine.queue.exclude_seed(entry.sec_user_id)
+    return await patch_queue(
+        engine,
+        entry,
+        status="skipped",
+        op_message=(
+            f"Douyin reports the author {state.reason}; skipped for good, group kept"
+        ),
+        extra={
+            **entry.extra,
+            "author_unavailable": {
+                "reason": state.reason,
+                "aweme_count": state.aweme_count,
+                "checked_at": datetime.now(UTC).isoformat(),
+                "seed_excluded": seed_excluded,
+            },
+        },
+    )
+
+
 async def download_entry(
     engine: Any, entry: Any, config: WeeklyConfig, deadline: float
 ) -> Any:
@@ -35,9 +75,16 @@ async def download_entry(
     deadline -= MIN_SEND_WINDOW_SECONDS
     checkpoint = _checkpoint(entry)
     reconciliation = entry.extra.get("reconciliation")
+    # Attested cutover releases proved what the chat already holds, not that
+    # any legacy download or operation still describes the media on disk.
     attested_recheck = bool(
         isinstance(reconciliation, dict)
-        and reconciliation.get("action") == "release_pending_group_attested"
+        and reconciliation.get("action")
+        in {
+            "release_pending_group_attested",
+            "release_pending_window_attested",
+            "release_pending_feishu_adopted",
+        }
         and not checkpoint.get("fresh_download_confirmed")
     )
     cutover_entry = entry.round == config.cutover_round
@@ -139,6 +186,9 @@ async def download_entry(
     remaining = deadline - time.monotonic()
     if remaining <= MIN_DOWNLOAD_SLICE_SECONDS:
         return await patch_queue(engine, entry, status="pending", extra=entry.extra)
+    skipped = await _skip_unavailable_author(engine, entry)
+    if skipped is not None:
+        return skipped
     operation = await engine.operations.create_operation(
         operation_type="user_posts_incremental_download",
         subject_id=entry.sec_user_id,
@@ -154,11 +204,15 @@ async def download_entry(
         operation_id=operation.operation_id,
         op_status="pending",
     )
+    cutoff = entry_cutoff(entry, config.timezone)
     result = await asyncio.wait_for(
         engine.posts.download_new_posts(
             entry.sec_user_id,
             since_aweme_id=since,
             operation_id=operation.operation_id,
+            # Delivery never sends media posted at or before the cutoff, so
+            # a fresh re-download must not walk the whole history to reach it.
+            posted_after=cutoff,
         ),
         timeout=remaining,
     )
@@ -178,13 +232,23 @@ async def download_entry(
         )
     if not operation.download_path:
         raise ValueError("completed download has no recorded directory")
+    user_dir = _path_within_root(operation.download_path, config.download_root)
     checkpoint.update(
         download_complete=True,
         fresh_download_confirmed=True,
-        user_dir=str(_path_within_root(operation.download_path, config.download_root)),
+        user_dir=str(user_dir),
         downloaded_posts=result.new_count,
         newest_aweme_id=result.newest_aweme_id,
     )
+    if cutoff is not None:
+        # The runner sizes later pairs' disk budget from these window samples.
+        finished = datetime.now(ZoneInfo(config.timezone)).replace(tzinfo=None)
+        checkpoint.update(
+            window_bytes=sum(
+                path.stat().st_size for path in media_after_cutoff(user_dir, cutoff)
+            ),
+            window_days=(finished - cutoff).total_seconds() / 86400,
+        )
     return await patch_queue(
         engine,
         entry,
@@ -218,6 +282,9 @@ async def _download_full(
     remaining = deadline - time.monotonic()
     if remaining <= MIN_DOWNLOAD_SLICE_SECONDS:
         return await patch_queue(engine, entry, status="pending")
+    skipped = await _skip_unavailable_author(engine, entry)
+    if skipped is not None:
+        return skipped
     operation = await engine.operations.create_operation(
         operation_type="user_posts_bulk_download",
         subject_id=entry.sec_user_id,

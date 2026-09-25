@@ -15,11 +15,16 @@ from dyvine.db.models import DeliveryFileRow, DeliveryGroupRow, DownloadQueueRow
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from dyvine.services.delivery import legacy_upload_file_name  # noqa: E402
 from scripts.queue_group_attestation import (  # noqa: E402
     AuditJournal,
+    FeishuAdoption,
     GroupAttestation,
+    WindowAttestation,
     _source_digest,
     attest_group,
+    attest_window,
+    plan_feishu_adoption,
     read_audit_journal,
 )
 
@@ -357,3 +362,374 @@ def test_attestation_ignores_sibling_row_without_nickname() -> None:
     sibling["first_seen_safe_sent_paths"] = 0
     values["all_report_rows"].append(sibling)
     assert isinstance(attest_group(**values), GroupAttestation)
+
+
+_IN_WINDOW = "2026-09-10 12-00-00"
+_BEFORE_CUTOFF = "2026-09-01 12-00-00"
+
+
+def _media(stamp: str, caption: str = "clip", slot: str = "_video.mp4") -> str:
+    folder = f"{stamp}_{caption}"
+    return f"{folder}/{folder}{slot}"
+
+
+def _chat_file(path: str, **overrides: Any) -> dict[str, Any]:
+    return {"file_name": legacy_upload_file_name(Path(path)), **overrides}
+
+
+def _window_inputs(
+    chat: list[dict[str, Any]],
+    ledger_paths: list[str],
+    *,
+    cutoff: str | None = "2026-09-06T08:00:00",
+    mode: str = "incremental",
+) -> dict[str, Any]:
+    key = "weekly0913:sec-one"
+    report = {
+        "key": key,
+        "round": "weekly0913",
+        "sec_user_id": "sec-one",
+        "nickname": "Alpha",
+        "first_seen_safe_sent_paths": len(ledger_paths),
+        # The chat settles these, so the window proof must not require zeros.
+        "ambiguous_sent_paths": 3,
+        "cache_only_unverified_paths": 2,
+        "legacy_user_failed_max": 1,
+    }
+    queue = DownloadQueueRow(
+        key=key,
+        round="weekly0913",
+        sec_user_id="sec-one",
+        nickname="Alpha",
+        chat_id="oc-chat",
+        status="needs_reconciliation",
+        mode=mode,
+        cutoff=cutoff,
+    )
+    group = DeliveryGroupRow(
+        key=key,
+        round="weekly0913",
+        sec_user_id="sec-one",
+        nickname="Alpha",
+        chat_id="oc-chat",
+        status="ready",
+        topic_status="ready",
+        topic_message_id="om-topic",
+    )
+    ledger = [
+        DeliveryFileRow(
+            media_id=f"media-{index}",
+            round="weekly0913",
+            sec_user_id="sec-one",
+            relative_path=path,
+            status="legacy_confirmed_sent",
+        )
+        for index, path in enumerate(ledger_paths)
+    ]
+    target = _source_digest(report, group, [queue], ledger)
+    raw_files = [
+        {
+            "message_id": f"om-file-{index}",
+            "file_key": f"file-{index}",
+            "sender_type": "app",
+            "sender_id": "app-one",
+            "deleted": False,
+            "chat_id": "oc-chat",
+            **item,
+        }
+        for index, item in enumerate(chat)
+    ]
+    active = [item for item in raw_files if not item["deleted"]]
+    page = {
+        "type": "page",
+        "key": key,
+        "source_sha256": target,
+        "container_type": "chat",
+        "container_id": "oc-chat",
+        "request_page_token": None,
+        "next_page_token": None,
+        "files": raw_files,
+        "threads": [],
+    }
+    account = {
+        "type": "account",
+        "key": key,
+        "source_sha256": target,
+        "round": "weekly0913",
+        "sec_user_id": "sec-one",
+        "nickname": "Alpha",
+        "chat_id": "oc-chat",
+        "topic_message_id": "om-topic",
+        "thread_id": None,
+        "scan_complete": True,
+        "send_blocked": True,
+        "group_file_count": len(active),
+        "app_group_file_count": sum(item["sender_type"] == "app" for item in active),
+        "legacy_safe_sent_paths": len(ledger_paths),
+        "zero_file_group": not active,
+        "discrepancies": ["app_files_outside_verified_topic"],
+    }
+    journal = AuditJournal("journal-hash", "manifest-hash", {key: [page, account]})
+    return {
+        "report": report,
+        "original": report.copy(),
+        "all_report_rows": [report],
+        "group": group,
+        "queue": queue,
+        "current_queues": [queue],
+        "current_files": ledger,
+        "historical_queues": [queue],
+        "historical_files": list(ledger),
+        "work_chats": {("weekly0913", "Alpha"): {"oc-chat"}},
+        "journal": journal,
+        "timezone": "Asia/Shanghai",
+    }
+
+
+def test_window_attestation_ignores_older_rounds_in_the_same_chat() -> None:
+    sent = _media(_IN_WINDOW)
+    values = _window_inputs(
+        [_chat_file(sent), _chat_file(_media(_BEFORE_CUTOFF, "older round"))],
+        [sent],
+    )
+    proof = attest_window(**values)
+    assert isinstance(proof, WindowAttestation)
+    assert proof.window_file_count == 1
+    assert proof.cutoff == "2026-09-06T08:00:00"
+
+
+@pytest.mark.parametrize(
+    ("chat_paths", "ledger_paths"),
+    [
+        # Sent but unrecorded: releasing would send it twice.
+        ([_media(_IN_WINDOW), _media(_IN_WINDOW, "other")], [_media(_IN_WINDOW)]),
+        # Recorded but absent from the chat: releasing would never send it.
+        ([_media(_IN_WINDOW)], [_media(_IN_WINDOW), _media(_IN_WINDOW, "other")]),
+    ],
+)
+def test_window_attestation_holds_any_in_window_difference(
+    chat_paths: list[str], ledger_paths: list[str]
+) -> None:
+    values = _window_inputs([_chat_file(path) for path in chat_paths], ledger_paths)
+    assert attest_window(**values) == (
+        "Feishu in-window files differ from the legacy ledger"
+    )
+
+
+def test_window_attestation_counts_only_live_app_files() -> None:
+    sent = _media(_IN_WINDOW)
+    other = _media(_IN_WINDOW, "other")
+    values = _window_inputs(
+        [
+            _chat_file(sent),
+            _chat_file(other, deleted=True),
+            _chat_file(other, sender_type="user", sender_id="ou-user"),
+        ],
+        [sent],
+    )
+    assert isinstance(attest_window(**values), WindowAttestation)
+
+
+def test_window_attestation_holds_an_app_file_without_a_post_time() -> None:
+    values = _window_inputs([{"file_name": "notes.mp4"}], [])
+    assert attest_window(**values) == "Feishu app file name has no post time"
+
+
+@pytest.mark.parametrize(
+    ("mode", "cutoff"), [("full", "2026-09-06T08:00:00"), ("incremental", None)]
+)
+def test_window_attestation_needs_an_incremental_cutoff(
+    mode: str, cutoff: str | None
+) -> None:
+    values = _window_inputs([], [], mode=mode, cutoff=cutoff)
+    assert attest_window(**values) == (
+        "window attestation needs an incremental queue cutoff"
+    )
+
+
+def test_window_cutoff_matches_the_weekly_runner_timezone() -> None:
+    """A UTC cutoff is compared in the runner's local time, strictly after."""
+    at_cutoff = _media("2026-09-06 08-00-00", "at cutoff")
+    after = _media("2026-09-06 08-00-01", "after")
+    values = _window_inputs(
+        [_chat_file(at_cutoff), _chat_file(after)],
+        [after],
+        cutoff="2026-09-06T00:00:00Z",
+    )
+    proof = attest_window(**values)
+    assert isinstance(proof, WindowAttestation)
+    assert (proof.cutoff, proof.window_file_count) == ("2026-09-06T08:00:00", 1)
+
+
+def test_window_attestation_matches_truncated_upload_names() -> None:
+    long_caption = "a caption long enough that Feishu truncates the upload name"
+    sent = _media(_IN_WINDOW, long_caption, "_image_1.webp")
+    assert legacy_upload_file_name(Path(sent)) != Path(sent).name
+    values = _window_inputs([_chat_file(sent)], [sent])
+    assert isinstance(attest_window(**values), WindowAttestation)
+
+
+@pytest.mark.parametrize("mutation", ["stale_source", "other_chat", "sender"])
+def test_window_attestation_keeps_the_shared_audit_checks(mutation: str) -> None:
+    sent = _media(_IN_WINDOW)
+    values = _window_inputs([_chat_file(sent)], [sent])
+    page, account = values["journal"].rows[values["report"]["key"]]
+    if mutation == "stale_source":
+        account["source_sha256"] = "older-snapshot"
+    elif mutation == "other_chat":
+        values["work_chats"][("weekly0913", "Alpha")].add("oc-other")
+    else:
+        page["files"].append(
+            {**page["files"][0], "message_id": "om-extra", "sender_id": "app-two"}
+        )
+        account["group_file_count"] = account["app_group_file_count"] = 2
+    assert isinstance(attest_window(**values), str)
+
+
+_LONG_CAPTION = "a caption long enough that Feishu truncates the upload name"
+
+
+def test_adoption_takes_the_chat_as_the_record_inside_the_window() -> None:
+    kept = _media(_IN_WINDOW, "kept")
+    exact = _media("2026-09-11 09-00-00", "short", "_image_2.webp")
+    shortened = _media("2026-09-12 09-00-00", _LONG_CAPTION, "_image_1.webp")
+    disproved = _media("2026-09-13 09-00-00", "gone")
+    older = _media(_BEFORE_CUTOFF, "older round")
+    values = _window_inputs(
+        [
+            _chat_file(kept),
+            _chat_file(exact),
+            _chat_file(shortened),
+            _chat_file(shortened),
+            _chat_file(older),
+        ],
+        [kept, disproved],
+    )
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.scope, plan.cutoff) == ("window", "2026-09-06T08:00:00")
+    post = "2026-09-12 09-00-00_feishu/2026-09-12 09-00-00_feishu_post"
+    assert [(item.relative_path, item.precision) for item in plan.adopt] == [
+        (exact, "exact"),
+        (post, "post"),
+    ]
+    assert len(plan.adopt[1].message_ids) == 2
+    assert plan.demote == ("media-1",)
+    assert plan.payload()["adopt"][0] == {
+        "relative_path": exact,
+        "message_ids": ["om-file-1"],
+        "precision": "exact",
+    }
+
+
+def test_adoption_keeps_a_shortened_ledger_name_while_the_chat_has_its_post() -> None:
+    first = _media(_IN_WINDOW, _LONG_CAPTION, "_image_1.webp")
+    second = _media(_IN_WINDOW, _LONG_CAPTION, "_image_2.webp")
+    plan = plan_feishu_adoption(**_window_inputs([_chat_file(first)], [first, second]))
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.adopt, plan.demote) == ((), ())
+
+
+def test_adoption_demotes_a_shortened_post_the_chat_does_not_hold() -> None:
+    gone = _media(_IN_WINDOW, _LONG_CAPTION, "_image_1.webp")
+    plan = plan_feishu_adoption(**_window_inputs([], [gone]))
+    assert isinstance(plan, FeishuAdoption)
+    assert plan.demote == ("media-0",)
+
+
+def test_adoption_covers_the_whole_feed_without_an_incremental_cutoff() -> None:
+    older = _media(_BEFORE_CUTOFF, "older", "_image_1.webp")
+    values = _window_inputs([_chat_file(older)], [], cutoff=None, mode="full")
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.scope, plan.cutoff) == ("full", None)
+    assert [item.relative_path for item in plan.adopt] == [older]
+
+
+def test_adoption_follows_the_cutoff_delivery_applies_even_in_full_mode() -> None:
+    older = _media(_BEFORE_CUTOFF, "older", "_image_1.webp")
+    values = _window_inputs([_chat_file(older)], [], mode="full")
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert (plan.scope, plan.adopt) == ("window", ())
+
+
+@pytest.mark.parametrize(
+    ("cutoff", "mode"), [("2026-09-06T08:00:00", "incremental"), (None, "full")]
+)
+def test_adoption_leaves_names_without_a_post_time_out_of_scope(
+    cutoff: str | None, mode: str
+) -> None:
+    kept = _media(_IN_WINDOW, "kept")
+    values = _window_inputs(
+        [{"file_name": "no-date.mp4"}, _chat_file(kept)], [], cutoff=cutoff, mode=mode
+    )
+    plan = plan_feishu_adoption(**values)
+    assert isinstance(plan, FeishuAdoption)
+    assert [item.relative_path for item in plan.adopt] == [kept]
+
+
+def _older_chat(status: str = "normal", *names: str, complete: bool = True) -> Any:
+    return {
+        "oc-other": {
+            "chat_status": status,
+            "scan_complete": complete,
+            "app_file_names": list(names),
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "older",
+    [
+        _older_chat("dissolved", complete=False),
+        _older_chat("dissolved_save", complete=False),
+        _older_chat("normal", _chat_file(_media(_BEFORE_CUTOFF))["file_name"]),
+        _older_chat("normal", "no-date.mp4"),
+        _older_chat("normal"),
+    ],
+)
+def test_adoption_clears_an_older_chat_that_cannot_hold_a_repeated_send(
+    older: dict[str, dict[str, Any]],
+) -> None:
+    values = _window_inputs([], [])
+    values["work_chats"] = {("weekly0913", "Alpha"): {"oc-chat", "oc-other"}}
+    values["other_chats"] = older
+    assert isinstance(plan_feishu_adoption(**values), FeishuAdoption)
+
+
+@pytest.mark.parametrize(
+    ("older", "cutoff", "mode"),
+    [
+        (
+            _older_chat("normal", _chat_file(_media(_IN_WINDOW))["file_name"]),
+            "2026-09-06T08:00:00",
+            "incremental",
+        ),
+        (_older_chat("normal", complete=False), "2026-09-06T08:00:00", "incremental"),
+        (
+            _older_chat("normal", _chat_file(_media(_BEFORE_CUTOFF))["file_name"]),
+            None,
+            "full",
+        ),
+        ({"oc-chat": _older_chat("dissolved")["oc-other"]}, None, "full"),
+        ({}, "2026-09-06T08:00:00", "incremental"),
+    ],
+)
+def test_adoption_holds_an_older_chat_the_audit_does_not_clear(
+    older: dict[str, dict[str, Any]], cutoff: str | None, mode: str
+) -> None:
+    values = _window_inputs([], [], cutoff=cutoff, mode=mode)
+    values["work_chats"] = {("weekly0913", "Alpha"): {"oc-chat", "oc-other"}}
+    values["other_chats"] = older
+    assert plan_feishu_adoption(**values) == (
+        "account has another or unverified historical chat"
+    )
+
+
+def test_adoption_holds_a_shared_chat() -> None:
+    values = _window_inputs([], [])
+    values["work_chats"] = {("weekly0913", "Alpha"): {"oc-chat", "oc-other"}}
+    assert plan_feishu_adoption(**values) == (
+        "account has another or unverified historical chat"
+    )

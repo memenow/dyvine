@@ -177,15 +177,74 @@ DOUYIN_COOKIE=&lt;browser session cookie&gt;</code></pre>
       </div>
       <p>Apply the schema once before first use (operator-side, from a repo checkout with the same <code>DATABASE_URL</code>):</p>
       <pre><code>uv run alembic upgrade head</code></pre>
+      <h3 id="hermes-dependencies">Hermes dependency resolution</h3>
       <p>
-        Install every version pinned by <code>plugin.yaml</code>
-        <strong>with dependencies</strong> (never <code>--no-deps</code>:
-        <code>playwright</code> needs its transitive packages such as
-        <code>pyee</code>), plus the matching Playwright Chromium build.
-        Then read one authorized <code>dyvine.posts.list</code> page before
-        enabling weekly sends: a profile check and doctor alone do not
-        establish post-list readiness, and an unsigned signer surfaces as
-        HTTP 403 on Argus-gated endpoints.
+        Hermes resolves a directory plugin's <code>pyproject.toml</code>
+        <code>[project].dependencies</code> (<code>plugin.yaml</code>
+        <code>python_dependencies</code> only when there is no <code>pyproject.toml</code>)
+        against the pins of its own environment. Dyvine's floors admit those pins (core
+        <code>python-dotenv==1.2.2</code>, bedrock extra <code>boto3==1.42.89</code>;
+        test-pinned), but <code>f2</code> 0.0.1.7 publishes <code>==</code> pins
+        (<code>httpx==0.27.2</code>, <code>pydantic==2.9.*</code>, <code>websockets&lt;13</code>,
+        <code>protobuf==5.28.3</code>, ...), so <code>hermes plugins enable dyvine</code> still
+        reports "No solution found". The lockfile lifts those pins with
+        <code>[tool.uv] override-dependencies</code>, which Hermes does not read, and the plugin
+        runs on the Hermes versions of the shared packages.
+      </p>
+      <p>
+        Install the locked packages that the Hermes venv lacks, without their dependencies, and
+        leave every package Hermes already has at its version. Run the commands from a checkout
+        at the deployed revision; <code>HERMES_PY</code> is the interpreter of the venv that runs
+        <code>hermes</code>:
+      </p>
+      <pre><code>HERMES_PY=/path/to/hermes-agent/venv/bin/python
+uv export --frozen --no-dev --no-emit-project --no-hashes --no-header \
+  --no-annotate -o dyvine-locked.txt
+"$HERMES_PY" - dyvine-locked.txt &gt; dyvine-missing.txt &lt;&lt;'EOF'
+import re, sys
+from importlib.metadata import PackageNotFoundError, version
+for line in open(sys.argv[1]):
+    req = line.strip()
+    if not req or req.startswith("#"):
+        continue
+    try:
+        version(re.split(r"[\s;=&lt;&gt;!~\[]", req, maxsplit=1)[0])
+    except PackageNotFoundError:
+        print(req)
+EOF
+uv pip install --no-config --python "$HERMES_PY" --no-deps -r dyvine-missing.txt</code></pre>
+      <p>
+        <code>--no-config</code> stops uv from applying the checkout's
+        <code>[tool.uv] override-dependencies</code>, which would replace some locked pins with
+        open floors. Repeat these steps after every <code>hermes update</code>: the update can
+        drop the added packages and disable the plugin. Afterwards, confirm with
+        <code>hermes plugins list</code> that dyvine is enabled, restart the gateway
+        (<code>hermes gateway restart</code>), and make one signed read-only call such as
+        <code>dyvine.posts.list</code>.
+      </p>
+      <p>
+        Plugin doctor and a profile call do not exercise the request signer. During the
+        cutover both passed while the Playwright dependency <code>pyee</code> from
+        <code>uv.lock</code> was missing, and signed post-list calls returned HTTP 403 until
+        it was installed. Verify the matching Chromium build and read one authorized
+        <code>dyvine.posts.list</code> page before enabling weekly sends.
+      </p>
+      <h3 id="chromium">Chromium for the webSign signer</h3>
+      <p>
+        <code>playwright==1.62.0</code> expects Chromium revision 1234 (Chrome for Testing
+        151.0.7922.34). Install it as the user that runs the Hermes gateway, with the same
+        <code>PLAYWRIGHT_BROWSERS_PATH</code> if the gateway sets one. Where the default
+        Playwright CDN is slow, point <code>PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST</code> at a mirror
+        that serves the same path layout, for example npmmirror:
+      </p>
+      <pre><code>PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright \
+  "$HERMES_PY" -m playwright install chromium</code></pre>
+      <p>
+        The variable covers every <code>chromium*</code> download and takes precedence over
+        <code>PLAYWRIGHT_DOWNLOAD_HOST</code>. On linux x64 the signer's build is fetched from
+        <code>&lt;host&gt;/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip</code>, so a local
+        HTTP server that serves the official Chrome for Testing zip under that path works too.
+
       </p>
     </section>
 
@@ -252,6 +311,21 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         <code>DOUYIN_RETAIN_MAX_GB</code> (GiB; <code>0</code> disables pruning).
       </p>
       <p>
+        Weekly delivery downloads into account folders under <code>DOUYIN_DOWNLOAD_ROOT</code>,
+        which <code>DOUYIN_RETAIN_MAX_GB</code> does not bound. <code>hermes dyvine media prune</code>
+        deletes media older than <code>--older-than-days</code> (default 14) from download folders
+        whose every recording queue row is settled (<code>completed</code>,
+        <code>permanent_failure</code>, or <code>skipped</code>): delivery reads only the folder its
+        row's checkpoint records, a settled row is never delivered again, and a later round
+        downloads again whatever it needs. A folder that any unsettled row records is kept, even when
+        another account shares it. Rows that never downloaded into a folder, such as frozen legacy
+        history, do not hold it, and nothing outside the download root is touched. The command takes
+        the weekly runner's lock and skips while a run is active; run it daily through Hermes
+        no-agent cron, and use <code>--dry-run</code> to report without deleting.
+      </p>
+      <pre><code>hermes dyvine media prune --dry-run
+hermes dyvine media prune --older-than-days 14</code></pre>
+      <p>
         Douyin's web APIs additionally require a per-request Argus webSign
         triple (<code>uifid</code>/<code>timestamp</code>/<code>x-secsdk-web-signature</code>)
         that only the SecureSDK inside a real browser session can compute. Dyvine keeps one
@@ -263,7 +337,7 @@ DATABASE_URL=postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine</code></pr
         when it observes an Argus block (<code>DOUYIN_WEBSIGN_RETRY_ONCE</code>), and fails fast
         (backing off) after repeated signer failures. The host must
         provide a matching Chromium build (<code>uv run playwright install chromium</code>
-        from a checkout); without it the
+        from a checkout; see <a href="#chromium">Chromium for the webSign signer</a>); without it the
         builders return unsigned URLs exactly as before, so unaffected endpoints keep working while
         gated ones fail as HTTP 403. Set <code>DOUYIN_WEBSIGN_ENABLED=false</code> only as a kill-switch.
       </p>
@@ -403,7 +477,7 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       <ul>
         <li>Never send a bare text probe: the first message in a delivery group is always the author's profile link + nickname.</li>
         <li>Use <code>DYVINE_WEEKLY_GROUP_POLICY=reuse_existing</code> in every round. A returning account is identified by stable <code>sec_user_id</code> and reuses one Postgres-verified historical chat and topic; only a new account gets a new group with the recipient's <code>ou_</code> open ID as <code>owner_id</code>.</li>
-        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner advances one account per invocation; do not clean local files until delivery is reconciled.</li>
+        <li>Process legacy backfill in verified batches of two accounts. The bounded weekly runner finishes each pair before it starts the next; do not clean local files until delivery is reconciled.</li>
         <li>The durable sender records 0-byte files and files above its 29 MiB upload cap as permanent failures. It leaves local media in place for reconciliation.</li>
         <li>Backfill dedupe uses file-level ledger records and confirmed historical messages, not nickname counters. A <code>0/0</code> summary is not evidence that no media was missed.</li>
         <li>Run same-nickname accounts (distinct <code>sec_user_id</code>s) serially during backfill: legacy download directories and progress keys were nickname-based.</li>
@@ -412,15 +486,40 @@ dyvine.queue.enqueue        {"round": "weekly-2026-09-27"}</code></pre>
       </ul>
       <h3>Weekly runner</h3>
       <p>
-        <code>hermes dyvine weekly run-once</code> advances at most one account
-        within a bounded runtime and file count. It waits for the download
-        started by that invocation and saves its checkpoint to Postgres before
-        exiting. It does not advance to the next ordered pair of accounts
-        until both current accounts have terminal outcomes. With no
+        <code>hermes dyvine weekly run-once</code> advances ordered pairs of
+        accounts back to back in seed order within a bounded runtime and file
+        count. It waits for every download started by that invocation and
+        saves its checkpoint to Postgres before exiting. It does not advance
+        to the next pair until both current accounts have terminal outcomes.
+        A new pair starts only within the first 15 minutes of an invocation,
+        while no review state was hit, and while the pair's estimated
+        download fits the free disk space minus max(10 GiB, 10% of the disk).
+        The estimate is 2 GiB per full-feed account (full mode or no cutoff)
+        and, for an incremental account, 1.5 times its days since the queue
+        cutoff times the round's download rate: the 90th percentile of bytes
+        per window day among its finished accounts, or 20 MiB per day until
+        10 of them recorded one. The first pair must fit too; a
+        <code>disk_budget</code> outcome means nothing was started. A row
+        still parked in
+        <code>needs_reconciliation</code> does not hold later pairs, but it
+        keeps blocking automatic rounds until it is reconciled. An incremental
+        download stops at the queue cutoff:
+        media posted at or before it is neither downloaded nor sent, so a first
+        run without a saved anchor fetches only the round's window, not the
+        account's whole feed. Before downloading an account, the runner
+        checks its Douyin profile: an author Douyin reports deactivated or
+        banned, or who has no posts, is skipped for good (the row becomes
+        <code>skipped</code>, the seed is excluded from later rounds, and the
+        Feishu group and file ledger are kept). A failed or unclear check
+        never skips. With no
         <code>--round</code>, it creates a
         <code>weekly-YYYY-MM-DD</code> round at or after Sunday 08:00 in
-        <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>, using the previous
-        Sunday 08:00 as the incremental cutoff. The required
+        <code>DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai</code>. Its incremental
+        cutoff is the Sunday 08:00 of the latest earlier automatic round that
+        was opened; the first round uses the Sunday before the first eligible
+        one.
+        A week held back by an unfinished round therefore widens the next
+        window instead of being skipped. The required
         <code>DYVINE_WEEKLY_FIRST_AUTO_DATE</code> is the first eligible
         Sunday (<code>YYYY-MM-DD</code>); earlier automatic rounds are not
         opened. The required
@@ -499,8 +598,17 @@ PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
         prove individual delivery. New file ledger records key a media item
         by account, account-relative path, and
         content hash; it retains the upload <code>file_key</code>, send UUID,
-        and Feishu message ID. A file reply goes into the verified topic
-        thread. Unknown group, topic, or file-send outcomes remain on hold
+        and Feishu message ID. A legacy send covers a re-downloaded file with
+        the same account-relative path, or with the same post creation stamp
+        and media slot (<code>_video.mp4</code>, <code>_image_3.webp</code>,
+        ...) when a caption edit renamed it, so the file is not sent twice.
+        Consecutive weekly windows overlap, so a confirmed send by this runner
+        covers a caption-renamed re-download the same way. Upload names longer
+        than 50 characters are shortened; post media keeps its slot suffix, so
+        the images of one post keep distinct names in the group. The Feishu
+        audit and the window proof still match legacy uploads by the legacy
+        truncation (the first 40 characters of the stem plus the extension).
+        Each file goes to the group as a plain message after the account's profile post, as the legacy sender posted it. Earlier deliveries replied to the profile post in a thread, so a reused legacy group showed none of that round's files in its main chat; <code>resend_thread_files_flat.py</code> posts each such file once more as a plain chat message from its recorded file key, with its own ledger record in round <code>&lt;round&gt;-flat</code> and a UUID Feishu dedupes for an hour (dry run unless <code>--apply</code>; <code>--limit</code> bounds one invocation). Unknown group, topic, or file-send outcomes remain on hold
         after their safe UUID retry windows for message-level reconciliation;
         do not replay solely because a summary count is missing. Confirmed
         historical files suppress automatic resend. Only confirmed unsent
@@ -527,11 +635,17 @@ PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
   --work-db &lt;private-staging.sqlite3&gt; --round &lt;active-round&gt; \
   --output &lt;private-group-review.jsonl&gt; --resume --apply</code></pre>
       <p>
-        For absent legacy topic keys, explicitly add
-        <code>--discover-missing-topics</code> with <code>--round</code> and
-        use a separate journal. The read-only preview scans complete chat
-        history for exactly one app-authored profile root. The resumed apply
-        rechecks that history before adopting the discovered topic.
+        For an absent legacy topic key, or a recorded root that was deleted,
+        explicitly add <code>--discover-missing-topics</code> with
+        <code>--round</code> and use a separate journal. The legacy sender
+        posted a profile root whenever it started delivering to a chat and
+        recorded the most recent one, so the read-only preview scans the
+        complete chat history and adopts the latest live app-authored root
+        (a post or a text message) that links to exactly this account's
+        profile. A chat whose root predates exact links is accepted only when
+        exactly one app-authored root carries a Douyin short link and none
+        names any profile. The resumed apply rechecks that history before
+        adopting the discovered topic.
       </p>
       <pre><code>PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
   --queue-path &lt;legacy-state-dir&gt;/download_queue.json \
@@ -606,6 +720,108 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
   --output &lt;private-reconciliation-apply.json&gt; \
   --apply --expect-plan-sha256 &lt;preview-plan-sha256&gt; \
   --expected-count &lt;preview-expected-count&gt;</code></pre>
+      <p>
+        A chat usually also holds files from rounds the imported progress never
+        covered, so the whole-chat multiset rarely matches. The weekly runner
+        only re-sends media posted after the queue cutoff, so the window proof
+        (<code>release_pending_window_attested</code>) compares just that part:
+        the app-sent, non-deleted Feishu file names posted after the cutoff must
+        equal the upload names of the legacy ledger's sends in the same window.
+        An extra Feishu file would be sent twice and an extra ledger file never,
+        so either difference holds the row. Ambiguous, cache-only, or failed
+        legacy sends need no separate proof, because the chat shows whether each
+        one arrived. Pass the runner's <code>DYVINE_WEEKLY_TIMEZONE</code> so
+        cutoffs match; it is bound into the plan digest.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_group_attested.py \
+  --action release_pending_window_attested --timezone Asia/Shanghai \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --feishu-audit &lt;private-feishu-audit.jsonl&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-window-attested-proposal.jsonl&gt;</code></pre>
+      <p>
+        Preview and apply that proposal with the
+        <code>apply_queue_reconciliation.py</code> commands above, adding
+        <code>--timezone</code> with the same value.
+      </p>
+      <p>
+        When the chat and the ledger disagree,
+        <code>--action release_pending_feishu_adopted</code> takes the audited
+        chat as the record of what was sent, within the queue cutoff's window
+        when the row has one, as delivery applies it, or the whole feed
+        otherwise. Chat files the
+        ledger lacks are adopted as <code>legacy_confirmed_sent</code> rows in
+        the <code>feishu_adopted</code> round: an untruncated name at its exact
+        path, and a shortened name, which lost its media slot, as one
+        post-level row that covers every media of that post. Ledger rows the
+        chat does not hold move to <code>legacy_disproved</code> as
+        <code>legacy_not_in_chat</code>, so the runner sends them again; a
+        shortened ledger name counts as held while the chat has any file of its
+        post. A file name without a post time is outside every scope: the
+        runner never sends such media in a window, and no media path carries
+        that name. The proposal carries the exact plan, the apply recomputes it
+        from the audit and Postgres and holds the row on any difference, and
+        the released row gets a fresh download.
+      </p>
+      <p>
+        An account whose queue rows or legacy progress name another chat than
+        its current group stays held, because that chat may hold sends the
+        runner would repeat. <code>audit_other_chats.py</code> reads each such
+        older chat for exact queue keys, read-only: a dissolved chat, whose
+        history Feishu keeps from its members, or one with no app file inside
+        the row's scope is cleared. Pass the journal as
+        <code>--other-chat-audit</code> to both the proposal and the apply; its
+        digest joins the plan digest, and any older chat it does not clear
+        still holds the row.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/audit_other_chats.py \
+  --legacy-report &lt;private-reconciliation.jsonl&gt; --round &lt;active-round&gt; \
+  --legacy-work-db &lt;private-staging.sqlite3&gt; \
+  --keys-file &lt;private-queue-keys.txt&gt; \
+  --output &lt;private-other-chat-audit.jsonl&gt;</code></pre>
+      <p>
+        The legacy queue records <code>skipped_404</code> for accounts the user
+        ordered skipped for a round: the group is kept and nothing is sent. No
+        other action can close such a row in the active round, so it would
+        block every automatic round. <code>propose_user_ordered_skips.py</code>
+        writes a private JSONL holding only those rows, each with
+        <code>skip_user_ordered</code>. Preview and apply it the same way; no
+        audit inputs are needed. The policy re-checks each row's migrated queue
+        status and holds any account with a new send attempt; applied rows
+        become <code>skipped</code>.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_user_ordered_skips.py \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-user-skip-proposal.jsonl&gt;
+
+PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
+  --report &lt;private-user-skip-proposal.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-user-skip-preview.json&gt;</code></pre>
+      <p>
+        Apply by rerunning the preview command with <code>--apply</code>, the
+        preview's <code>plan_sha256</code> as <code>--expect-plan-sha256</code>,
+        and its <code>expected_count</code> as <code>--expected-count</code>.
+      </p>
+      <p>
+        An author Douyin reports deactivated or banned, or who has no posts,
+        can never be delivered, yet the unclosed row would block every
+        automatic round. <code>propose_unavailable_author_skips.py</code>
+        checks the Douyin profile of each active-round row still in
+        <code>needs_reconciliation</code> (it reads <code>DATABASE_URL</code>)
+        and writes a private JSONL with <code>skip_author_unavailable</code>
+        and the evidence (reason, post count, check time) for those authors
+        only. A failed or unclear profile answer is counted and never
+        proposed. Preview and apply it the same way. Applied rows become
+        <code>skipped</code>, the seed is excluded from later rounds, and the
+        Feishu group is kept.
+      </p>
+      <pre><code>PYTHONPATH=src uv run python scripts/propose_unavailable_author_skips.py \
+  --source-report &lt;private-reconciliation.jsonl&gt; \
+  --active-round &lt;active-round&gt; \
+  --output &lt;private-author-skip-proposal.jsonl&gt;</code></pre>
       <p>
         <code>dyvine.delivery.send_account</code> uses the same ledger. Supply
         <code>round</code> and <code>sec_user_id</code> to identify an account
@@ -777,6 +993,7 @@ make doctor        # hermes plugins doctor --ci (needs docker)</code></pre>
         <li><code>README.md</code> is the concise maintainer entry point; keep it, <code>.env.example</code>, this page, and the contributor guide consistent when tools, configuration, or behavior changes. Automated contributors follow the contributor guide (AGENTS.md).</li>
         <li><code>.env.example</code> is the source of truth for supported environment variables and security defaults.</li>
         <li><code>plugin.yaml</code> <code>provides_tools</code> must mirror the tool table exactly; the bundled skill manual must name every tool. Both are test-pinned.</li>
+        <li>Dependency floors in <code>pyproject.toml</code> and <code>plugin.yaml</code> must admit the Hermes pins (<code>python-dotenv==1.2.2</code>, bedrock <code>boto3==1.42.89</code>); never raise one past a Hermes pin. This is test-pinned.</li>
         <li>Runtime downloads, logs, and generated caches are local artifacts and should not be committed.</li>
         <li>For Python behavior changes, run focused tests first, then <code>make coverage</code> before preparing a commit.</li>
       </ul>

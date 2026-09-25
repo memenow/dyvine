@@ -46,6 +46,25 @@ async def test_import_seeds_rejects_before_writing() -> None:
     assert await seeds.count_seeds(include_excluded=True) == 0
 
 
+async def test_exclude_seed_keeps_identity_and_leaves_later_rounds() -> None:
+    """An excluded seed keeps its fields and is no longer enqueued."""
+    svc, _, seeds, _ = _service()
+    await svc.import_seeds(
+        [{"sec_user_id": "s1", "nickname": "n1", "source_url": "u1"}], batch="b1"
+    )
+    assert await svc.exclude_seed("s1") is True
+    assert await svc.exclude_seed("s1") is True
+    seed = await seeds.get_seed("s1")
+    assert (seed.excluded, seed.nickname, seed.source_url, seed.batch) == (
+        True,
+        "n1",
+        "u1",
+        "b1",
+    )
+    assert await svc.enqueue_round("r1", mode="incremental") == 0
+    assert await svc.exclude_seed("unknown") is False
+
+
 async def test_enqueue_round_is_idempotent() -> None:
     """Second enqueue adds nothing and never resets entry progress."""
     svc, queue, _, _ = _service()

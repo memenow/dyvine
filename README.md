@@ -75,12 +75,37 @@ checkout with the same `DATABASE_URL`):
 uv run alembic upgrade head
 ```
 
-Install every version pinned by `plugin.yaml` **with dependencies**
-(never `--no-deps`: `playwright` needs its transitive packages such as
-`pyee`), plus the matching Playwright Chromium build. Then read one
-authorized `dyvine.posts.list` page before enabling weekly sends: a
-profile check and doctor alone do not establish post-list readiness, and
-an unsigned signer surfaces as HTTP 403 on Argus-gated endpoints.
+### Hermes dependency resolution
+
+Hermes resolves a directory plugin's `pyproject.toml`
+`[project].dependencies` (`plugin.yaml` `python_dependencies` only when
+there is no `pyproject.toml`) against the pins of its own environment.
+Dyvine's floors admit those pins (core `python-dotenv==1.2.2`, bedrock
+extra `boto3==1.42.89`), but `f2` 0.0.1.7 publishes `==` pins
+(`httpx==0.27.2`, `pydantic==2.9.*`, `websockets<13`,
+`protobuf==5.28.3`, ...), so `hermes plugins enable dyvine` still
+reports "No solution found". The lockfile lifts those pins with
+`[tool.uv] override-dependencies`, which Hermes does not read, and the
+plugin runs on the Hermes versions of the shared packages.
+
+Install the locked packages missing from the Hermes venv with
+`uv pip install --no-config --no-deps` and leave the packages Hermes
+already has at their versions; `--no-config` keeps uv from applying the
+checkout's overrides. [docs/index.html](docs/index.html#hermes-dependencies)
+has the commands. Repeat this after every `hermes update`, which can drop
+the added packages and disable the plugin.
+
+Plugin doctor and a profile call do not exercise the request signer.
+During the cutover both passed while the Playwright dependency `pyee`
+from `uv.lock` was missing, and signed post-list calls returned HTTP 403
+until it was installed. Verify the matching Chromium build and read one
+authorized `dyvine.posts.list` page before enabling weekly sends.
+
+The webSign signer needs the Chromium build matching `playwright==1.62.0`
+(revision 1234). Where the default Playwright CDN is slow, install it
+from a mirror by setting `PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`, for example
+to `https://cdn.npmmirror.com/binaries/playwright`.
+
 
 ## Quick Start (development)
 
@@ -140,6 +165,20 @@ optional: enabling local-retention mode
 is left unconfigured the engine retains downloads implicitly rather
 than discarding them.
 
+Weekly delivery downloads into account folders under
+`DOUYIN_DOWNLOAD_ROOT`, which `DOUYIN_RETAIN_MAX_GB` does not bound.
+`hermes dyvine media prune` deletes media older than `--older-than-days`
+(default 14) from download folders whose every recording queue row is
+settled (`completed`, `permanent_failure`, or `skipped`): delivery reads
+only the folder its row's checkpoint records, a settled row is never
+delivered again, and a later round downloads again whatever it needs. A
+folder that any unsettled row records is kept, even when another account
+shares it. Rows that never downloaded into a folder, such as frozen legacy
+history, do not hold it, and nothing outside the download root is touched.
+The command takes the weekly runner's lock and skips while a run is active;
+run it daily through Hermes no-agent cron, and use `--dry-run` to report
+without deleting.
+
 Database connections stay idle-quiet. `DATABASE_POOL_CLASS=null`
 (default) opens a fresh connection per use and holds none while idle;
 `queue` keeps a capped pool (`DATABASE_POOL_SIZE`,
@@ -161,10 +200,32 @@ automatic rounds are not opened. The required
 `DYVINE_WEEKLY_CUTOVER_ROUND` identifies the active legacy round: it and
 unfinished automatic rounds dated from the first eligible Sunday onward
 block a new automatic round. Older frozen history does not block the schedule.
-The command processes at most one account per invocation, records its
-checkpoint in Postgres, and waits for any download it starts before exiting.
-It holds the next ordered pair of accounts until both accounts in the
-current pair have terminal outcomes.
+An automatic round's queue cutoff is the Sunday 08:00 of the latest earlier
+automatic round that was opened; the first round uses the Sunday before the
+first eligible one. A week held back by an unfinished round therefore widens the
+next window instead of being skipped.
+The command processes ordered pairs of accounts back to back in seed order:
+within its step and runtime bounds it advances both accounts of a pair,
+records its checkpoint in Postgres, and waits for any download it starts
+before exiting. It holds the next pair until both accounts in the current
+pair have terminal outcomes. A new pair starts only within the first 15
+minutes of an invocation, while no review state was hit, and while the
+pair's estimated download fits the free disk space minus max(10 GiB, 10% of
+the disk). The estimate is 2 GiB per full-feed account (full mode or no
+cutoff) and, for an incremental account, 1.5 times its days since the queue
+cutoff times the round's download rate: the 90th percentile of bytes per
+window day among its finished accounts, or 20 MiB per day until 10 of them
+recorded one. The first pair must fit too; a `disk_budget` outcome means
+nothing was started. A row still parked in
+`needs_reconciliation` does not hold later pairs, but it keeps blocking
+automatic rounds until it is reconciled. An incremental download stops at the
+queue cutoff: media posted at or before it is neither downloaded nor sent,
+so a first run without a saved anchor fetches only the round's window, not
+the account's whole feed. Before downloading an account, the runner checks
+its Douyin profile: an author Douyin reports deactivated or banned, or who
+has no posts, is skipped for good (the row becomes `skipped`, the seed is
+excluded from later rounds, and the Feishu group and file ledger are kept).
+A failed or unclear check never skips.
 Other periodic work uses single-shot tools. The plugin runs no resident
 weekly loop or idle database connection.
 
@@ -281,10 +342,15 @@ PYTHONPATH=src uv run python scripts/adopt_legacy_groups.py \
   --output <private-group-review.jsonl> --resume --apply
 ```
 
-If a legacy topic key is missing, opt in to full chat-history discovery
-with `--discover-missing-topics --round <active-round>` and a separate
-report path. The preview accepts only one app-authored profile root; the
-resumed apply rechecks the chat history before adopting it. Keep the
+If a legacy topic key is missing, or its recorded root was deleted, opt
+in to full chat-history discovery with `--discover-missing-topics --round
+<active-round>` and a separate report path. The legacy sender posted a
+profile root whenever it started delivering to a chat and recorded the most
+recent one, so the preview adopts the latest live app-authored root that
+links to exactly this account's profile (a post or a text message). A chat
+whose root predates exact links is accepted only when exactly one
+app-authored root carries a Douyin short link and none names any profile.
+The resumed apply rechecks the chat history before adopting it. Keep the
 discovery journal separate from the default adoption journal:
 
 ```bash
@@ -369,12 +435,135 @@ PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
   --expected-count <preview-expected-count>
 ```
 
+A chat usually also holds files from rounds the imported progress never
+covered, so the whole-chat multiset rarely matches. The weekly runner only
+re-sends media posted after the queue cutoff, so the window proof
+(`release_pending_window_attested`) compares just that part: the app-sent,
+non-deleted Feishu file names posted after the cutoff must equal the upload
+names of the legacy ledger's sends in the same window. An extra Feishu file
+would be sent twice and an extra ledger file never, so either difference
+holds the row. Ambiguous, cache-only, or failed legacy sends need no
+separate proof, because the chat shows whether each one arrived. Pass the
+runner's `DYVINE_WEEKLY_TIMEZONE` so cutoffs match; it is bound into the
+plan digest.
+
+```bash
+PYTHONPATH=src uv run python scripts/propose_group_attested.py \
+  --action release_pending_window_attested --timezone Asia/Shanghai \
+  --source-report <private-reconciliation.jsonl> \
+  --feishu-audit <private-feishu-audit.jsonl> \
+  --legacy-work-db <private-staging.sqlite3> \
+  --active-round <active-round> \
+  --output <private-window-attested-proposal.jsonl>
+```
+
+Preview and apply that proposal with the `apply_queue_reconciliation.py`
+commands above, adding `--timezone` with the same value.
+
+When the chat and the ledger disagree, `--action
+release_pending_feishu_adopted` takes the audited chat as the record of what
+was sent, within the queue cutoff's window when the row has one, as delivery
+applies it, or the whole feed otherwise. Chat files the ledger lacks are adopted as
+`legacy_confirmed_sent` rows in the `feishu_adopted` round: an untruncated
+name at its exact path, and a shortened name, which lost its media slot, as
+one post-level row that covers every media of that post. Ledger rows the
+chat does not hold move to `legacy_disproved` as `legacy_not_in_chat`, so the
+runner sends them again; a shortened ledger name counts as held while the
+chat has any file of its post. A file name without a post time is outside
+every scope: the runner never sends such media in a window, and no media
+path carries that name. The proposal carries the exact plan, the
+apply recomputes it from the audit and Postgres and holds the row on any
+difference, and the released row gets a fresh download.
+
+An account whose queue rows or legacy progress name another chat than its
+current group stays held, because that chat may hold sends the runner would
+repeat. `audit_other_chats.py` reads each such older chat for exact queue
+keys, read-only: a dissolved chat, whose history Feishu keeps from its
+members, or one with no app file inside the row's scope is cleared. Pass the
+journal as `--other-chat-audit` to both the proposal and the apply; its
+digest joins the plan digest, and any older chat it does not clear still
+holds the row.
+
+```bash
+PYTHONPATH=src uv run python scripts/audit_other_chats.py \
+  --legacy-report <private-reconciliation.jsonl> --round <active-round> \
+  --legacy-work-db <private-staging.sqlite3> \
+  --keys-file <private-queue-keys.txt> \
+  --output <private-other-chat-audit.jsonl>
+```
+
+The legacy queue records `skipped_404` for accounts the user ordered skipped
+for a round: the group is kept and nothing is sent. No other action can close
+such a row in the active round, so it would block every automatic round.
+`propose_user_ordered_skips.py` writes a private JSONL holding only those
+rows, each with `skip_user_ordered`. Preview and apply it the same way; no
+audit inputs are needed. The policy re-checks each row's migrated queue
+status and holds any account with a new send attempt; applied rows become
+`skipped`.
+
+```bash
+PYTHONPATH=src uv run python scripts/propose_user_ordered_skips.py \
+  --source-report <private-reconciliation.jsonl> \
+  --active-round <active-round> \
+  --output <private-user-skip-proposal.jsonl>
+
+PYTHONPATH=src uv run python scripts/apply_queue_reconciliation.py \
+  --report <private-user-skip-proposal.jsonl> \
+  --active-round <active-round> \
+  --output <private-user-skip-preview.json>
+```
+
+Apply by rerunning the preview command with `--apply`, the preview's
+`plan_sha256` as `--expect-plan-sha256`, and its `expected_count` as
+`--expected-count`.
+
+An author Douyin reports deactivated or banned, or who has no posts, can
+never be delivered, yet the unclosed row would block every automatic round.
+`propose_unavailable_author_skips.py` checks the Douyin profile of each
+active-round row still in `needs_reconciliation` (it reads `DATABASE_URL`)
+and writes a private JSONL with `skip_author_unavailable` and the evidence
+(reason, post count, check time) for those authors only. A failed or unclear
+profile answer is counted and never proposed. Preview and apply it the same
+way. Applied rows become `skipped`, the seed is excluded from later rounds,
+and the Feishu group is kept.
+
+```bash
+PYTHONPATH=src uv run python scripts/propose_unavailable_author_skips.py \
+  --source-report <private-reconciliation.jsonl> \
+  --active-round <active-round> \
+  --output <private-author-skip-proposal.jsonl>
+```
+
 For inspection, run `hermes dyvine weekly run-once --dry-run`; use
 `--round weekly-YYYY-MM-DD --dry-run` to inspect a named round. The
-non-dry-run command advances one account, with an upper bound on files and
-runtime. A new file's delivery key includes its account, account-relative path,
+non-dry-run command advances account pairs in seed order, within bounds on
+files, runtime, and free disk space. A new file's delivery key includes its account, account-relative path,
 and content hash. The ledger retains the uploaded `file_key`, send UUID,
-and Feishu message ID. An uncertain send or unadopted legacy chat remains
+and Feishu message ID. A legacy send covers a re-downloaded file with the
+same account-relative path, or with the same post creation stamp and media
+slot (`_video.mp4`, `_image_3.webp`, ...) when a caption edit renamed it,
+so the file is not sent twice. Consecutive weekly windows overlap, so a
+confirmed send by this runner covers a caption-renamed re-download the same
+way. Upload names longer than 50 characters are shortened; post media keeps
+its slot suffix, so the images of one post keep distinct names in the group.
+The Feishu audit and the window proof still match legacy uploads by the
+legacy truncation (the first 40 characters of the stem plus the extension).
+Files go to the group as plain messages after the account's profile post,
+as the legacy sender posted them. Earlier deliveries replied to the profile
+post in a thread, so a reused legacy group showed none of that round's files
+in its main chat. `resend_thread_files_flat.py` posts each such file of a
+round once more as a plain chat message, reusing its recorded Feishu file
+key. Each copy has its own ledger record in round `<round>-flat` and a UUID
+that Feishu dedupes for an hour; a copy whose outcome stays unknown after
+that window waits for review. It is a dry run unless `--apply` is given, and
+`--limit` bounds the copies one invocation sends.
+
+```bash
+PYTHONPATH=src uv run python scripts/resend_thread_files_flat.py --round <round>
+PYTHONPATH=src uv run python scripts/resend_thread_files_flat.py \
+  --round <round> --apply --limit 3
+```
+An uncertain send or unadopted legacy chat remains
 on hold for message-level reconciliation; never replay a file merely
 because a summary counter or operation ID is missing.
 The `dyvine.delivery.send_account` tool also uses this ledger: pass `round`

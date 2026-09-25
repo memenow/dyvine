@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -162,6 +163,136 @@ async def test_get_user_info_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
     service = UserService(FakeOperationRepository())
     with pytest.raises(UserNotFoundError):
         await service.get_user_info("missing-user")
+
+
+def _author_profile(
+    *, nickname: str, aweme_count: int | None, is_ban: bool, raw: dict[str, Any]
+) -> MagicMock:
+    """Profile double shaped like f2's ``UserProfileFilter``."""
+    profile = MagicMock()
+    profile.nickname = nickname
+    profile.aweme_count = aweme_count
+    profile.is_ban = is_ban
+    profile._to_raw.return_value = raw
+    return profile
+
+
+_DEACTIVATED_NOTICE = {"special_state": 1, "title": "账号已经注销"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [
+        (
+            _author_profile(
+                nickname="",
+                aweme_count=None,
+                is_ban=False,
+                raw={
+                    "status_code": 0,
+                    "user": {"special_state_info": _DEACTIVATED_NOTICE},
+                },
+            ),
+            (False, "deactivated", None),
+        ),
+        (
+            _author_profile(
+                nickname="",
+                aweme_count=None,
+                is_ban=False,
+                raw={"status_code": 0, "user": {"user_deleted": True}},
+            ),
+            (False, "deactivated", None),
+        ),
+        (
+            _author_profile(
+                nickname="n", aweme_count=0, is_ban=True, raw={"status_code": 0}
+            ),
+            (False, "banned", 0),
+        ),
+        (
+            _author_profile(
+                nickname="n", aweme_count=0, is_ban=False, raw={"status_code": 0}
+            ),
+            (False, "no_posts", 0),
+        ),
+        (
+            _author_profile(
+                nickname="n", aweme_count=7, is_ban=False, raw={"status_code": 0}
+            ),
+            (True, None, 7),
+        ),
+    ],
+    ids=["deactivated_notice", "user_deleted", "banned", "no_posts", "available"],
+)
+async def test_get_author_state_classifies_profiles(
+    monkeypatch: pytest.MonkeyPatch, profile: MagicMock, expected: tuple
+) -> None:
+    """Only a deactivation notice, a ban, or zero posts make an author unavailable."""
+    from dyvine.services import users as users_mod
+
+    class FakeHandler:
+        """Answers the profile request with the parametrized double."""
+
+        def __init__(self, kwargs: dict) -> None:
+            """Accept the handler arguments."""
+
+        fetch_user_profile = AsyncMock(return_value=profile)
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    state = await users_mod.fetch_author_state("sec")
+    assert (state.available, state.reason, state.aweme_count) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _author_profile(
+            nickname="n", aweme_count=0, is_ban=False, raw={"status_code": 2154}
+        ),
+        _author_profile(nickname="", aweme_count=0, is_ban=False, raw={"user": {}}),
+        RuntimeError("network down"),
+    ],
+    ids=["status_code", "no_nickname_without_notice", "request_error"],
+)
+async def test_get_author_state_raises_instead_of_guessing(
+    monkeypatch: pytest.MonkeyPatch, answer: object
+) -> None:
+    """Unclear or failed answers raise, so no caller skips an author on them."""
+    from dyvine.services import users as users_mod
+
+    class FakeHandler:
+        """Answers the profile request with an unclear result or an error."""
+
+        def __init__(self, kwargs: dict) -> None:
+            """Accept the handler arguments."""
+
+        fetch_user_profile = AsyncMock(
+            side_effect=answer if isinstance(answer, Exception) else None,
+            return_value=answer,
+        )
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
+    with pytest.raises(ServiceError):
+        await users_mod.fetch_author_state("sec")
+
+
+@pytest.mark.asyncio
+async def test_service_author_state_delegates_to_profile_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service answers with the module-level profile check, unchanged."""
+    from dyvine.schemas.users import AuthorState
+    from dyvine.services import users as users_mod
+
+    state = AuthorState(available=False, reason="banned", aweme_count=3)
+    check = AsyncMock(return_value=state)
+    monkeypatch.setattr(users_mod, "fetch_author_state", check)
+    service = UserService(FakeOperationRepository())
+    assert await service.get_author_state("sec") is state
+    check.assert_awaited_once_with("sec")
 
 
 @pytest.mark.asyncio
@@ -1404,6 +1535,157 @@ async def test_get_login_identity_success(
     monkeypatch.setattr(users_mod, "DouyinHandler", FakeHandler)
     service = UserService(FakeOperationRepository())
     assert await service.get_login_identity() == payload
+
+
+# Distinct URLs per scheme prove both settings flow through, rather than
+# one value copied into both slots.
+_PROXIES = {
+    "http://": "http://proxy.test:8080",
+    "https://": "http://proxy.test:8443",
+}
+
+
+async def _invoke_get_user_info(service: UserService) -> None:
+    await service.get_user_info("u1")
+
+
+async def _invoke_get_following(service: UserService) -> None:
+    await service.get_following("u1")
+
+
+async def _invoke_get_followers(service: UserService) -> None:
+    await service.get_followers("u1")
+
+
+async def _invoke_get_login_identity(service: UserService) -> None:
+    await service.get_login_identity()
+
+
+async def _invoke_process_download(service: UserService) -> None:
+    operation = await service.operation_store.create_operation(
+        operation_type="user_content_download",
+        subject_id="u1",
+        status="pending",
+        message="scheduled",
+    )
+    await service._process_download(
+        operation.operation_id,
+        user_id="u1",
+        include_posts=True,
+        include_likes=False,
+        max_items=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        _invoke_get_user_info,
+        _invoke_get_following,
+        _invoke_get_followers,
+        _invoke_get_login_identity,
+        _invoke_process_download,
+    ],
+    ids=[
+        "get_user_info",
+        "get_following",
+        "get_followers",
+        "get_login_identity",
+        "process_download",
+    ],
+)
+async def test_handler_kwargs_satisfy_f2_constructor_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    invoke: Callable[[UserService], Awaitable[None]],
+) -> None:
+    """Every ``DouyinHandler`` the service builds gets kwargs f2 accepts.
+
+    f2 reads only the plural ``proxies`` mapping and silently ignores a
+    singular ``proxy`` key, so ``DOUYIN_PROXY_*`` reaches the SDK only
+    through ``proxies``. Its constructor also merges the cookie into
+    ``headers``, so a payload without ``headers`` raises ``TypeError``
+    before any request is sent.
+    """
+    from dyvine.services import users as users_mod
+
+    monkeypatch.setattr(settings.douyin, "proxy_http", _PROXIES["http://"])
+    monkeypatch.setattr(settings.douyin, "proxy_https", _PROXIES["https://"])
+
+    profile = MagicMock()
+    profile.nickname = "proxied"
+    profile.avatar_url = None
+    profile.signature = ""
+    profile.following_count = 0
+    profile.follower_count = 0
+    profile.total_favorited = 0
+    profile.room_id = None
+    profile.aweme_count = 0
+    profile._to_raw.return_value = {"user": {}}
+
+    identity = MagicMock()
+    identity._to_dict.return_value = {}
+
+    async def _no_pages(**_kwargs: Any) -> AsyncIterator[Any]:
+        for page in ():
+            yield page
+
+    captured: list[dict[str, Any]] = []
+
+    class RecordingHandler:
+        """Records constructor kwargs; answers every fetch these paths make."""
+
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            # Mirrors the merge f2 0.0.1.7 ``BaseDownloader.__init__`` runs
+            # while ``DouyinHandler`` is constructed.
+            self.headers = kwargs.get("headers") | {"Cookie": kwargs["cookie"]}
+            captured.append(kwargs)
+
+        fetch_user_profile = AsyncMock(return_value=profile)
+        fetch_query_user = AsyncMock(return_value=identity)
+        fetch_user_following = staticmethod(_no_pages)
+        fetch_user_follower = staticmethod(_no_pages)
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", RecordingHandler)
+
+    await invoke(UserService(FakeOperationRepository()))
+
+    assert captured, "expected the service to build a DouyinHandler"
+    for kwargs in captured:
+        assert kwargs["proxies"] == _PROXIES
+        assert "proxy" not in kwargs
+        assert kwargs["headers"] == {
+            "User-Agent": settings.douyin.user_agent,
+            "Referer": settings.douyin.referer,
+        }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("invoke", "message"),
+    [
+        (_invoke_get_following, "Failed to fetch following list"),
+        (_invoke_get_followers, "Failed to fetch follower list"),
+        (_invoke_get_login_identity, "Failed to query login identity"),
+    ],
+    ids=["get_following", "get_followers", "get_login_identity"],
+)
+async def test_handler_construction_failure_raises_user_service_error(
+    monkeypatch: pytest.MonkeyPatch,
+    invoke: Callable[[UserService], Awaitable[None]],
+    message: str,
+) -> None:
+    """A ``DouyinHandler`` that fails to construct surfaces as ``UserServiceError``."""
+    from dyvine.services import users as users_mod
+
+    class FailingHandler:
+        def __init__(self, kwargs: dict[str, Any]) -> None:
+            raise TypeError("handler construction failed")
+
+    monkeypatch.setattr(users_mod, "DouyinHandler", FailingHandler)
+
+    with pytest.raises(ServiceError, match=message):
+        await invoke(UserService(FakeOperationRepository()))
 
 
 @pytest.mark.asyncio

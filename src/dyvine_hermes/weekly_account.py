@@ -4,16 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from dyvine.services.delivery import (
-    FeishuCredentials,
-    FeishuGroupChannel,
-    post_datetime_from_path,
-    scan_media_files,
-)
+from dyvine.db.delivery_ledger import POST_LEVEL_SLOT, post_media_slot
+from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
 from dyvine.services.delivery_durable import media_identity
 
 from .weekly_download import download_entry
@@ -21,7 +16,8 @@ from .weekly_state import (
     MIN_SEND_WINDOW_SECONDS,
     _checkpoint,
     _path_within_root,
-    parse_cutoff,
+    entry_cutoff,
+    media_after_cutoff,
     patch_queue,
 )
 from .weekly_types import WeeklyConfig, WeeklyOutcome
@@ -44,12 +40,6 @@ async def _list_all_files(ledger: Any, **filters: Any) -> list[Any]:
             return rows
         rows.extend(page)
         offset += len(page)
-
-
-def _cutoff(entry: Any, timezone: str) -> datetime | None:
-    if not entry.cutoff:
-        return None
-    return parse_cutoff(entry.cutoff, timezone=timezone)
 
 
 async def _avatar_url(engine: Any, entry: Any) -> str | None:
@@ -124,17 +114,10 @@ async def _resolve_group(
 
 
 def _media_candidates(entry: Any, user_dir: Path, timezone: str) -> list[Path]:
-    cutoff = _cutoff(entry, timezone)
+    cutoff = entry_cutoff(entry, timezone)
     if not user_dir.is_dir():
         raise ValueError("recorded download directory is missing")
-    files: list[Path] = []
-    for path in scan_media_files(user_dir):
-        if cutoff is not None:
-            posted = post_datetime_from_path(path, user_dir)
-            if posted is None or posted <= cutoff:
-                continue
-        files.append(path)
-    return files
+    return media_after_cutoff(user_dir, cutoff)
 
 
 async def _deliver(
@@ -226,6 +209,21 @@ async def _deliver(
         if record.relative_path in candidate_by_path
     )
     resolved.update(failed_paths)
+    # The ledger answers a send with an earlier record of the same post media:
+    # a send under an edited caption, or a post-level adoption covering every
+    # slot of its post. Settle those files here, so they never take the run's
+    # send budget from media that still needs a send.
+    covering = {
+        slot
+        for record in (*legacy_records, *sent_history)
+        if (slot := post_media_slot(record.relative_path)) is not None
+    }
+    resolved.update(
+        relative
+        for relative in candidate_by_path
+        if (slot := post_media_slot(relative)) is not None
+        and (slot in covering or (slot[0], POST_LEVEL_SLOT) in covering)
+    )
     if any(
         record.status in {"sent", "permanent_failure"}
         and not getattr(record, "content_sha256", None)
@@ -272,7 +270,6 @@ async def _deliver(
             user_dir=user_dir,
             file_path=path,
             chat_id=group.chat_id,
-            parent_id=group.topic_message_id,
         )
         processed_now += 1
         if record.status == "needs_review":
@@ -301,12 +298,14 @@ async def _deliver(
                 note="send_intent",
                 processed=processed_now,
             )
-        if record.status == "sent":
+        relative = path.relative_to(user_dir).as_posix()
+        # A renamed re-download returns the earlier send of the same media.
+        if record.status == "sent" and record.relative_path == relative:
             sent_now += 1
         if record.status == "permanent_failure":
-            failed_paths.add(path.relative_to(user_dir).as_posix())
+            failed_paths.add(relative)
         if record.status in {"sent", "permanent_failure", "legacy_confirmed_sent"}:
-            returned_resolved.add(path.relative_to(user_dir).as_posix())
+            returned_resolved.add(relative)
     ledger_files = await _list_all_files(
         engine.delivery_ledger, round=entry.round, sec_user_id=entry.sec_user_id
     )
@@ -382,6 +381,10 @@ async def process_entry(
         if group is None or group.chat_id != entry.chat_id:
             raise ValueError("legacy chat has no matching reconciled group ledger")
     entry = await download_entry(engine, entry, config, deadline)
+    if entry.status == "skipped":
+        return WeeklyOutcome(
+            "skipped", entry.round, entry.key, note="author_unavailable"
+        )
     if entry.status == "op_issue":
         # Carry the cause: without the note the CLI alert names only the
         # status, and the recorded reason stays buried in the queue row.

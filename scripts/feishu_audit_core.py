@@ -469,7 +469,7 @@ def _scope_files(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _summary(
     target: Target, rows: list[dict[str, Any]], thread_id: str | None, app_id: str
 ) -> dict[str, Any]:
-    from dyvine.services.delivery import upload_file_name
+    from dyvine.services.delivery import legacy_upload_file_name
 
     page_rows = [row for row in rows if row.get("type") == "page"]
     by_message: dict[str, dict[str, Any]] = {}
@@ -516,7 +516,7 @@ def _summary(
             names.setdefault(file["file_name"], []).append(file)
     path_names: dict[str, int] = {}
     for file in target.files:
-        name = upload_file_name(Path(file["relative_path"]))
+        name = legacy_upload_file_name(Path(file["relative_path"]))
         path_names[name] = path_names.get(name, 0) + 1
     receipts: list[dict[str, str]] = []
     candidates: list[dict[str, str]] = []
@@ -542,7 +542,7 @@ def _summary(
             )
             continue
         missing.append(path)
-        name = upload_file_name(Path(path))
+        name = legacy_upload_file_name(Path(path))
         matches = names.get(name, [])
         if (
             path_names[name] == 1
