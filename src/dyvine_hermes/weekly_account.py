@@ -238,7 +238,6 @@ async def _deliver(
             user_dir=user_dir,
             file_path=path,
             chat_id=group.chat_id,
-            parent_id=group.topic_message_id,
         )
         processed_now += 1
         if record.status == "needs_review":

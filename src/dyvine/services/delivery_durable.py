@@ -45,7 +45,6 @@ class _Channel(Protocol):
         msg_type: str,
         content: dict[str, Any],
         *,
-        parent_id: str | None,
         request_uuid: str,
     ) -> tuple[dict[str, Any] | None, Any]: ...
 
@@ -311,11 +310,7 @@ async def ensure_topic(
         }
     }
     response, error = await channel._send_message(
-        chat_id,
-        "post",
-        content,
-        parent_id=None,
-        request_uuid=group.topic_uuid,
+        chat_id, "post", content, request_uuid=group.topic_uuid
     )
     if error is not None:
         raise DeliveryError("Feishu topic send failed", reason="retryable")
@@ -366,9 +361,12 @@ async def deliver_file(
     user_dir: Path,
     file_path: Path,
     chat_id: str,
-    parent_id: str,
 ) -> FileDeliveryRecord:
-    """Send at most once outside Feishu's one-hour UUID dedupe window."""
+    """Send at most once outside Feishu's one-hour UUID dedupe window.
+
+    Files go to the chat as plain messages, after the account's profile post,
+    as the legacy sender posted them.
+    """
     media_id, relative, content_hash = media_identity(
         sec_user_id=sec_user_id, user_dir=user_dir, file_path=file_path
     )
@@ -394,13 +392,15 @@ async def deliver_file(
         relative_path=relative,
         content_sha256=content_hash,
         chat_id=chat_id,
-        parent_id=parent_id,
+        parent_id=None,
     )
     if item.status in {"sent", "needs_review", "permanent_failure"}:
         return item
     if await ledger.find_legacy_unverified_hold(legacy_path=str(file_path)):
         return await ledger.mark_file_review(media_id)
-    if item.chat_id != chat_id or item.parent_id != parent_id:
+    # An intent reserved for a topic-thread reply may already sit in that
+    # thread; a plain resend could repeat it, so it waits for review.
+    if item.chat_id != chat_id or item.parent_id is not None:
         return await ledger.mark_file_review(media_id)
     if item.status == "planned":
         size = file_path.stat().st_size
@@ -422,11 +422,7 @@ async def deliver_file(
         return await ledger.mark_file_review(media_id)
     try:
         response, error = await channel._send_message(
-            chat_id,
-            "file",
-            {"file_key": item.file_key},
-            parent_id=parent_id,
-            request_uuid=item.send_uuid,
+            chat_id, "file", {"file_key": item.file_key}, request_uuid=item.send_uuid
         )
     except DeliveryError:
         return item
@@ -487,7 +483,6 @@ async def send_account_durable(
             user_dir=user_dir,
             file_path=file_path,
             chat_id=chat_id,
-            parent_id=group.topic_message_id,
         )
         if item.status == "legacy_confirmed_sent":
             continue

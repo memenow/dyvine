@@ -600,7 +600,7 @@ PYTHONPATH=src uv run python scripts/migrate_hermes_state_to_pg.py \
         the images of one post keep distinct names in the group. The Feishu
         audit and the window proof still match legacy uploads by the legacy
         truncation (the first 40 characters of the stem plus the extension).
-        A file reply goes into the verified topic thread. Unknown group, topic, or file-send outcomes remain on hold
+        Each file goes to the group as a plain message after the account's profile post, as the legacy sender posted it. Unknown group, topic, or file-send outcomes remain on hold
         after their safe UUID retry windows for message-level reconciliation;
         do not replay solely because a summary count is missing. Confirmed
         historical files suppress automatic resend. Only confirmed unsent

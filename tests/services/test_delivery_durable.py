@@ -244,7 +244,9 @@ def _media(tmp_path: Path, content: bytes = b"media") -> tuple[Path, Path]:
     return user_dir, path
 
 
-async def test_deliver_file_uses_reply_and_persisted_identity(tmp_path: Path) -> None:
+async def test_deliver_file_posts_a_plain_message_with_persisted_identity(
+    tmp_path: Path,
+) -> None:
     user_dir, path = _media(tmp_path)
     ledger, transport = Ledger(), Transport()
     channel = _channel(transport)
@@ -255,15 +257,15 @@ async def test_deliver_file_uses_reply_and_persisted_identity(tmp_path: Path) ->
         "user_dir": user_dir,
         "file_path": path,
         "chat_id": "chat-1",
-        "parent_id": "topic-1",
     }
     result = await channel.deliver_file(**kwargs)
     assert result.status == "sent"
     assert result.message_id == "message-1"
     assert result.file_key == "file-key-1"
     assert result.send_uuid == "stable-uuid"
-    assert "/topic-1/reply" in transport.posts[0]["url"]
-    assert transport.posts[0]["payload"]["reply_in_thread"] is True
+    assert transport.posts[0]["url"].endswith("/im/v1/messages?receive_id_type=chat_id")
+    assert transport.posts[0]["payload"]["receive_id"] == "chat-1"
+    assert "reply_in_thread" not in transport.posts[0]["payload"]
     assert transport.posts[0]["payload"]["uuid"] == "stable-uuid"
     assert (await channel.deliver_file(**kwargs)).status == "sent"
     assert len(transport.posts) == len(transport.uploads) == 1
@@ -288,7 +290,6 @@ async def test_prior_send_under_an_edited_caption_is_not_sent_again(
         "sec_user_id": "sec-1",
         "user_dir": user_dir,
         "chat_id": "chat-1",
-        "parent_id": "topic-1",
     }
     first = await channel.deliver_file(**kwargs, file_path=paths[0])
     assert first.status == "sent"
@@ -316,7 +317,6 @@ async def test_images_of_a_long_caption_post_upload_with_distinct_names(
             user_dir=user_dir,
             file_path=path,
             chat_id="chat-1",
-            parent_id="topic-1",
         )
         assert result.status == "sent"
     names = [upload["name"] for upload in transport.uploads]
@@ -335,7 +335,6 @@ async def test_ambiguous_send_reuses_key_and_uuid(tmp_path: Path) -> None:
         "user_dir": user_dir,
         "file_path": path,
         "chat_id": "chat-1",
-        "parent_id": "topic-1",
     }
     assert (await channel.deliver_file(**kwargs)).status == "sending"
     assert (await channel.deliver_file(**kwargs)).status == "sent"
@@ -346,7 +345,9 @@ async def test_ambiguous_send_reuses_key_and_uuid(tmp_path: Path) -> None:
     ]
 
 
-async def test_old_ambiguous_send_requires_review(tmp_path: Path) -> None:
+async def test_an_intent_reserved_for_a_topic_reply_waits_for_review(
+    tmp_path: Path,
+) -> None:
     user_dir, path = _media(tmp_path)
     ledger, transport = Ledger(), Transport()
     channel = _channel(transport)
@@ -367,6 +368,41 @@ async def test_old_ambiguous_send_requires_review(tmp_path: Path) -> None:
         status="sending",
         file_key="old-key",
         send_uuid="old-uuid",
+        send_started_at=datetime.now(UTC).isoformat(),
+    )
+    result = await channel.deliver_file(
+        ledger=ledger,
+        round="r1",
+        sec_user_id="sec-1",
+        user_dir=user_dir,
+        file_path=path,
+        chat_id="chat-1",
+    )
+    assert result.status == "needs_review"
+    assert transport.posts == [] and transport.uploads == []
+
+
+async def test_old_ambiguous_send_requires_review(tmp_path: Path) -> None:
+    user_dir, path = _media(tmp_path)
+    ledger, transport = Ledger(), Transport()
+    channel = _channel(transport)
+    media_id, relative, content_hash = media_identity(
+        sec_user_id="sec-1", user_dir=user_dir, file_path=path
+    )
+    row = await ledger.reserve_file(
+        media_id=media_id,
+        round="r1",
+        sec_user_id="sec-1",
+        relative_path=relative,
+        content_sha256=content_hash,
+        chat_id="chat-1",
+        parent_id=None,
+    )
+    ledger.files[media_id] = replace(
+        row,
+        status="sending",
+        file_key="old-key",
+        send_uuid="old-uuid",
         send_started_at=(datetime.now(UTC) - timedelta(hours=2)).isoformat(),
     )
     result = await channel.deliver_file(
@@ -376,7 +412,6 @@ async def test_old_ambiguous_send_requires_review(tmp_path: Path) -> None:
         user_dir=user_dir,
         file_path=path,
         chat_id="chat-1",
-        parent_id="topic-1",
     )
     assert result.status == "needs_review"
     assert transport.posts == [] and transport.uploads == []
@@ -393,7 +428,6 @@ async def test_legacy_sent_and_zero_file_never_send(tmp_path: Path) -> None:
         "user_dir": user_dir,
         "file_path": path,
         "chat_id": "chat-1",
-        "parent_id": "topic-1",
     }
     result = await channel.deliver_file(**kwargs)
     assert result.status == "permanent_failure"
@@ -419,7 +453,7 @@ async def test_legacy_permanent_failure_never_uploads(tmp_path: Path) -> None:
         relative_path=relative,
         content_sha256=content_hash,
         chat_id="chat-1",
-        parent_id="topic-1",
+        parent_id=None,
     )
     ledger.legacy_permanent[("sec-1", relative)] = replace(
         row, status="permanent_failure"
@@ -431,7 +465,6 @@ async def test_legacy_permanent_failure_never_uploads(tmp_path: Path) -> None:
         user_dir=user_dir,
         file_path=path,
         chat_id="chat-1",
-        parent_id="topic-1",
     )
     assert result.status == "permanent_failure"
     assert transport.posts == [] and transport.uploads == []
@@ -448,7 +481,6 @@ async def test_cache_only_legacy_path_requires_review(tmp_path: Path) -> None:
         user_dir=user_dir,
         file_path=path,
         chat_id="chat-1",
-        parent_id="topic-1",
     )
     assert result.status == "needs_review"
     assert transport.posts == [] and transport.uploads == []
