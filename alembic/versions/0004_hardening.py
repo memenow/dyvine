@@ -17,13 +17,17 @@ Create Date: 2026-09-25
   ``YYYY-MM-DD HH:MM:SS+TZ`` rendering would break TEXT ordering.
 - ``download_queue``/``delivery_groups``/``delivery_files`` gain real
   foreign keys to ``delivery_rounds``: every child insert flows
-  through an ``enqueue_round``-first path.
+  through an ``enqueue_round``-first path. Pre-existing children may
+  name rounds with no header (one-shot scripts and adoptions wrote
+  ``legacy``/``feishu_adopted``-style rounds directly), so the upgrade
+  backfills a header for every referenced round before constraining.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
+import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0004"
@@ -90,6 +94,22 @@ def upgrade() -> None:
             f"ck_{table}_{column}_iso",
             table,
             f"{column} ~ '{_ISO_UTC_TEXT_RE}'",
+        )
+    # Backfill headers for rounds children already reference: the stamp
+    # complies with the CHECKs added above, and ON CONFLICT absorbs a
+    # round orphaned by more than one child table.
+    stamp = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+    for table, _name in _FOREIGN_KEYS:
+        op.execute(
+            sa.text(
+                "INSERT INTO delivery_rounds (round, note, created_at, updated_at) "
+                f"SELECT DISTINCT child.round, 'backfilled by 0004', "
+                f"{stamp}, {stamp} "
+                f"FROM {table} AS child "
+                "LEFT JOIN delivery_rounds AS r ON r.round = child.round "
+                "WHERE r.round IS NULL AND child.round IS NOT NULL "
+                "ON CONFLICT (round) DO NOTHING"
+            )
         )
     for table, name in _FOREIGN_KEYS:
         op.create_foreign_key(
