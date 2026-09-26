@@ -223,6 +223,15 @@ def test_bulk_response_rejects_counter_mismatch() -> None:
             failed_count=-1,
             status=DownloadStatus.PENDING,
         )
+    with pytest.raises(ValidationError, match="non-negative"):
+        BulkDownloadResponse(
+            operation_id="op",
+            sec_user_id="sec",
+            total_posts=10,
+            downloaded_count={PostType.VIDEO: -1},
+            total_downloaded=0,
+            status=DownloadStatus.COMPLETED,
+        )
     ok = BulkDownloadResponse(
         operation_id="op",
         sec_user_id="sec",

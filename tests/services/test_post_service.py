@@ -1799,6 +1799,40 @@ def test_snapshot_detects_subdir_and_overwrite(tmp_path: Any) -> None:
     assert sorted(p.name for p in found) == ["new.mp4", "same.mp4"]
 
 
+def test_snapshot_skips_files_whose_stat_races(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file vanishing between rglob and stat is skipped, not fatal."""
+    from pathlib import Path
+
+    from dyvine.services.posts import _new_or_changed_files, _snapshot_files
+
+    gone = tmp_path / "gone.mp4"
+    gone.write_text("x")
+    kept = tmp_path / "kept.mp4"
+    kept.write_text("y")
+    real_stat = Path.stat
+    real_is_file = Path.is_file
+
+    def _flaky_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name == "gone.mp4":
+            raise OSError("vanished mid-scan")
+        return real_stat(self, *args, **kwargs)
+
+    def _flaky_is_file(self: Path) -> bool:
+        if self.name == "gone.mp4":
+            return True
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "stat", _flaky_stat)
+    monkeypatch.setattr(Path, "is_file", _flaky_is_file)
+    before = _snapshot_files(tmp_path)
+    assert all(path.name != "gone.mp4" for path in before)
+    assert any(path.name == "kept.mp4" for path in before)
+    found = _new_or_changed_files(tmp_path, {})
+    assert [path.name for path in found] == ["kept.mp4"]
+
+
 async def test_download_single_post_reports_nested_files(tmp_path: Any) -> None:
     """Single-post files include downloader output written to subdirs."""
     from unittest.mock import patch

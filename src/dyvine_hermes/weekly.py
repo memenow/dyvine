@@ -376,7 +376,7 @@ async def run_once(
             return WeeklyOutcome(
                 "blocked_by_prior_round", round_name, note=str(unresolved)
             )
-    if round_name is None:
+    if round_name is None:  # pragma: no cover - provably unreachable narrowing
         # Unreachable (the automatic branch always binds it), but ``assert``
         # compiles out under ``python -O`` and mypy needs the narrowing.
         raise ValueError("round_name is required")
@@ -386,7 +386,7 @@ async def run_once(
         )
         return WeeklyOutcome("dry_run", round_name, pending[0].key if pending else None)
     if automatic:
-        if window_start is None:
+        if window_start is None:  # pragma: no cover - provably unreachable narrowing
             # Unreachable (the automatic branch always binds it), but
             # ``assert`` compiles out under ``python -O``.
             raise ValueError("automatic run requires a window start")

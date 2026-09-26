@@ -971,6 +971,47 @@ def test_uninstall_tolerates_dead_owner() -> None:
     assert not is_websign_patched()
 
 
+def test_uninstall_drops_owner_whose_restore_fails() -> None:
+    """A setattr failure during restore is logged and the entry dropped."""
+    sentinel_wrapper = object()
+    sentinel_raw = object()
+
+    class BoomMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            raise RuntimeError("owner is gone")
+
+    class Boom(metaclass=BoomMeta):
+        pass
+
+    type.__setattr__(Boom, "endpoint", sentinel_wrapper)
+    websign_mod._PATCHED.append((Boom, "endpoint", sentinel_raw, sentinel_wrapper))
+    try:
+        uninstall_websign_patch()  # must not raise
+    finally:
+        websign_mod._PATCHED.clear()
+    assert not is_websign_patched()
+
+
+def test_uninstall_keeps_entry_superseded_by_foreign_patch() -> None:
+    """An entry another patch overwrote is kept, and their code untouched."""
+
+    class Owner:
+        pass
+
+    sentinel_ours = object()
+    sentinel_foreign = object()
+    Owner.attr = sentinel_ours
+    websign_mod._record_patch(Owner, "attr", object(), sentinel_ours)
+    Owner.attr = sentinel_foreign  # someone patched over us
+    try:
+        uninstall_websign_patch()
+        assert Owner.attr is sentinel_foreign
+        kept = list(websign_mod._PATCHED)
+    finally:
+        websign_mod._PATCHED.clear()
+    assert len(kept) == 1
+
+
 def test_provider_backs_off_after_repeated_failures() -> None:
     """Verify consecutive failures fail fast without new attempts."""
     opens = {"n": 0}

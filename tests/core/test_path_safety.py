@@ -301,3 +301,36 @@ def test_relative_to_download_root_loop_never_leaks_absolute(
         return
     assert rendered is not None
     assert str(jail_root) not in rendered
+
+
+def test_lexical_normalize_skips_dot_segments() -> None:
+    """Single dots vanish without touching the disk."""
+    assert path_safety._lexical_normalize(Path("a/./b")) == Path("a/b")
+
+
+def test_lexical_normalize_keeps_leading_parent_for_relative() -> None:
+    """A relative `..` with nothing to pop stays in the path."""
+    assert path_safety._lexical_normalize(Path("../x")) == Path("../x")
+
+
+def test_lexical_normalize_empty_collapses_to_here() -> None:
+    """An all-dots relative path normalizes to the current directory."""
+    assert path_safety._lexical_normalize(Path(".")) == Path(".")
+
+
+def test_resolve_inside_root_maps_resolve_errors_to_validation_error(
+    jail_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I/O failures from resolve() surface as ValidationError, not OSError."""
+    del jail_root  # Fixture repoints the download root; the resolve fails first.
+
+    real_resolve = Path.resolve
+
+    def _boom(self: Path, strict: bool = False) -> Path:
+        if self.name == "anything":
+            raise OSError("disk gone")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _boom)
+    with pytest.raises(ValidationError, match="Could not resolve"):
+        path_safety.resolve_within_root("anything")

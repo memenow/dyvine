@@ -1422,6 +1422,45 @@ async def test_profile_upsert_patches_columns(backend: BackendContext) -> None:
         await repo.get_profile("ghost-sec")
 
 
+async def test_profile_upsert_bare_reuses_row(backend: BackendContext) -> None:
+    """An empty field set inserts a bare row once and reuses it after."""
+    repo = backend.make_profile()
+    created = await repo.upsert_profile(sec_user_id="sec-bare")
+    assert created.nickname is None
+    again = await repo.upsert_profile(sec_user_id="sec-bare")
+    assert again == created
+    assert (await repo.get_profile("sec-bare")) == created
+
+
+async def test_profile_bare_upsert_missing_row_reports_loss() -> None:
+    """A bare row vanishing between insert and read fails loudly."""
+    from dyvine.db.postgres import PostgresProfileRepository
+
+    class _NullSession:
+        async def __aenter__(self) -> _NullSession:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        def begin(self) -> _NullSession:
+            return self
+
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            return None
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            return None
+
+    class _NullSessions:
+        def session(self) -> _NullSession:
+            return _NullSession()
+
+    repo = PostgresProfileRepository(_NullSessions())
+    with pytest.raises(UserProfileNotFoundError, match="lost its own row"):
+        await repo.upsert_profile(sec_user_id="sec-ghost")
+
+
 async def test_profile_upsert_rejects_unknown_fields(
     backend: BackendContext,
 ) -> None:

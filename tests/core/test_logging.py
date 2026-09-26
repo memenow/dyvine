@@ -395,3 +395,29 @@ def test_json_formatter_emits_flattened_context_fields() -> None:
     assert data["correlation_id"] == "cid-e2e"
     assert data["user_id"] == "user-1"
     assert data["operation_id"] == "op-1"
+
+
+async def test_track_memory_reports_diff_on_failure_when_read_succeeds() -> None:
+    """A failed op still reports its memory delta when the closing read works."""
+    mock_process = MagicMock()
+    mem_start = MagicMock()
+    mem_start.rss = 100 * 1024 * 1024
+    mem_end = MagicMock()
+    mem_end.rss = 110 * 1024 * 1024
+    mock_process.memory_info = MagicMock(side_effect=[mem_start, mem_end])
+
+    cl = ContextLogger("test.memfailok")
+    with (
+        patch("psutil.Process", return_value=mock_process),
+        patch.object(cl.logger, "log") as mock_log,
+    ):
+        with pytest.raises(ValueError, match="original"):
+            async with cl.track_memory("op"):
+                raise ValueError("original")
+        level, msg = mock_log.call_args[0][:2]
+        extra = mock_log.call_args[1]["extra"]
+        assert level == logging.ERROR
+        assert msg == "op failed"
+        assert extra["error"] == "original"
+        assert "memory_diff_mb" in extra
+        assert "total_memory_mb" in extra

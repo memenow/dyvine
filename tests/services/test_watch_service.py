@@ -173,6 +173,22 @@ async def test_do_live_check_swallows_offline(tmp_path: Path) -> None:
     livestream.download_stream.assert_awaited_once()
 
 
+async def test_do_live_check_leaves_no_stamp_on_unexpected_error(
+    tmp_path: Path,
+) -> None:
+    """An unexpected check error returns unstamped: the check never resolved."""
+    service, livestream, _ = _make_service(tmp_path)
+    livestream.download_stream.side_effect = ValueError("boom")
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=300, post_poll_seconds=600
+    )
+
+    await service._do_live_check(record)  # must not raise
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.last_live_check is None
+
+
 async def test_do_post_check_advances_checkpoint(tmp_path: Path) -> None:
     """A successful post check folds new ids into the checkpoint."""
     service, _, post = _make_service(tmp_path)

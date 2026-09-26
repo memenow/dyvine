@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -443,3 +444,144 @@ async def test_legacy_group_adoption_requires_matching_queue(
     )
     with pytest.raises(ValueError, match="migrated queue"):
         await ledger.import_legacy_group_topic(**fields)
+
+
+async def test_reserve_legacy_sent_round_trip(
+    ledger: PostgresDeliveryLedgerRepository,
+) -> None:
+    """The singular legacy-sent path stores and replays one confirmed path."""
+    record = await ledger.reserve_legacy_sent(
+        round="r-singular",
+        sec_user_id="sec-singular",
+        relative_path="2026-09-10 12-34-56 post/clip.mp4",
+    )
+    assert record.status == "legacy_confirmed_sent"
+    duplicate = await ledger.reserve_legacy_sent(
+        round="r-singular",
+        sec_user_id="sec-singular",
+        relative_path="2026-09-10 12-34-56 post/clip.mp4",
+    )
+    assert duplicate.media_id == record.media_id
+    found = await ledger.find_legacy_sent(
+        sec_user_id="sec-singular",
+        relative_path="2026-09-10 12-34-56 post/clip.mp4",
+    )
+    assert found is not None
+    assert found.media_id == record.media_id
+
+
+async def test_empty_batches_are_noops(
+    ledger: PostgresDeliveryLedgerRepository,
+) -> None:
+    """Empty batches short-circuit without opening a transaction."""
+    assert await ledger.reserve_legacy_sent_batch([]) == BatchOutcome(0, 0)
+    assert await ledger.reserve_legacy_permanent_failure_batch([]) == BatchOutcome(0, 0)
+    assert await ledger.upsert_legacy_evidence_batch([]) == BatchOutcome(0, 0)
+
+
+async def test_ensure_rounds_empty_set_touches_no_session() -> None:
+    """An empty round set returns before touching the session at all."""
+    from dyvine.db.delivery_ledger import _ensure_rounds
+
+    await _ensure_rounds(None, set(), "2026-01-01T00:00:00+00:00")  # must not raise
+
+
+class _NullSession:
+    """Session whose reads see nothing: every intent lookup misses."""
+
+    async def __aenter__(self) -> _NullSession:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+    def begin(self) -> _NullSession:
+        return self
+
+    async def execute(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+    async def get(self, *args: Any, **kwargs: Any) -> Any:
+        return None
+
+
+class _NullSessions:
+    """Session factory handing out blind sessions."""
+
+    def session(self) -> _NullSession:
+        return _NullSession()
+
+
+async def test_reserve_group_missing_row_reports_lost_intent() -> None:
+    """A group row vanishing between insert and read fails loudly."""
+    ledger = PostgresDeliveryLedgerRepository(_NullSessions())
+    with pytest.raises(ValueError, match="Group intent does not exist"):
+        await ledger.reserve_group(
+            round="r", sec_user_id="s", nickname="n", owner_open_id="o"
+        )
+
+
+async def test_legacy_group_import_missing_row_reports_lost_intent() -> None:
+    """A verified-but-vanished group row fails loudly instead of adopting air."""
+
+    class _QueueSession(_NullSession):
+        async def execute(self, *args: Any, **kwargs: Any) -> Any:
+            from types import SimpleNamespace
+
+            rows = [SimpleNamespace(nickname="n", chat_id="c")]
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
+
+    class _QueueSessions(_NullSessions):
+        def session(self) -> _QueueSession:
+            return _QueueSession()
+
+    ledger = PostgresDeliveryLedgerRepository(_QueueSessions())
+    with pytest.raises(ValueError, match="Group intent does not exist"):
+        await ledger.import_legacy_group_topic(
+            round="r",
+            sec_user_id="s",
+            nickname="n",
+            chat_id="c",
+            topic_message_id="t",
+            source_file="f",
+        )
+
+
+async def test_reserve_file_missing_row_reports_lost_intent() -> None:
+    """A file row vanishing between insert and read fails loudly."""
+    ledger = PostgresDeliveryLedgerRepository(_NullSessions())
+    with pytest.raises(ValueError, match="Media intent does not exist"):
+        await ledger.reserve_file(
+            media_id="m",
+            round="r",
+            sec_user_id="s",
+            relative_path="a/b.mp4",
+            content_sha256="0" * 64,
+            chat_id="c",
+            parent_id=None,
+        )
+
+
+async def test_reserve_legacy_sent_missing_row_reports_lost_intent() -> None:
+    """A legacy-sent row vanishing between insert and read fails loudly."""
+    ledger = PostgresDeliveryLedgerRepository(_NullSessions())
+    with pytest.raises(ValueError, match="Media intent does not exist"):
+        await ledger.reserve_legacy_sent(
+            round="r",
+            sec_user_id="s",
+            relative_path="2026-09-10 12-34-56 post/clip.mp4",
+        )
+
+
+async def test_legacy_evidence_missing_row_reports_lost_intent() -> None:
+    """An evidence row vanishing between upsert and read fails loudly."""
+    ledger = PostgresDeliveryLedgerRepository(_NullSessions())
+    with pytest.raises(ValueError, match="Legacy evidence does not exist"):
+        await ledger.upsert_legacy_evidence(
+            source_file="f",
+            legacy_path="p",
+            legacy_state="s",
+            nickname=None,
+            sec_user_id=None,
+            reason="r",
+        )

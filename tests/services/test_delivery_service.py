@@ -366,6 +366,18 @@ async def test_transport_maps_closed_client_to_failed() -> None:
     assert exc_info.value.reason == "failed"
 
 
+async def test_transport_maps_unexpected_bugs_to_failed() -> None:
+    """Non-transport exceptions chain terminally instead of retrying."""
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    bug = TypeError("not iterable")
+    transport = HttpxFeishuTransport(_StubClient(bug))  # type: ignore[arg-type]
+    with pytest.raises(DeliveryError) as exc_info:
+        await transport.post_json("https://x", payload={})
+    assert exc_info.value.reason == "failed"
+    assert exc_info.value.__cause__ is bug
+
+
 async def test_transport_lets_cancellation_through() -> None:
     """Cancelled sends abort instead of converting into retryable work."""
     import asyncio

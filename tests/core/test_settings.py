@@ -301,3 +301,27 @@ def test_get_settings_caches() -> None:
     s2 = get_settings()
     assert s1 is s2
     get_settings.cache_clear()
+
+
+def test_settings_proxy_writes_through_to_cached_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Writes via `settings` land on the cached instance (and clear with it)."""
+    import dyvine.core.settings as settings_module
+
+    monkeypatch.setenv("API_DEBUG", "true")
+    replacement = R2Settings(bucket_name="proxy-bucket")
+    settings_module.settings.r2 = replacement
+    assert get_settings().r2 is replacement
+    get_settings.cache_clear()
+    assert get_settings().r2 is not replacement
+
+
+def test_settings_proxy_repr_matches_cached_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`repr(settings)` represents whatever instance is currently cached."""
+    import dyvine.core.settings as settings_module
+
+    monkeypatch.setenv("API_DEBUG", "true")
+    assert repr(settings_module.settings) == repr(get_settings())

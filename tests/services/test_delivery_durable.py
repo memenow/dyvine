@@ -630,6 +630,178 @@ async def test_avatar_rejects_port_and_userinfo_before_any_io(
             )
 
 
+async def test_avatar_unresolvable_host_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DNS failure fails closed before any HTTP request."""
+    import socket
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    def _no_dns(*args: Any, **kwargs: Any) -> Any:
+        raise socket.gaierror("no such host")
+
+    monkeypatch.setattr("dyvine.services.delivery_durable.socket.getaddrinfo", _no_dns)
+    with pytest.raises(DeliveryError, match="does not resolve"):
+        await _upload_avatar(MagicMock(), "https://missing.example/a.jpg")
+
+
+async def test_avatar_empty_dns_answer_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty resolver answer is invalid, not public."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.socket.getaddrinfo",
+        lambda *args, **kwargs: [],
+    )
+    with pytest.raises(DeliveryError, match="host is invalid"):
+        await _upload_avatar(MagicMock(), "https://empty.example/a.jpg")
+
+
+async def test_avatar_garbage_dns_answer_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-IP resolver answer is invalid, not public."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("not-an-ip", 443))],
+    )
+    with pytest.raises(DeliveryError, match="host is invalid"):
+        await _upload_avatar(MagicMock(), "https://weird.example/a.jpg")
+
+
+async def test_avatar_malformed_port_is_rejected() -> None:
+    """An unparseable port fails closed without DNS or HTTP."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    with pytest.raises(DeliveryError, match="host is invalid"):
+        await _upload_avatar(MagicMock(), "https://img.example:notaport/a.jpg")
+
+
+async def test_avatar_literal_private_ip_is_rejected() -> None:
+    """A literal loopback/link-local IP never gets an HTTP request."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    with pytest.raises(DeliveryError, match="host is invalid"):
+        await _upload_avatar(MagicMock(), "https://127.0.0.1/a.jpg")
+
+
+async def test_avatar_non_200_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a 200 avatar body is stored; error pages are not avatars."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    class GoneClient:
+        async def __aenter__(self) -> GoneClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        @asynccontextmanager
+        async def stream(
+            self, method: str, url: str, *, timeout: float
+        ) -> AsyncIterator[httpx.Response]:
+            yield httpx.Response(
+                410, content=b"gone", request=httpx.Request("GET", url)
+            )
+
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.httpx.AsyncClient",
+        lambda **kwargs: GoneClient(),
+    )
+    _public_dns(monkeypatch)
+    with pytest.raises(DeliveryError, match="returned status 410"):
+        await _upload_avatar(MagicMock(), "https://img.example/a.jpg")
+
+
+async def test_avatar_transport_error_is_wrapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx failures surface as DeliveryError, never raw."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    class BrokenClient:
+        async def __aenter__(self) -> BrokenClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        @asynccontextmanager
+        async def stream(
+            self, method: str, url: str, *, timeout: float
+        ) -> AsyncIterator[httpx.Response]:
+            # Unreachable yield: present only so this stays an async
+            # generator function for asynccontextmanager.
+            raise httpx.ConnectError("down")
+            yield httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.httpx.AsyncClient",
+        lambda **kwargs: BrokenClient(),
+    )
+    _public_dns(monkeypatch)
+    with pytest.raises(DeliveryError, match="Avatar fetch failed"):
+        await _upload_avatar(MagicMock(), "https://img.example/a.jpg")
+
+
+async def test_avatar_streaming_size_cap_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A body crossing the cap mid-stream aborts before buffering it all."""
+    from unittest.mock import MagicMock
+
+    from dyvine.services.delivery_durable import _upload_avatar
+
+    class FatClient:
+        async def __aenter__(self) -> FatClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            return None
+
+        @asynccontextmanager
+        async def stream(
+            self, method: str, url: str, *, timeout: float
+        ) -> AsyncIterator[httpx.Response]:
+            body = b"x" * (2 * 1024 * 1024)
+
+            class FatResponse:
+                status_code = 200
+
+                async def aiter_bytes(self) -> AsyncIterator[bytes]:
+                    yield body
+                    yield body
+                    yield body
+
+            yield FatResponse()  # type: ignore[misc]
+
+    monkeypatch.setattr(
+        "dyvine.services.delivery_durable.httpx.AsyncClient",
+        lambda **kwargs: FatClient(),
+    )
+    _public_dns(monkeypatch)
+    with pytest.raises(DeliveryError, match="size is invalid"):
+        await _upload_avatar(MagicMock(), "https://img.example/a.jpg")
+
+
 async def test_avatar_redirect_body_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

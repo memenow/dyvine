@@ -751,6 +751,23 @@ def test_single_runner_lock_falls_back_to_msvcrt(
         assert acquired is False
 
 
+def test_single_runner_lock_ignores_msvcrt_unlock_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failing Windows unlock never fails the run it guarded."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(weekly_module, "fcntl", None)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    msvcrt = MagicMock()
+    msvcrt.LK_NBLCK = 1
+    msvcrt.LK_UNLCK = 2
+    msvcrt.locking.side_effect = [None, OSError("unlock failed")]
+    monkeypatch.setattr(weekly_module, "msvcrt", msvcrt)
+    with weekly_module.single_runner_lock() as acquired:
+        assert acquired is True
+
+
 def test_single_runner_lock_warns_without_any_primitive(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

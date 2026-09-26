@@ -41,7 +41,9 @@ def _lexical_normalize(path: Path) -> Path:
     """
     stack: list[str] = []
     for part in path.parts:
-        if part == ".":
+        # PurePath drops single dots at parse time, so `parts` never
+        # contains "."; the branch stays as documentation of intent.
+        if part == ".":  # pragma: no cover - parser-normalized away
             continue
         if part == "..":
             if stack and stack[-1] != ".." and stack[-1] != path.anchor:
