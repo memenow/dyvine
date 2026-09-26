@@ -19,8 +19,9 @@ Provides:
 """
 
 from enum import StrEnum
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
 from .operations import OperationStatus
 
@@ -65,7 +66,9 @@ class PostBase(BaseModel):
 
     aweme_id: str = Field(..., description="Unique identifier for the post")
     desc: str = Field(default="", description="Post description/caption")
-    create_time: int = Field(..., description="Post creation timestamp")
+    create_time: int = Field(
+        ..., ge=0, description="Post creation timestamp (unix epoch seconds)"
+    )
 
 
 class VideoInfo(BaseModel):
@@ -80,10 +83,10 @@ class VideoInfo(BaseModel):
     """
 
     play_addr: HttpUrl = Field(..., description="Video playback URL")
-    duration: int = Field(..., description="Video duration in seconds")
+    duration: int = Field(..., ge=0, description="Video duration in seconds")
     ratio: str = Field(..., description="Video aspect ratio")
-    width: int = Field(..., description="Video width in pixels")
-    height: int = Field(..., description="Video height in pixels")
+    width: int = Field(..., ge=0, description="Video width in pixels")
+    height: int = Field(..., ge=0, description="Video height in pixels")
 
 
 class ImageInfo(BaseModel):
@@ -97,8 +100,8 @@ class ImageInfo(BaseModel):
     """
 
     url: HttpUrl = Field(..., description="Image URL")
-    width: int = Field(..., description="Image width in pixels")
-    height: int = Field(..., description="Image height in pixels")
+    width: int = Field(..., ge=0, description="Image width in pixels")
+    height: int = Field(..., ge=0, description="Image height in pixels")
 
 
 class PostDetail(PostBase):
@@ -120,6 +123,23 @@ class PostDetail(PostBase):
         default_factory=dict, description="Post engagement statistics"
     )
 
+    @model_validator(mode="after")
+    def _payload_must_match_type(self) -> Self:
+        """Require the media payload the declared type promises.
+
+        A ``VIDEO`` without playable video (or ``IMAGES`` without
+        images) is corrupt upstream data; failing here beats a ``None``
+        dereference three layers deeper in SDK branching code.
+        """
+        if (
+            self.post_type in (PostType.VIDEO, PostType.MIXED)
+            and self.video_info is None
+        ):
+            raise ValueError(f"{self.post_type.value} post requires video_info")
+        if self.post_type in (PostType.IMAGES, PostType.MIXED) and not self.images:
+            raise ValueError(f"{self.post_type.value} post requires images")
+        return self
+
 
 class ListPostsResponse(BaseModel):
     """Paginated wrapper for ``GET /posts/users/{user_id}/posts``.
@@ -137,11 +157,12 @@ class ListPostsResponse(BaseModel):
     next_page_token: str | None = Field(
         None,
         description=(
-            "Opaque cursor for the next page. ``None`` when the feed is " "exhausted."
+            "Opaque cursor for the next page. ``None`` when the feed is exhausted."
         ),
     )
     total_size: int | None = Field(
         None,
+        ge=0,
         description=(
             "Best-effort total number of posts available, when the upstream "
             "profile provides a count."
@@ -176,7 +197,9 @@ class BulkDownloadResponse(BaseModel):
             "configured download root."
         ),
     )
-    total_posts: int = Field(default=0, description="Total number of posts available")
+    total_posts: int = Field(
+        default=0, ge=0, description="Total number of posts available"
+    )
     downloaded_count: dict[PostType, int] = Field(
         default_factory=lambda: {
             PostType.VIDEO: 0,
@@ -191,10 +214,11 @@ class BulkDownloadResponse(BaseModel):
     )
     failed_count: int = Field(
         default=0,
+        ge=0,
         description="Posts encountered during the run that failed to download",
     )
     total_downloaded: int = Field(
-        default=0, description="Total number of successful downloads"
+        default=0, ge=0, description="Total number of successful downloads"
     )
     status: OperationStatus = Field(
         ..., description="Overall download operation status"
@@ -205,3 +229,20 @@ class BulkDownloadResponse(BaseModel):
     )
 
     model_config = ConfigDict()
+
+    @model_validator(mode="after")
+    def _counters_must_reconcile(self) -> Self:
+        """Pin the counter invariant: total equals the by-type sum.
+
+        Every writer maintains ``completed_items`` and the
+        ``downloaded_count`` breakdown in the same atomic row write, so
+        a mismatch is always a bug, never skew. No upper bound against
+        ``total_posts`` is enforced: the run can legitimately outgrow
+        the start-time profile count (new posts published mid-run).
+        """
+        by_type = self.downloaded_count or {}
+        if any(count < 0 for count in by_type.values()):
+            raise ValueError("downloaded_count values must be non-negative")
+        if self.total_downloaded != sum(by_type.values()):
+            raise ValueError("total_downloaded must equal the downloaded_count sum")
+        return self

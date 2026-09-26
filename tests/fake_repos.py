@@ -126,6 +126,20 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _checked_fields(
+    allowed: frozenset[str], fields: dict[str, Any], *, method: str
+) -> dict[str, Any]:
+    """Return ``fields`` unchanged, rejecting unknown names loudly.
+
+    Mirrors ``dyvine.db.postgres._checked_fields`` exactly (same
+    message), minus the import: the fake leg stays dependency-free.
+    """
+    unknown = sorted(name for name in fields if name not in allowed)
+    if unknown:
+        raise ValueError(f"{method} got unknown field(s): {', '.join(unknown)}")
+    return dict(fields)
+
+
 @dataclass
 class FakeOperationState:
     """Shared backing store for multi-owner fake scenarios.
@@ -254,18 +268,20 @@ class FakeOperationRepository:
     async def update_operation(
         self, operation_id: str, **fields: Any
     ) -> OperationRecord:
-        """Update allowed fields, refresh liveness, return the new state."""
+        """Update allowed fields, refresh liveness, return the new state.
+
+        Unknown field names raise ``ValueError``; an empty field set
+        verifies existence and returns the row unchanged.
+        """
         try:
             current = self._rows[operation_id]
         except KeyError:
             raise OperationNotFoundError(
                 f"Operation {operation_id} not found"
             ) from None
-        requested = {
-            key: value
-            for key, value in fields.items()
-            if key in _OPERATION_UPDATABLE_FIELDS
-        }
+        requested = _checked_fields(
+            _OPERATION_UPDATABLE_FIELDS, fields, method="update_operation"
+        )
         if not requested:
             return current
         values: dict[str, Any] = {
@@ -296,7 +312,9 @@ class FakeOperationRepository:
         """Fail active rows whose owner stopped heartbeating.
 
         Mirrors the SQL NULL semantics: a missing heartbeat falls back
-        to ``created_at`` so legacy rows stay sweepable.
+        to ``created_at`` so legacy rows stay sweepable. Swept rows
+        keep their stale heartbeat and owner, exactly like the SQL
+        ``UPDATE`` which only rewrites status/message/error/updated_at.
         """
         cutoff = (
             datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
@@ -311,11 +329,15 @@ class FakeOperationRepository:
                 and alive < cutoff
                 and owner != self._owner_id
             ):
-                await self.update_operation(
-                    key,
+                # Write the failed state directly: routing through
+                # ``update_operation`` would refresh the heartbeat,
+                # which the SQL sweep never does.
+                self._rows[key] = replace(
+                    row,
                     status="failed",
                     message=_ORPHAN_MESSAGE,
                     error=_ORPHAN_MESSAGE,
+                    updated_at=_now_iso(),
                 )
                 swept += 1
         return swept
@@ -366,9 +388,13 @@ class FakeWatchRepository:
     ) -> WatchSubscriptionRecord:
         """Insert a subscription; duplicate users or IDs raise."""
         if subscription_id is not None and subscription_id in self._rows:
+            # Postgres maps ANY unique violation on this insert (user
+            # key or explicit ID) to the same user-keyed error, so the
+            # fake mirrors that mapping exactly; callers converge on
+            # the user row, never on the collided ID.
             raise WatchDuplicateError(
-                "Watch subscription " f"{subscription_id} already exists",
-                details={"subscription_id": subscription_id},
+                f"Watch subscription for user {user_id} already exists",
+                details={"user_id": user_id},
             )
         if user_id in self._by_user:
             raise WatchDuplicateError(
@@ -461,18 +487,20 @@ class FakeWatchRepository:
     async def update_subscription(
         self, subscription_id: str, **fields: Any
     ) -> WatchSubscriptionRecord:
-        """Update allowed fields and return the new state."""
+        """Update allowed fields and return the new state.
+
+        Unknown field names raise ``ValueError``; an empty field set
+        verifies existence and returns the row unchanged.
+        """
         try:
             current = self._rows[subscription_id]
         except KeyError:
             raise WatchSubscriptionNotFoundError(
                 f"Watch subscription {subscription_id} not found"
             ) from None
-        requested = {
-            key: value
-            for key, value in fields.items()
-            if key in _SUBSCRIPTION_UPDATABLE_FIELDS
-        }
+        requested = _checked_fields(
+            _SUBSCRIPTION_UPDATABLE_FIELDS, fields, method="update_subscription"
+        )
         if not requested:
             return current
         values: dict[str, Any] = {
@@ -553,13 +581,25 @@ class FakeQueueRepository:
         operation_id: str | None = None,
         op_status: str | None = None,
         op_message: str | None = None,
-        attempts: int = 0,
+        attempts: int | None = None,
         serial_group: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> QueueEntryRecord:
-        """Insert or replace the entry at ``key`` and return it."""
+        """Insert or replace the entry at ``key`` and return it.
+
+        Mirrors the SQL ``ON CONFLICT`` semantics: conflicts rewrite
+        the payload but never touch liveness (no owner steal, no
+        heartbeat refresh), and ``attempts``/``extra`` change only
+        when explicitly passed.
+        """
         stamp = _now_iso()
         existing = self._rows.get(key)
+        if existing is None:
+            attempts_value = 0 if attempts is None else attempts
+            extra_value = dict(extra or {})
+        else:
+            attempts_value = existing.attempts if attempts is None else attempts
+            extra_value = dict(extra) if extra is not None else dict(existing.extra)
         record = QueueEntryRecord(
             key=key,
             round=round,
@@ -574,15 +614,16 @@ class FakeQueueRepository:
             operation_id=operation_id,
             op_status=op_status,
             op_message=op_message,
-            attempts=attempts,
+            attempts=attempts_value,
             serial_group=serial_group,
-            extra=dict(extra or {}),
+            extra=extra_value,
             created_at=existing.created_at if existing else stamp,
             updated_at=stamp,
         )
         self._rows[key] = record
-        self._owners[key] = self._owner_id
-        self._heartbeats[key] = stamp
+        if existing is None:
+            self._owners[key] = self._owner_id
+            self._heartbeats[key] = stamp
         return record
 
     async def get_entry(self, key: str) -> QueueEntryRecord:
@@ -624,6 +665,15 @@ class FakeQueueRepository:
             if (round is None or row.round == round)
             and (status is None or row.status == status)
         )
+
+    async def count_by_status(self, *, round: str | None = None) -> dict[str, int]:
+        """Tally entries by status in one snapshot."""
+        tallies: dict[str, int] = {}
+        for row in self._rows.values():
+            if round is not None and row.round != round:
+                continue
+            tallies[row.status] = tallies.get(row.status, 0) + 1
+        return tallies
 
     async def claim_next(
         self, *, round: str | None = None, keys: set[str] | None = None
@@ -676,16 +726,18 @@ class FakeQueueRepository:
         return claimed
 
     async def update_entry(self, key: str, **fields: Any) -> QueueEntryRecord:
-        """Update allowed fields, refresh liveness, return the new state."""
+        """Update allowed fields, refresh liveness, return the new state.
+
+        Unknown field names raise ``ValueError``; an empty field set
+        verifies existence and returns the row unchanged.
+        """
         try:
             current = self._rows[key]
         except KeyError:
             raise QueueEntryNotFoundError(f"Queue entry {key} not found") from None
-        requested = {
-            name: value
-            for name, value in fields.items()
-            if name in _QUEUE_UPDATABLE_FIELDS
-        }
+        requested = _checked_fields(
+            _QUEUE_UPDATABLE_FIELDS, fields, method="update_entry"
+        )
         if not requested:
             return current
         values: dict[str, Any] = {
@@ -931,10 +983,11 @@ class FakeProfileRepository:
     async def upsert_profile(
         self, *, sec_user_id: str, **fields: Any
     ) -> UserProfileRecord:
-        """Insert or patch the snapshot row and return it."""
-        known = {
-            name: value for name, value in fields.items() if name in _PROFILE_COLUMNS
-        }
+        """Insert or patch the snapshot row and return it.
+
+        Unknown field names raise ``ValueError``.
+        """
+        known = _checked_fields(_PROFILE_COLUMNS, fields, method="upsert_profile")
         stamp = _now_iso()
         existing = self._rows.get(sec_user_id)
         if existing is None:

@@ -65,6 +65,11 @@ _MAX_CONSECUTIVE_CRASHES = 5
 #: Backoff ceiling between crash restarts (5 minutes).
 _MAX_CRASH_BACKOFF_SECONDS = 300.0
 
+#: Retry delay when the loop's subscription fetch hits a transient store
+#: error (one skipped tick, not a crash: the check bodies below tolerate
+#: the same failures, so the fetch must not escalate them).
+_STORE_RETRY_SECONDS = 30.0
+
 
 def _crash_backoff_seconds(consecutive_crashes: int) -> float:
     """Return the restart delay after ``consecutive_crashes`` crashes.
@@ -75,6 +80,22 @@ def _crash_backoff_seconds(consecutive_crashes: int) -> float:
     return min(
         _MAX_CRASH_BACKOFF_SECONDS, 30.0 * 2.0 ** max(0, consecutive_crashes - 1)
     )
+
+
+def _parse_check_or_none(value: str | None) -> datetime | None:
+    """Return ``value`` parsed as an aware datetime, else ``None``.
+
+    Migrated rows preserve legacy check stamps verbatim, so a
+    hand-corrupted value must read as "never checked" rather than 500
+    the response model (whose fields are ``AwareDatetime``).
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 class WatchService:
@@ -159,8 +180,24 @@ class WatchService:
                 upstream failed), so a faulty subscription is never created.
         """
         watch_cfg = self.settings.watch
-        live = live_poll_seconds or watch_cfg.live_poll_seconds
-        post = post_poll_seconds or watch_cfg.post_poll_seconds
+        live = (
+            watch_cfg.live_poll_seconds
+            if live_poll_seconds is None
+            else live_poll_seconds
+        )
+        post = (
+            watch_cfg.post_poll_seconds
+            if post_poll_seconds is None
+            else post_poll_seconds
+        )
+        if live <= 0 or post <= 0:
+            # ``or``-fallback would silently turn an explicit 0 into the
+            # default and let negatives through; either way the loop ends
+            # up sleeping <= 0 and busy-spinning against the DB. Reject.
+            raise ServiceError(
+                "live_poll_seconds and post_poll_seconds must be positive "
+                f"(got live={live!r}, post={post!r})"
+            )
         backfill = (
             watch_cfg.backfill_on_create
             if backfill_on_create is None
@@ -257,11 +294,18 @@ class WatchService:
         # Serialise with create_subscription under the same lock so a
         # concurrent POST for this user cannot observe (and re-arm) a row that
         # this delete is removing. Validate existence first so an unknown id
-        # surfaces as 404 before we touch the loop registry.
+        # surfaces as 404 before we touch the loop registry. Only the
+        # detach (pop) happens under the lock; awaiting the cancelled task
+        # can wait out a long post backfill and must never stall
+        # concurrent creates. A racing POST starts a NEW task this stale
+        # handle cannot touch, and the loop's finally only evicts its own
+        # registry slot, so no successor is disturbed.
         async with self._get_lock():
             await self.watch_store.get_subscription(subscription_id)
-            await self._cancel_loop(subscription_id)
+            task = self._pop_loop(subscription_id)
             await self.watch_store.delete_subscription(subscription_id)
+        if task is not None:
+            await self._await_cancelled(task)
         logger.info(
             "watch subscription deleted", extra={"subscription_id": subscription_id}
         )
@@ -453,8 +497,8 @@ class WatchService:
             enabled=record.enabled,
             live_poll_seconds=record.live_poll_seconds,
             post_poll_seconds=record.post_poll_seconds,
-            last_live_check=record.last_live_check,
-            last_post_check=record.last_post_check,
+            last_live_check=_parse_check_or_none(record.last_live_check),
+            last_post_check=_parse_check_or_none(record.last_post_check),
             newest_aweme_id=str(newest) if newest is not None else None,
             created_at=record.created_at,
             updated_at=record.updated_at,
@@ -508,6 +552,26 @@ class WatchService:
         )
         self._loops[record.subscription_id] = task
 
+    def _pop_loop(self, subscription_id: str) -> asyncio.Task[Any] | None:
+        """Detach a loop task plus its supervisor crash budget (sync).
+
+        Split from the cancel-await so ``delete_subscription`` can detach
+        under its creation lock and await outside it.
+        """
+        task = self._loops.pop(subscription_id, None)
+        self._crash_counts.pop(subscription_id, None)
+        self._last_crash_monotonic.pop(subscription_id, None)
+        return task
+
+    @staticmethod
+    async def _await_cancelled(task: asyncio.Task[Any]) -> None:
+        """Cancel ``task`` and wait for it to acknowledge (or finish)."""
+        if task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
     async def _cancel_loop(self, subscription_id: str) -> None:
         """Cancel and await a subscription's watcher loop if present.
 
@@ -515,14 +579,9 @@ class WatchService:
         (delete, disable, reconcile-drop) is not a crash, so a later
         re-enable starts from a clean slate.
         """
-        task = self._loops.pop(subscription_id, None)
-        self._crash_counts.pop(subscription_id, None)
-        self._last_crash_monotonic.pop(subscription_id, None)
-        if task is None or task.done():
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        task = self._pop_loop(subscription_id)
+        if task is not None:
+            await self._await_cancelled(task)
 
     async def _watch_loop(self, subscription_id: str) -> BaseException | None:
         """Drive one subscription's live + post cadences until cancelled.
@@ -553,6 +612,19 @@ class WatchService:
                     record = await self.watch_store.get_subscription(subscription_id)
                 except WatchSubscriptionNotFoundError:
                     return None  # deleted out from under us
+                except Exception:
+                    # A transient store/network blip must not crash the loop
+                    # into backoff/parking: the live/post check bodies below
+                    # tolerate the same failures, so the fetch skips one tick
+                    # and retries instead of escalating. (Cancellation is a
+                    # BaseException and still propagates to the outer handler.)
+                    logger.warning(
+                        "watch loop skipped a tick after a transient store error",
+                        extra={"subscription_id": subscription_id},
+                        exc_info=True,
+                    )
+                    await asyncio.sleep(_STORE_RETRY_SECONDS)
+                    continue
                 if not record.enabled:
                     return None
 
@@ -601,32 +673,37 @@ class WatchService:
 
         Reuses ``LivestreamService.download_stream`` which raises
         ``LivestreamError`` when the user is offline or already being
-        recorded (deduped by ``room_id``); both are normal and swallowed.
+        recorded (deduped by ``room_id``). The check stamp is written
+        only after the attempt resolves: stamping first would record a
+        check that never happened if the worker crashes mid-flight.
         """
         try:
-            await self.watch_store.update_subscription(
-                record.subscription_id, last_live_check=self._now_iso()
-            )
             await self.livestream_service.download_stream(
                 url=f"https://www.douyin.com/user/{record.user_id}"
-            )
-            logger.info(
-                "watch: livestream recording started",
-                extra={
-                    "subscription_id": record.subscription_id,
-                    "user_id": record.user_id,
-                },
             )
         except asyncio.CancelledError:
             raise
         except WatchSubscriptionNotFoundError:
             return
-        except LivestreamError:
-            return  # offline, no stream, or already recording -> skip
+        except LivestreamError as exc:
+            # Definitive negative outcome (offline, no stream, already
+            # recording): the check completed, so stamp it. Debug level:
+            # offline is the steady state and must not spam the logs.
+            logger.debug(
+                "watch: live check skipped (%s)",
+                exc,
+                extra={"subscription_id": record.subscription_id},
+            )
+            with contextlib.suppress(WatchSubscriptionNotFoundError):
+                await self.watch_store.update_subscription(
+                    record.subscription_id, last_live_check=self._now_iso()
+                )
+            return
         except RuntimeError:
             # Usually the background registry closing during shutdown,
             # but a persistent non-shutdown RuntimeError would otherwise
             # loop forever with zero observability, so always log it.
+            # No stamp: the check never resolved.
             logger.warning(
                 "watch live check failed",
                 extra={"subscription_id": record.subscription_id},
@@ -639,6 +716,18 @@ class WatchService:
                 extra={"subscription_id": record.subscription_id},
                 exc_info=True,
             )
+            return
+        with contextlib.suppress(WatchSubscriptionNotFoundError):
+            await self.watch_store.update_subscription(
+                record.subscription_id, last_live_check=self._now_iso()
+            )
+        logger.info(
+            "watch: livestream recording started",
+            extra={
+                "subscription_id": record.subscription_id,
+                "user_id": record.user_id,
+            },
+        )
 
     async def _do_post_check(self, record: WatchSubscriptionRecord) -> None:
         """Download the user's new posts and advance the checkpoint.
@@ -650,9 +739,6 @@ class WatchService:
         """
         checkpoint = record.checkpoint or {}
         try:
-            await self.watch_store.update_subscription(
-                record.subscription_id, last_post_check=self._now_iso()
-            )
             result = await self.post_service.download_new_posts(
                 record.user_id,
                 since_aweme_id=checkpoint.get("newest_aweme_id"),
@@ -663,8 +749,15 @@ class WatchService:
             raise
         except WatchSubscriptionNotFoundError:
             return
-        except (UserNotFoundError, ServiceError):
-            return  # upstream/profile failure -> keep checkpoint, retry later
+        except (UserNotFoundError, ServiceError) as exc:
+            # Upstream/profile failure -> keep checkpoint, retry later.
+            # No stamp: the check never resolved.
+            logger.debug(
+                "watch: post check skipped (%s)",
+                exc,
+                extra={"subscription_id": record.subscription_id},
+            )
+            return
         except RuntimeError:
             # Same observability rule as the live check: never swallow
             # silently, even though shutdown is the usual cause.
@@ -681,6 +774,13 @@ class WatchService:
                 exc_info=True,
             )
             return
+
+        # The check resolved (whatever the outcome below): stamp it.
+        # The *checkpoint* advance stays conditional on a complete run.
+        with contextlib.suppress(WatchSubscriptionNotFoundError):
+            await self.watch_store.update_subscription(
+                record.subscription_id, last_post_check=self._now_iso()
+            )
 
         if result.failed_count or result.truncated:
             # Hold the checkpoint whenever the fetched window was incomplete:

@@ -30,6 +30,7 @@ original exception.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import shutil
@@ -74,6 +75,19 @@ else:
 # shared :mod:`dyvine.core.pagination` constants together with this value
 # to bound the number of pages we will walk before giving up.
 PAGE_SIZE = 100
+
+# Hostnames a share link (and its redirect landing) may point at. Mirrors
+# ``_ALLOWED_LIVESTREAM_HOSTS``: anything else is rejected before the
+# service issues an outbound request, so pasted URLs can never turn the
+# server into an SSRF proxy (notably against link-local metadata IPs).
+_DOUYIN_SHARE_HOSTS: frozenset[str] = frozenset(
+    {
+        "v.douyin.com",
+        "www.douyin.com",
+        "douyin.com",
+    }
+)
+
 
 # Cool-down between successive page fetches inside ``_process_download``.
 # Douyin throttles aggressive callers, so the loop sleeps before pulling
@@ -181,6 +195,40 @@ def _parse_room_data(raw: Any) -> dict[str, Any] | None:
             return None
         return decoded if isinstance(decoded, dict) else None
     return None
+
+
+def _batch_progress_percent(
+    *, downloaded: int, total_posts: int, likes_only: bool
+) -> float | None:
+    """Return the per-batch progress percentage for the persisted field.
+
+    ``None`` when the total is unknowable (likes-only runs); otherwise
+    clamped to 100 -- mid-run counts can overtake the start-time
+    profile total (new posts published during the run, mixed
+    posts+likes accounting), and clients must never see a 130%-style
+    value.
+    """
+    if likes_only:
+        return None
+    if total_posts <= 0:
+        return 100.0
+    return min((downloaded / total_posts) * 100.0, 100.0)
+
+
+def _task_user_dir(temp_dir: Path, nickname: str) -> Path:
+    """Resolve the per-task user directory for an upstream nickname.
+
+    Nicknames are upstream-controlled: sanitize to one safe segment and
+    jail BEFORE creating (mkdir-first would already have created the
+    escaped directory -- or discarded ``temp_dir`` entirely for an
+    absolute nickname -- by the time the check fires). The post-mkdir
+    re-check closes the symlink-swap TOCTOU window.
+    """
+    user_dir = temp_dir / sanitize_filename(nickname)
+    ensure_within_root(user_dir)
+    user_dir.mkdir(exist_ok=True)
+    ensure_within_root(user_dir)
+    return user_dir
 
 
 def _profile_handler_kwargs(user_id: str) -> dict[str, Any]:
@@ -522,7 +570,12 @@ class UserService:
                 or a final URL with no recognizable identity.
         """
         parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.hostname.lower() not in _DOUYIN_SHARE_HOSTS
+            or parsed.username is not None
+        ):
             raise UserServiceError(f"Not a shareable URL: {url!r}")
         headers = {
             "User-Agent": (
@@ -548,6 +601,9 @@ class UserService:
         except httpx.HTTPError as e:
             raise UserServiceError(f"Share link fetch failed: {e}") from e
         final = str(response.url)
+        final_host = urlparse(final).hostname or ""
+        if final_host.lower() not in _DOUYIN_SHARE_HOSTS:
+            raise UserServiceError(f"Share link left Douyin: {final}")
         path = urlparse(final).path
         user_match = re.search(r"/user/([^/?#]+)", path)
         if user_match:
@@ -1096,6 +1152,7 @@ class UserService:
         # ever touches one task's directory.
         temp_dir: Path | None = None
         user_dir: Path | None = None
+        handler: DouyinHandler | None = None
         downloaded_count = 0
         total_posts = 0
         failed_uploads = 0
@@ -1165,9 +1222,7 @@ class UserService:
                 )
 
             # Create user directory inside the per-task workspace.
-            user_dir = temp_dir / user_data.nickname
-            user_dir.mkdir(exist_ok=True)
-            ensure_within_root(user_dir)
+            user_dir = _task_user_dir(temp_dir, user_data.nickname)
             retained_download_path = relative_to_download_root(user_dir)
             if retain_workspace:
                 await self.operation_store.update_operation(
@@ -1238,12 +1293,11 @@ class UserService:
                     # ``progress=None`` in that case and only fill in a
                     # numeric percentage for the posts path where
                     # ``total_posts`` reflects the profile's aweme_count.
-                    if downloading_likes_only:
-                        progress = None
-                    elif total_posts > 0:
-                        progress = (downloaded_count / total_posts) * 100
-                    else:
-                        progress = 100.0
+                    progress = _batch_progress_percent(
+                        downloaded=downloaded_count,
+                        total_posts=total_posts,
+                        likes_only=downloading_likes_only,
+                    )
 
                     update_fields: dict[str, Any] = {
                         "completed_items": downloaded_count,
@@ -1291,15 +1345,16 @@ class UserService:
                         }
                         candidate_files.update(batch_files)
                         batch_failed_paths: set[Path] = set()
-                        batch_uploaded, batch_failed = (
-                            await self._upload_directory_to_r2(
-                                user_dir,
-                                user_id,
-                                user_data,
-                                delete_after_upload=not retain_workspace,
-                                file_paths=candidate_files,
-                                failed_paths=batch_failed_paths,
-                            )
+                        (
+                            batch_uploaded,
+                            batch_failed,
+                        ) = await self._upload_directory_to_r2(
+                            user_dir,
+                            user_id,
+                            user_data,
+                            delete_after_upload=not retain_workspace,
+                            file_paths=candidate_files,
+                            failed_paths=batch_failed_paths,
                         )
                         pending_upload_files = {
                             path for path in batch_failed_paths if path.exists()
@@ -1404,6 +1459,19 @@ class UserService:
                 downloading_likes_only=downloading_likes_only,
             )
 
+        except asyncio.CancelledError:
+            # Registry drain cancels here (BaseException): persist a terminal
+            # state so the row never wedges in ``running``, then re-raise.
+            # The operation vocabulary has no "cancelled", so ``failed`` +
+            # ``error="cancelled"`` carries it, matching the posts services.
+            with contextlib.suppress(Exception):
+                await self.operation_store.update_operation(
+                    task_id,
+                    status="failed",
+                    message="Download cancelled",
+                    error="cancelled",
+                )
+            raise
         except Exception as e:
             logger.exception(
                 "Download failed",
@@ -1417,6 +1485,11 @@ class UserService:
             )
 
         finally:
+            # Release the handler's connections first: it lived through the
+            # whole multi-page loop, and leaking it per task exhausts file
+            # descriptors. Never raises (best-effort by construction).
+            if handler is not None:
+                await _safely_close_handler(handler)
             if retain_workspace or failed_uploads > 0:
                 # Local-retention mode (explicit DOUYIN_RETAIN_LOCAL_DOWNLOADS,
                 # or R2 unconfigured) keeps the per-task workspace. Unresolved

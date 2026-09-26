@@ -82,7 +82,7 @@ def test_livestream_download_response_fields() -> None:
         subject_id="room-1",
         status="completed",
         message="done",
-        download_path="/p",
+        download_path="p",
         created_at="2026-04-17T00:00:00+00:00",
         updated_at="2026-04-17T00:00:01+00:00",
     )

@@ -142,12 +142,12 @@ async def discover(
         (candidate.round, candidate.sec_user_id, candidate.nickname, candidate.chat_id)
     ):
         return "discovery_identity_conflict", {}
-    assert candidate.chat_id and candidate.sec_user_id and candidate.nickname
+    chat_id = candidate.chat_id
     sec = candidate.sec_user_id
     try:
-        chat = await reader.get_chat(candidate.chat_id)
+        chat = await reader.get_chat(chat_id)
         owner = _nonempty(chat.get("owner_id"))
-        if chat.get("chat_id") != candidate.chat_id:
+        if chat.get("chat_id") != chat_id:
             return "feishu_chat_identity_mismatch", {}
         if chat.get("chat_mode") not in (None, "group"):
             return "feishu_chat_is_not_group", {}
@@ -170,7 +170,7 @@ async def discover(
             if token in seen_tokens:
                 return "feishu_history_cursor_repeated", {}
             seen_tokens.add(token)
-            page = await reader.list_messages("chat", candidate.chat_id, token)
+            page = await reader.list_messages("chat", chat_id, token)
             items = page.get("items")
             if not isinstance(items, list) or not isinstance(
                 page.get("has_more"), bool
@@ -184,7 +184,7 @@ async def discover(
                     return "feishu_history_incomplete", {}
                 message_ids.add(message_id)
                 item_chat = _nonempty(item.get("chat_id"))
-                if item_chat and item_chat != candidate.chat_id:
+                if item_chat and item_chat != chat_id:
                     return "feishu_history_chat_mismatch", {}
                 digest.update(
                     json.dumps(item, ensure_ascii=False, sort_keys=True).encode()
@@ -213,7 +213,7 @@ async def discover(
                     proven = any(_profile_owner(link) == sec for link in root_links)
                 if (
                     root.get("message_id") != chosen
-                    or root.get("chat_id") != candidate.chat_id
+                    or root.get("chat_id") != chat_id
                     or not proven
                 ):
                     return "feishu_profile_post_changed", {}

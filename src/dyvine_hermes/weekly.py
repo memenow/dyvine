@@ -4,19 +4,29 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import fcntl
 import json
 import os
 import shutil
 import statistics
 import sys
 import time
+import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX platforms
+    msvcrt = None  # type: ignore[assignment]
 
 from dyvine.core.exceptions import DeliveryError
 from dyvine.db.protocols import QUEUE_ACTIVE_STATUSES
@@ -89,7 +99,14 @@ def _blocks_automatic_round(
 
 @contextmanager
 def single_runner_lock() -> Iterator[bool]:
-    """Keep overlapping cron invocations on one host from racing to send."""
+    """Keep overlapping cron invocations on one host from racing to send.
+
+    Best-effort single-host mutual exclusion: POSIX uses ``flock``,
+    Windows uses a non-blocking ``msvcrt`` byte lock, and platforms with
+    neither proceed unlocked (the DB ``claim_next`` atomicity remains the
+    real backstop). A contender that finds the lock held gets ``False``
+    and must skip the run.
+    """
     lock_path = Path.home() / ".hermes" / "dyvine-weekly.lock"
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_RDWR
@@ -97,11 +114,34 @@ def single_runner_lock() -> Iterator[bool]:
         flags |= os.O_NOFOLLOW
     fd = os.open(lock_path, flags, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
+        if fcntl is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
             return
+        if msvcrt is not None:
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            return
+        print(
+            "dyvine weekly: no file-lock primitive; running without host lock",
+            file=sys.stderr,
+        )
         yield True
     finally:
         os.close(fd)
@@ -110,10 +150,23 @@ def single_runner_lock() -> Iterator[bool]:
 async def _current_pair_keys(engine: Any, round_name: str) -> set[str]:
     """Restrict claims to the first unfinished pair in stable seed order.
 
-    A pair whose only unfinished rows are parked is passed over; parked rows
-    still hold back automatic rounds until an operator resolves them.
+    Pages the round listing in bounded chunks (no ``limit=-1`` sentinel);
+    the resulting keys only ever scope ``claim_next``, which re-checks
+    claimability atomically, so a concurrent runner moving rows mid-scan
+    degrades to ``blocked_pair``, never to a double-claim. A pair whose
+    only unfinished rows are parked is passed over; parked rows still
+    hold back automatic rounds until an operator resolves them.
     """
-    rows = await engine.queue.list_entries(round=round_name, limit=-1)
+    rows: list[Any] = []
+    cursor = 0
+    while True:
+        page = await engine.queue.list_entries(
+            round=round_name, limit=500, offset=cursor
+        )
+        if not page:
+            break
+        rows.extend(page)
+        cursor += len(page)
     rows.sort(key=lambda row: (row.created_at, row.key))
     settled = _DONE_STATUSES | _PARKED_STATUSES
     for offset in range(0, len(rows), 2):
@@ -217,6 +270,12 @@ async def _advance_claimed(
             attempts=next_attempt,
             op_message=f"Weekly step stopped: {type(error).__name__}",
         )
+        if status == "pending":
+            # Back off before the run loop re-claims this row: without
+            # the pause a rate-limited Feishu API (or any flapping
+            # transient) would be hammered back-to-back until the
+            # attempt budget burns out.
+            await asyncio.sleep(min(30.0, 5.0 * next_attempt))
         return WeeklyOutcome(status, entry.round, entry.key)
     except Exception:
         await patch_queue(
@@ -225,6 +284,10 @@ async def _advance_claimed(
             status="needs_review",
             op_message="Unexpected weekly runner failure",
         )
+        # The re-raise below surfaces only the exception TYPE at the CLI
+        # boundary; dump the traceback here so the root cause is never
+        # lost to the operator reading the run log.
+        traceback.print_exc()
         raise
 
 
@@ -313,14 +376,20 @@ async def run_once(
             return WeeklyOutcome(
                 "blocked_by_prior_round", round_name, note=str(unresolved)
             )
-    assert round_name is not None
+    if round_name is None:  # pragma: no cover - provably unreachable narrowing
+        # Unreachable (the automatic branch always binds it), but ``assert``
+        # compiles out under ``python -O`` and mypy needs the narrowing.
+        raise ValueError("round_name is required")
     if dry_run:
         pending = await engine.queue.list_entries(
             round=round_name, status="pending", limit=1
         )
         return WeeklyOutcome("dry_run", round_name, pending[0].key if pending else None)
     if automatic:
-        assert window_start is not None
+        if window_start is None:  # pragma: no cover - provably unreachable narrowing
+            # Unreachable (the automatic branch always binds it), but
+            # ``assert`` compiles out under ``python -O``.
+            raise ValueError("automatic run requires a window start")
         excluded = await engine.delivery_ledger.list_excluded_nicknames()
         # Resume where the latest opened automatic window ended, so a week
         # held back by an unfinished round widens this window instead of
@@ -412,6 +481,13 @@ def run_cli(round_name: str | None, dry_run: bool) -> None:
     try:
         with single_runner_lock() as acquired:
             if not acquired:
+                # Skip quietly on stdout (exit 0: a skip is not a failure)
+                # but say so on stderr so "nothing happened" stays
+                # diagnosable instead of a silent no-op.
+                print(
+                    "dyvine weekly: skipped, another runner holds the lock",
+                    file=sys.stderr,
+                )
                 return
             outcome = asyncio.run(execute())
         if dry_run:

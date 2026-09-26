@@ -3,8 +3,9 @@
 When hermes installs this repository from a Git URL it loads the repo
 root as ``hermes_plugins.dyvine`` and calls :func:`register`. The
 engine lives under ``src/`` (pip layout), so this shim puts ``src/``
-on ``sys.path`` when the engine is not already importable (pip
-installs need no path surgery), then re-exports ``register``.
+on ``sys.path`` when the plugin package itself is not already
+importable (pip installs need no path surgery), then re-exports
+``register``.
 
 The ``__path__`` extension below serves local tooling: pytest
 imports the repo root as the top-level ``dyvine`` package during
@@ -40,7 +41,14 @@ if _PACKAGE_PATH is not None and _ENGINE not in _PACKAGE_PATH:
 
 try:
     import dyvine_hermes.plugin  # noqa: F401
-except ImportError:
+except ModuleNotFoundError as exc:
+    # Retry with ``src/`` on the path only when the plugin package
+    # itself is missing. Any other missing module (a third-party
+    # dependency of the plugin internals, a typo deeper inside)
+    # re-raises immediately: retrying would fail again with a
+    # misleading traceback while pointlessly polluting ``sys.path``.
+    if exc.name not in {"dyvine_hermes", "dyvine_hermes.plugin"}:
+        raise
     if str(_SRC) not in sys.path:
         sys.path.insert(0, str(_SRC))
     import dyvine_hermes.plugin  # noqa: F401

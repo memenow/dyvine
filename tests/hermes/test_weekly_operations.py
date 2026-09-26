@@ -172,6 +172,8 @@ async def test_attested_incremental_rechecks_nonempty_dir_without_old_anchor(
     )
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         return [historical] if kwargs.get("status") == "legacy_confirmed_sent" else []
 
     engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)
@@ -405,6 +407,8 @@ async def test_incremental_download_records_its_window_sample(
     ]
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         return delivered if kwargs.get("status") == "legacy_confirmed_sent" else []
 
     engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)

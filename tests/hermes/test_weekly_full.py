@@ -242,6 +242,8 @@ async def test_group_attested_release_rechecks_full_from_zero_once_and_skips_his
     )
 
     async def list_files(**kwargs: object) -> list[SimpleNamespace]:
+        if kwargs.get("offset"):
+            return []
         return [historical] if kwargs.get("status") == "legacy_confirmed_sent" else []
 
     engine.delivery_ledger.list_files = AsyncMock(side_effect=list_files)

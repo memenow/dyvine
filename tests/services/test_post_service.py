@@ -814,9 +814,7 @@ async def test_run_bulk_download_breaks_on_empty_aweme_list(tmp_path) -> None:
         # the loop exits instead of spinning.
         call_count = 0
 
-        async def fake_fetch(
-            sec_user_id: str, cursor: int, mode: str = "post"
-        ) -> dict:  # type: ignore[override]
+        async def fake_fetch(sec_user_id: str, cursor: int, mode: str = "post") -> dict:  # type: ignore[override]
             """Test helper for test_run_bulk_download_breaks_on_empty_aweme_list."""
             nonlocal call_count
             call_count += 1
@@ -1712,3 +1710,164 @@ async def test_get_post_comments_returns_top_level() -> None:
         result = await svc.get_post_comments("p1", count=2)
     assert result == [{"cid": "c1"}, {"cid": "c2"}]
     mock_model.assert_called_once_with(aweme_id="p1")
+
+
+# ── cancellation terminal states (P4-20/21) ──────────────────────────────
+
+
+async def test_bulk_download_cancellation_persists_terminal_state(
+    tmp_path: Any,
+) -> None:
+    """A drained bulk loop leaves failed/cancelled, never running."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    handler.kwargs = {}
+    handler.get_or_add_user_data = AsyncMock(return_value=tmp_path)
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    operation = await store.create_operation(
+        operation_type="user_posts_bulk_download",
+        subject_id="u1",
+        status="pending",
+        message="scheduled",
+    )
+    svc._fetch_posts_batch = AsyncMock(side_effect=asyncio.CancelledError())  # type: ignore[method-assign]
+    profile = SimpleNamespace(nickname="nick", aweme_count=10)
+    with patch("dyvine.services.posts.AsyncUserDB") as mock_db:
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+        with pytest.raises(asyncio.CancelledError):
+            await svc._run_bulk_download(
+                operation.operation_id, "u1", 0, mode="post", profile=profile
+            )
+    persisted = await store.get_operation(operation.operation_id)
+    assert persisted.status == "failed"
+    assert persisted.error == "cancelled"
+
+
+async def test_container_download_cancellation_persists_terminal_state() -> None:
+    """A drained container loop leaves failed/cancelled, never running."""
+
+    class _It:
+        async def __anext__(self) -> Any:
+            raise asyncio.CancelledError
+
+        async def aclose(self) -> None:
+            return None
+
+    handler = MagicMock()
+    handler.fetch_mix_videos = MagicMock(return_value=_It())
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    operation = await store.create_operation(
+        operation_type="user_mix_bulk_download",
+        subject_id="c1",
+        status="pending",
+        message="scheduled",
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await svc._run_container_download(
+            operation.operation_id, "c1", "fetch_mix_videos"
+        )
+    persisted = await store.get_operation(operation.operation_id)
+    assert persisted.status == "failed"
+    assert persisted.error == "cancelled"
+
+
+# ── single-post file detection (P4-23) ───────────────────────────────────
+
+
+def test_snapshot_detects_subdir_and_overwrite(tmp_path: Any) -> None:
+    """Recursive snapshots see subdir output and same-name overwrites."""
+    from dyvine.services.posts import _new_or_changed_files, _snapshot_files
+
+    before_file = tmp_path / "old.mp4"
+    before_file.write_text("old")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "old_sub.mp4").write_text("old")
+    same = tmp_path / "same.mp4"
+    same.write_text("v1")
+    before = _snapshot_files(tmp_path)
+    (sub / "new.mp4").write_text("new")
+    same.write_text("v1-longer")
+    found = _new_or_changed_files(tmp_path, before)
+    assert sorted(p.name for p in found) == ["new.mp4", "same.mp4"]
+
+
+def test_snapshot_skips_files_whose_stat_races(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file vanishing between rglob and stat is skipped, not fatal."""
+    from pathlib import Path
+
+    from dyvine.services.posts import _new_or_changed_files, _snapshot_files
+
+    gone = tmp_path / "gone.mp4"
+    gone.write_text("x")
+    kept = tmp_path / "kept.mp4"
+    kept.write_text("y")
+    real_stat = Path.stat
+    real_is_file = Path.is_file
+
+    def _flaky_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name == "gone.mp4":
+            raise OSError("vanished mid-scan")
+        return real_stat(self, *args, **kwargs)
+
+    def _flaky_is_file(self: Path) -> bool:
+        if self.name == "gone.mp4":
+            return True
+        return real_is_file(self)
+
+    monkeypatch.setattr(Path, "stat", _flaky_stat)
+    monkeypatch.setattr(Path, "is_file", _flaky_is_file)
+    before = _snapshot_files(tmp_path)
+    assert all(path.name != "gone.mp4" for path in before)
+    assert any(path.name == "kept.mp4" for path in before)
+    found = _new_or_changed_files(tmp_path, {})
+    assert [path.name for path in found] == ["kept.mp4"]
+
+
+async def test_download_single_post_reports_nested_files(tmp_path: Any) -> None:
+    """Single-post files include downloader output written to subdirs."""
+    from unittest.mock import patch
+
+    handler = MagicMock()
+    fetched = MagicMock()
+    fetched._to_dict.return_value = {
+        "aweme_id": "p1",
+        "aweme_type": 0,
+        "video": {"play_addr": {"url_list": ["http://v"]}},
+        "author": {"sec_uid": "sec-1"},
+    }
+    handler.fetch_one_video = AsyncMock(return_value=fetched)
+    store = FakeOperationRepository(owner_id="o1")
+    svc = _build_service(handler, operation_store=store)
+    user_dir = tmp_path / "sec-1"
+    (user_dir / "sub").mkdir(parents=True)
+    (user_dir / "preexisting.mp4").write_text("old")
+
+    async def _fake_download(post: dict, post_type: Any, path: Any) -> None:
+        (path / "sub" / "p1_video.mp4").write_text("x")
+
+    with (
+        patch("dyvine.services.posts.AsyncUserDB") as mock_db,
+        patch.object(
+            posts_mod.PostService,
+            "_download_post_content",
+            new=AsyncMock(side_effect=_fake_download),
+        ),
+    ):
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_db.return_value = mock_ctx
+        handler.get_or_add_user_data = AsyncMock(return_value=user_dir)
+        handler.kwargs = {}
+        result = await svc.download_single_post("p1")
+    assert result.files == [str(user_dir / "sub" / "p1_video.mp4")]

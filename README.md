@@ -1,8 +1,8 @@
 # Dyvine
 
-Dyvine is a hermes-native plugin for Douyin download automation: 35
+Dyvine is a hermes-native plugin for Douyin download automation, with
 tools covering users, posts, livestreams, download queues, Feishu group
-delivery, and profile snapshots, with persistent operation tracking in
+delivery, and profile snapshots, plus persistent operation tracking in
 Postgres and optional Cloudflare R2 archival. It wraps the third-party
 `f2` Douyin SDK. There is no HTTP surface.
 
@@ -12,7 +12,7 @@ Architecture diagrams are available in
 
 ## Features
 
-- 35 idempotent, single-shot tools: share-link resolution, profiles,
+- Idempotent, single-shot tools: share-link resolution, profiles,
   social graph, post listing and bulk download (post/like/collection/
   music/mix/collects), comments, stats, feeds, livestream download at
   the highest available quality, live IM, queue and round management,
@@ -105,6 +105,7 @@ The webSign signer needs the Chromium build matching `playwright==1.62.0`
 (revision 1234). Where the default Playwright CDN is slow, install it
 from a mirror by setting `PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST`, for example
 to `https://cdn.npmmirror.com/binaries/playwright`.
+
 
 ## Quick Start (development)
 
@@ -247,9 +248,9 @@ Set `DYVINE_WEEKLY_TIMEZONE=Asia/Shanghai`,
 `DYVINE_WEEKLY_FIRST_AUTO_DATE` to the first intended automatic Sunday
 (`YYYY-MM-DD`), `DYVINE_WEEKLY_CUTOVER_ROUND` to the active legacy round,
 and `DYVINE_WEEKLY_OWNER_OPEN_ID=ou_...` in the Hermes runtime
-environment. For this cutover, the first automatic date is `2026-09-27`
-and the active legacy round is supplied privately; these are deployment
-values, not project defaults. The owner ID must be a Feishu `open_id`. The runner
+environment. Set the first automatic date to the cutover Sunday and
+supply the active legacy round privately; these are deployment values,
+not project defaults. The owner ID must be a Feishu `open_id`. The runner
 also uses the existing
 `DATABASE_URL`, `DOUYIN_COOKIE`, `FEISHU_APP_ID`,
 `FEISHU_APP_SECRET`, and `DOUYIN_DOWNLOAD_ROOT` settings. Keep the old

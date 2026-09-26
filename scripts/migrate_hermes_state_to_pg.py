@@ -377,10 +377,10 @@ def _operation_payload(row: dict[str, Any]) -> dict[str, Any] | str:
             if isinstance(raw_metadata, str)
             else dict(raw_metadata)
         )
-    except (json.JSONDecodeError, TypeError, ValueError):
-        metadata = {}
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        return f"metadata is not valid JSON: {exc}"
     if not isinstance(metadata, dict):
-        metadata = {}
+        return f"metadata JSON must decode to an object, got {metadata!r}"
     return {
         "operation_id": operation_id,
         "operation_type": row.get("operation_type"),
@@ -403,7 +403,11 @@ def _operation_payload(row: dict[str, Any]) -> dict[str, Any] | str:
 
 def _sqlite_rows(path: Path, table: str) -> list[dict[str, Any]]:
     """Read a whole SQLite table into dicts (read-only URI)."""
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # Table names are call-site literals, not user input. The path is
+    # operator input, so it travels as a quoted URI: a raw ``?`` or ``#``
+    # would otherwise corrupt the query string and defeat ``mode=ro``.
+    uri = f"{path.resolve(strict=True).as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     try:
         return [dict(row) for row in connection.execute(f"SELECT * FROM [{table}]")]
@@ -658,7 +662,7 @@ async def _run(args: argparse.Namespace, report: MigrationReport) -> None:
     ]
     factory: DatabaseSessionFactory | None = None
     try:
-        factory = DatabaseSessionFactory(args.database_url, pool_size=2)
+        factory = DatabaseSessionFactory(args.database_url)
         async with factory.session() as session:
             await session.execute(text("SELECT 1"))
             if rekeyed_targets:
@@ -688,6 +692,18 @@ async def _run(args: argparse.Namespace, report: MigrationReport) -> None:
                     )
                 if report.invalid:
                     return
+        # Round headers first: queue rows reference them via foreign
+        # key, so parents must land before children.
+        if round_payloads:
+            imported, skipped = await _insert_batches(
+                factory,
+                DeliveryRoundRow,
+                round_payloads,
+                batch_size=args.batch_size,
+                conflict_column="round",
+            )
+            round_report.imported = imported
+            round_report.skipped_existing = skipped
         for model, payloads, conflict, source_report in batches:
             if not payloads:
                 continue
@@ -700,19 +716,10 @@ async def _run(args: argparse.Namespace, report: MigrationReport) -> None:
             )
             source_report.imported = imported
             source_report.skipped_existing = skipped
-        if round_payloads:
-            imported, skipped = await _insert_batches(
-                factory,
-                DeliveryRoundRow,
-                round_payloads,
-                batch_size=args.batch_size,
-                conflict_column="round",
-            )
-            round_report.imported = imported
-            round_report.skipped_existing = skipped
     except Exception as exc:
         print(
-            "error: Postgres migration failed; inspect the target before retrying",
+            "error: Postgres migration failed: "
+            f"{exc}; inspect the target before retrying",
             file=sys.stderr,
         )
         raise SystemExit(2) from exc

@@ -188,6 +188,40 @@ def test_missing_frozen_adoption_holds_unready_or_wrong_account_group(
     assert "resolution" not in rows[0]
 
 
+def test_main_reports_database_failure_cause_and_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Database failures name their cause instead of only the type. (P6-A)"""
+    source = tmp_path / "frozen.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "reviewed.jsonl"
+
+    async def _boom(_args: argparse.Namespace) -> dict[str, Any]:
+        raise RuntimeError("connection reset by peer")
+
+    monkeypatch.setattr(proposer, "propose", _boom)
+    code = proposer.main(
+        [
+            "--source-report",
+            str(source),
+            "--feishu-audit",
+            str(tmp_path / "main.jsonl"),
+            "--legacy-work-db",
+            str(tmp_path / "work.sqlite3"),
+            "--active-round",
+            "weekly0913",
+            "--output",
+            str(output),
+        ]
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    assert "connection reset by peer" in captured.err
+    assert "Traceback" in captured.err
+
+
 def test_feishu_adoption_proposal_carries_the_recomputed_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

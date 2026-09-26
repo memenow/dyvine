@@ -186,7 +186,7 @@ class _FakeProcess:
     """Minimal ``asyncio`` subprocess double."""
 
     def __init__(
-        self, returncode: int, stdout: bytes = b"", stderr: bytes = b""
+        self, returncode: int | None, stdout: bytes = b"", stderr: bytes = b""
     ) -> None:
         """Preset the exit code and pipes."""
         self.returncode: int | None = returncode
@@ -202,6 +202,11 @@ class _FakeProcess:
         """Record the kill (timeout path)."""
         self.killed = True
 
+    async def wait(self) -> int | None:
+        """Reap the process (timeout path must not leave zombies)."""
+        self.returncode = -9
+        return self.returncode
+
 
 async def test_send_via_hermes_success(
     monkeypatch: pytest.MonkeyPatch,
@@ -209,13 +214,75 @@ async def test_send_via_hermes_success(
     """Exit 0 returns the target plus raw output."""
 
     async def _spawn(*args: Any, **kwargs: Any) -> _FakeProcess:
-        assert args[:4] == ("hermes", "send", "--to", "telegram")
+        assert args[:3] == ("hermes", "send", "--to=telegram")
         assert "--json" in args
+        assert args[-2:] == ("--", "hi")
         return _FakeProcess(0, stdout=b'{"ok":true}')
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
     result = await send_via_hermes(target="telegram", message="hi")
     assert result.ok is True and result.exit_code == 0
+
+
+async def test_send_via_hermes_dash_values_not_parsed_as_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Leading-dash values can never be mistaken for hermes options."""
+
+    async def _spawn(*args: Any, **kwargs: Any) -> _FakeProcess:
+        assert args == (
+            "hermes",
+            "send",
+            "--to=-100123",
+            "--json",
+            "--subject=--help",
+            "--",
+            "--danger",
+        )
+        return _FakeProcess(0, stdout=b"{}")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    result = await send_via_hermes(
+        target="-100123", message="--danger", subject="--help"
+    )
+    assert result.ok is True
+
+
+async def test_send_via_hermes_timeout_reaps_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout kills AND waits: no zombie, no leaked pipes."""
+
+    class _Hanging(_FakeProcess):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            await asyncio.sleep(60)
+            raise AssertionError("unreachable")
+
+    spawned: list[_Hanging] = []
+
+    async def _spawn(*args: Any, **kwargs: Any) -> _Hanging:
+        proc = _Hanging(None)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    with pytest.raises(DeliveryError, match="timed out"):
+        await send_via_hermes(target="telegram", message="hi", timeout_seconds=0.01)
+    assert spawned[0].killed is True
+    assert spawned[0].returncode == -9  # wait() ran
+
+
+async def test_send_via_hermes_unknown_returncode_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing returncode raises explicitly (never bare assert)."""
+
+    async def _spawn(*args: Any, **kwargs: Any) -> _FakeProcess:
+        return _FakeProcess(None)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    with pytest.raises(DeliveryError, match="returncode unknown"):
+        await send_via_hermes(target="telegram", message="hi")
 
 
 async def test_send_via_hermes_delivery_error(
@@ -244,3 +311,122 @@ async def test_send_via_hermes_validates_target() -> None:
     """Blank targets fail before spawning anything."""
     with pytest.raises(DeliveryError, match="target is required"):
         await send_via_hermes(target="  ", message="hi")
+
+
+# ── HttpxFeishuTransport error mapping ───────────────────────────────────
+
+
+class _StubClient:
+    """Minimal async httpx client stub with a scripted outcome."""
+
+    def __init__(self, outcome: Any) -> None:
+        self.outcome = outcome
+        self.seen: dict[str, Any] = {}
+
+    async def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        self.seen = {"method": method, "url": url, **kwargs}
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class _StubResponse:
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
+
+    def json(self) -> Any:
+        if isinstance(self._payload, BaseException):
+            raise self._payload
+        return self._payload
+
+
+async def test_transport_maps_network_errors_to_retryable() -> None:
+    """Timeouts and connect failures are worth another attempt."""
+    import httpx
+
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    transport = HttpxFeishuTransport(
+        _StubClient(httpx.TimeoutException("slow"))  # type: ignore[arg-type]
+    )
+    with pytest.raises(DeliveryError) as exc_info:
+        await transport.post_json("https://x", payload={})
+    assert exc_info.value.reason == "retryable"
+
+
+async def test_transport_maps_closed_client_to_failed() -> None:
+    """Client misuse is deterministic: fail, don't burn retries."""
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    transport = HttpxFeishuTransport(
+        _StubClient(RuntimeError("Cannot open a client instance"))  # type: ignore[arg-type]
+    )
+    with pytest.raises(DeliveryError) as exc_info:
+        await transport.post_json("https://x", payload={})
+    assert exc_info.value.reason == "failed"
+
+
+async def test_transport_maps_unexpected_bugs_to_failed() -> None:
+    """Non-transport exceptions chain terminally instead of retrying."""
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    bug = TypeError("not iterable")
+    transport = HttpxFeishuTransport(_StubClient(bug))  # type: ignore[arg-type]
+    with pytest.raises(DeliveryError) as exc_info:
+        await transport.post_json("https://x", payload={})
+    assert exc_info.value.reason == "failed"
+    assert exc_info.value.__cause__ is bug
+
+
+async def test_transport_lets_cancellation_through() -> None:
+    """Cancelled sends abort instead of converting into retryable work."""
+    import asyncio
+
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    transport = HttpxFeishuTransport(
+        _StubClient(asyncio.CancelledError())  # type: ignore[arg-type]
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await transport.post_json("https://x", payload={})
+
+
+async def test_transport_treats_non_dict_json_as_empty() -> None:
+    """Non-object bodies degrade to {} so code checks fail terminally."""
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    transport = HttpxFeishuTransport(_StubClient(_StubResponse([1, 2])))  # type: ignore[arg-type]
+    assert await transport.post_json("https://x", payload={}) == {}
+
+
+async def test_post_file_streams_handle_instead_of_reading_all(
+    tmp_path: Path,
+) -> None:
+    """Uploads pass the open handle so memory stays constant."""
+    from dyvine.services.delivery import HttpxFeishuTransport
+
+    blob = tmp_path / "clip.mp4"
+    blob.write_bytes(b"0123456789")
+    seen: dict[str, Any] = {}
+
+    class _CapturingClient(_StubClient):
+        async def request(self, method: str, url: str, **kwargs: Any) -> Any:
+            # Read inside the call: the transport closes the handle
+            # once the send completes.
+            name, payload, mime = kwargs["files"]["file"]
+            seen["name"] = name
+            seen["is_stream"] = not isinstance(payload, (bytes, bytearray))
+            seen["content"] = payload.read()
+            seen["mime"] = mime
+            return self.outcome
+
+    transport = HttpxFeishuTransport(
+        _CapturingClient(_StubResponse({"code": 0}))  # type: ignore[arg-type]
+    )
+    await transport.post_file("https://x", file_name="clip.mp4", file_path=blob)
+    assert seen == {
+        "name": "clip.mp4",
+        "is_stream": True,
+        "content": b"0123456789",
+        "mime": "application/octet-stream",
+    }

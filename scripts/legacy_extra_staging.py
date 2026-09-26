@@ -130,8 +130,10 @@ def stage_extras(
                         (str(source), value, index)
                         for value, index in array_values(parser)
                     )
-                else:
+                elif kind == "sent_index":
                     items = index_paths(parser)
+                else:
+                    raise ValueError(f"unknown extra source kind: {kind}")
                 for source_path, value, index in items:
                     entries += 1
                     legacy_path = (

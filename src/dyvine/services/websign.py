@@ -38,6 +38,7 @@ new errors.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import queue
@@ -46,7 +47,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
-from typing import TYPE_CHECKING, Any
+from types import MethodType
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..core.logging import ContextLogger
@@ -126,10 +128,29 @@ class _SignOp:
 _STOP = object()
 _REINIT = object()
 
-# (owner, attribute, original) for every installed wrapper so tests
-# and shutdown can restore f2 untouched. Install order is endpoints
-# first, fetch helpers second; uninstall runs reversed.
-_PATCHED: list[tuple[Any, str, Any]] = []
+
+def _check_op(item: Any) -> _SignOp:
+    """Narrow a dequeued worker item to a sign request, failing loudly.
+
+    Producers only ever enqueue ``_SignOp``/``_STOP``/``_REINIT``; anything
+    else is a queue-protocol violation that must surface as an explicit
+    ``TypeError`` (audible under ``python -O`` too) instead of an
+    ``AssertionError`` or a late ``AttributeError``.
+    """
+    if not isinstance(item, _SignOp):
+        raise TypeError(f"unexpected websign queue item: {item!r}")
+    return item
+
+
+# (owner, attribute, pristine original, installed wrapper) for every
+# installed wrapper so tests and shutdown can restore f2 untouched.
+# The wrapper half of each entry records *ownership*: a reinstall
+# rebinds live wrappers to the new provider instead of stacking, and
+# uninstall restores only entries it still owns, so an engine that is
+# replaced while shutting down can never silently unpatch its
+# successor. Install order is endpoints first, fetch helpers second;
+# uninstall runs reversed.
+_PATCHED: list[tuple[Any, str, Any, Any]] = []
 
 
 def strip_websign_params(url: str) -> str:
@@ -240,17 +261,28 @@ def _open_signing_page(
             "{get:function(){return undefined;}});"
         )
         page = context.new_page()
-        budget_ms = int(init_timeout_seconds * 1000)
-        page.goto(page_url, wait_until="domcontentloaded", timeout=budget_ms)
+        # The whole open must fit inside the caller's init budget: the
+        # signer waits ``init_timeout`` for its reply, so a worst case of
+        # 2x budget + 33s would abandon the caller while init still runs.
+        # Shares: navigation 35%, best-effort idle 10% (capped), SPA settle
+        # 10% (capped), readiness predicate the remainder. Floors keep
+        # Playwright usable on tiny budgets (whose absolute overrun is
+        # milliseconds); production budgets are tens of seconds.
+        total_ms = int(init_timeout_seconds * 1000)
+        goto_ms = max(1_000, int(total_ms * 0.35))
+        idle_ms = max(1_000, min(15_000, int(total_ms * 0.10)))
+        settle_ms = max(1_000, min(8_000, int(total_ms * 0.10)))
+        predicate_ms = max(1_000, total_ms - goto_ms - idle_ms - settle_ms)
+        page.goto(page_url, wait_until="domcontentloaded", timeout=goto_ms)
         try:
-            page.wait_for_load_state("networkidle", timeout=25000)
+            page.wait_for_load_state("networkidle", timeout=idle_ms)
         except Exception:
             pass
         # Let the SPA settle past its client-side redirect before the
         # predicate starts polling; polling across a navigation can
         # otherwise observe a torn-down execution context.
-        page.wait_for_timeout(8000)
-        page.wait_for_function(READY_SNIPPET, timeout=budget_ms)
+        page.wait_for_timeout(settle_ms)
+        page.wait_for_function(READY_SNIPPET, timeout=predicate_ms)
     except Exception as exc:
         try:
             playwright.stop()
@@ -320,21 +352,39 @@ class WebSignProvider:
                 and time.monotonic() - self._last_failure_ts < _FAILURE_COOLDOWN_SECONDS
             ):
                 raise WebSignError("websign backing off after repeated failures")
+            stale: threading.Thread | None = None
             if self._thread is None or not self._thread.is_alive():
-                if self._thread is not None:
-                    self._thread.join(timeout=5)
+                # Reaped outside the lock below: joining under the
+                # lock would serialize close() behind us for no reason
+                # (and any blocking join under a state lock is a
+                # deadlock pattern waiting for a victim).
+                stale = self._thread
                 self._ready.clear()
                 self._thread = threading.Thread(
                     target=self._run, name="dyvine-websign", daemon=True
                 )
                 self._thread.start()
-        reply: queue.Queue[Any] = queue.Queue(maxsize=1)
-        self._ops.put(_SignOp(url=url, reply=reply))
-        timeout = self._init_timeout if not self._ready.is_set() else self._sign_timeout
+            reply: queue.Queue[Any] = queue.Queue(maxsize=1)
+            # Enqueued under the lock, matching close(): the unbounded
+            # put never blocks, and sharing the critical section with
+            # the closed-check plus the _STOP enqueue means a racing
+            # close either lands ahead (we see _closed and raise) or
+            # behind (our op is processed first) -- never silently
+            # dropped after the worker exits.
+            self._ops.put(_SignOp(url=url, reply=reply))
+        if stale is not None:
+            stale.join(timeout=5)
+        # Always wait the init budget: ``_ready`` is sampled without the
+        # worker lock, so a set flag may already be stale (the worker could
+        # be tearing the session down for the op ahead of us, in which case
+        # OUR op pays the full re-init). The timeout is a cap, not a
+        # duration -- healthy signs reply in milliseconds either way.
         try:
-            result = reply.get(timeout=timeout)
+            result = reply.get(timeout=self._init_timeout)
         except queue.Empty:
-            raise WebSignError(f"websign sign timed out after {timeout:.0f}s") from None
+            raise WebSignError(
+                f"websign sign timed out after {self._init_timeout:.0f}s"
+            ) from None
         if isinstance(result, SignedResult):
             return result
         if isinstance(result, Exception):
@@ -361,10 +411,17 @@ class WebSignProvider:
             self._closed = True
             thread = self._thread
             self._thread = None
-        if thread is not None and thread.is_alive():
-            if threading.get_ident() == thread.ident:
-                return
-            self._ops.put(_STOP)
+            stop_queued = False
+            if thread is not None and thread.is_alive():
+                if threading.get_ident() != thread.ident:
+                    # Under the lock, matching sign(): a racing sign
+                    # either enqueued ahead (processed before the stop)
+                    # or sees _closed and fails fast.
+                    self._ops.put(_STOP)
+                    stop_queued = True
+        # The blocking join stays outside the lock so a concurrent
+        # sign/close never wedges behind the worker's shutdown.
+        if stop_queued and thread is not None:
             thread.join(timeout=30)
 
     def __enter__(self) -> WebSignProvider:
@@ -390,7 +447,7 @@ class WebSignProvider:
                     closer = self._close_page(page, closer)
                     page = None
                     continue
-                assert isinstance(op, _SignOp)
+                op = _check_op(op)
                 try:
                     if page is None:
                         page, closer = self._browser_factory(
@@ -432,22 +489,12 @@ class WebSignProvider:
         return None
 
 
-def _wrap_endpoint_method(provider: WebSignProvider, manager: type, name: str) -> None:
-    """Wrap one bogus URL builder so its output carries webSign triple."""
-    raw = manager.__dict__.get(name)
-    if raw is None:
-        return
-    if not isinstance(raw, classmethod):
-        logger.warning(
-            "websign patch skipped unexpected builder shape",
-            extra={"manager": manager.__name__, "method": name},
-        )
-        return
-    if getattr(raw.__func__, "__dyvine_websign_wrapped__", False):
-        return
-    bound_original = getattr(manager, name)
+def _make_endpoint_wrapper(
+    provider: WebSignProvider, original_func: Any, bound_original: Any
+) -> Any:
+    """Build a webSign wrapper around one pristine builder function."""
 
-    @functools.wraps(raw.__func__)
+    @functools.wraps(original_func)
     def wrapper(cls: type, *args: Any, **kwargs: Any) -> Any:
         del cls  # Bound through the captured original instead.
         endpoint = bound_original(*args, **kwargs)
@@ -463,8 +510,49 @@ def _wrap_endpoint_method(provider: WebSignProvider, manager: type, name: str) -
             return endpoint
 
     wrapper.__dyvine_websign_wrapped__ = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _record_patch(owner: Any, name: str, raw: Any, wrapper: Any) -> None:
+    """Record (or rebind) one installed wrapper, original kept once."""
+    for index, (entry_owner, entry_name, entry_raw, _) in enumerate(_PATCHED):
+        if entry_owner is owner and entry_name == name:
+            _PATCHED[index] = (entry_owner, entry_name, entry_raw, wrapper)
+            return
+    _PATCHED.append((owner, name, raw, wrapper))
+
+
+def _wrap_endpoint_method(provider: WebSignProvider, manager: type, name: str) -> None:
+    """Wrap one bogus URL builder so its output carries webSign triple.
+
+    Re-installing over a live wrapper rebinds it to the new provider
+    instead of stacking a second layer: the pristine original stays
+    recorded exactly once.
+    """
+    raw = manager.__dict__.get(name)
+    if raw is None:
+        return
+    if isinstance(raw, classmethod) and getattr(
+        raw.__func__, "__dyvine_websign_wrapped__", False
+    ):
+        # Guarded above by __dyvine_websign_wrapped__: this is our own
+        # functools.wraps wrapper, so __wrapped__ is always present.
+        original_func = cast(Any, raw.__func__).__wrapped__
+        wrapper = _make_endpoint_wrapper(
+            provider, original_func, MethodType(original_func, manager)
+        )
+        setattr(manager, name, classmethod(wrapper))
+        _record_patch(manager, name, classmethod(original_func), wrapper)
+        return
+    if not isinstance(raw, classmethod):
+        logger.warning(
+            "websign patch skipped unexpected builder shape",
+            extra={"manager": manager.__name__, "method": name},
+        )
+        return
+    wrapper = _make_endpoint_wrapper(provider, raw.__func__, getattr(manager, name))
     setattr(manager, name, classmethod(wrapper))
-    _PATCHED.append((manager, name, raw))
+    _record_patch(manager, name, raw, wrapper)
 
 
 def _exception_status(exc: BaseException) -> int | None:
@@ -487,25 +575,17 @@ def _fresh_signed_url(provider: WebSignProvider, url: str) -> str | None:
         return None
 
 
-def _wrap_fetch_method(provider: WebSignProvider, crawler_cls: type, name: str) -> None:
-    """Wrap one raw fetch helper with re-sign-and-retry on Argus block."""
-    raw = crawler_cls.__dict__.get(name)
-    if raw is None:
-        return
-    if getattr(raw, "__dyvine_websign_wrapped__", False):
-        return
-    if not inspect.iscoroutinefunction(raw):
-        logger.warning(
-            "websign patch skipped unexpected fetch shape",
-            extra={"method": name},
-        )
-        return
+def _make_fetch_wrapper(provider: WebSignProvider, raw: Any) -> Any:
+    """Build a re-sign-and-retry wrapper around one pristine fetcher."""
 
     @functools.wraps(raw)
     async def wrapper(self: Any, url: str, *args: Any, **kwargs: Any) -> Any:
         # f2 raises (APIError with .status_code) on HTTP errors instead
         # of returning the response, so both the exception and the
-        # response path need the Argus-block check.
+        # response path need the Argus-block check. Re-signing runs in
+        # a worker thread: provider.sign blocks on the signer queue
+        # (up to the init timeout on a cold session) and must never
+        # pin the event loop.
         try:
             response = await raw(self, url, *args, **kwargs)
         except Exception as exc:
@@ -515,7 +595,7 @@ def _wrap_fetch_method(provider: WebSignProvider, crawler_cls: type, name: str) 
                 "argus block (exception path); re-signing and retrying once",
                 extra={"url": _redact_url(url)},
             )
-            resigned = _fresh_signed_url(provider, url)
+            resigned = await asyncio.to_thread(_fresh_signed_url, provider, url)
             if resigned is None:
                 raise
             return await raw(self, resigned, *args, **kwargs)
@@ -525,14 +605,40 @@ def _wrap_fetch_method(provider: WebSignProvider, crawler_cls: type, name: str) 
             "argus block; invalidating websign session and retrying once",
             extra={"url": _redact_url(url)},
         )
-        resigned = _fresh_signed_url(provider, url)
+        resigned = await asyncio.to_thread(_fresh_signed_url, provider, url)
         if resigned is None:
             return response
         return await raw(self, resigned, *args, **kwargs)
 
     wrapper.__dyvine_websign_wrapped__ = True  # type: ignore[attr-defined]
+    return wrapper
+
+
+def _wrap_fetch_method(provider: WebSignProvider, crawler_cls: type, name: str) -> None:
+    """Wrap one raw fetch helper with re-sign-and-retry on Argus block.
+
+    Re-installing over a live wrapper rebinds it to the new provider
+    instead of stacking a second layer: the pristine original stays
+    recorded exactly once.
+    """
+    raw = crawler_cls.__dict__.get(name)
+    if raw is None:
+        return
+    if getattr(raw, "__dyvine_websign_wrapped__", False):
+        original = raw.__wrapped__
+        wrapper = _make_fetch_wrapper(provider, original)
+        setattr(crawler_cls, name, wrapper)
+        _record_patch(crawler_cls, name, original, wrapper)
+        return
+    if not inspect.iscoroutinefunction(raw):
+        logger.warning(
+            "websign patch skipped unexpected fetch shape",
+            extra={"method": name},
+        )
+        return
+    wrapper = _make_fetch_wrapper(provider, raw)
     setattr(crawler_cls, name, wrapper)
-    _PATCHED.append((crawler_cls, name, raw))
+    _record_patch(crawler_cls, name, raw, wrapper)
 
 
 def install_websign_patch(provider: WebSignProvider, managers: Any = None) -> None:
@@ -553,7 +659,7 @@ def install_websign_patch(provider: WebSignProvider, managers: Any = None) -> No
         installed = None
     if installed != SUPPORTED_F2_VERSION:
         raise WebSignError(
-            f"websign patch requires f2=={SUPPORTED_F2_VERSION}, " f"found {installed}"
+            f"websign patch requires f2=={SUPPORTED_F2_VERSION}, found {installed}"
         )
     if managers is None:
         from f2.apps.douyin.utils import (  # type: ignore
@@ -585,13 +691,29 @@ def install_fetch_retry(provider: WebSignProvider, crawler_cls: Any = None) -> N
 
 
 def uninstall_websign_patch() -> None:
-    """Restore every wrapped f2 attribute. Idempotent."""
-    while _PATCHED:
-        owner, name, raw = _PATCHED.pop()
+    """Restore wrapped f2 attributes still owned by their installer.
+
+    Entries rebound by a newer install are left in place: restoring
+    another generation's originals would silently unpatch the live
+    engine. Idempotent.
+    """
+    remaining: list[tuple[Any, str, Any, Any]] = []
+    for owner, name, raw, wrapper in reversed(_PATCHED):
+        try:
+            current = owner.__dict__.get(name)
+        except Exception:
+            logger.debug("websign uninstall passed a dead owner")
+            continue
+        current_func = current.__func__ if isinstance(current, classmethod) else current
+        if current_func is not wrapper:
+            remaining.append((owner, name, raw, wrapper))
+            continue
         try:
             setattr(owner, name, raw)
         except Exception:
             logger.debug("websign uninstall passed a dead owner")
+    remaining.reverse()
+    _PATCHED[:] = remaining
 
 
 def is_websign_patched() -> bool:

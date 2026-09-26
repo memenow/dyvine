@@ -149,3 +149,95 @@ def test_bulk_download_response_defaults() -> None:
     assert resp.total_downloaded == 0
     assert all(v == 0 for v in resp.downloaded_count.values())
     assert set(resp.downloaded_count.keys()) == set(PostType)
+
+
+def _video_info() -> VideoInfo:
+    return VideoInfo(
+        play_addr="https://cdn.example/v.mp4",
+        duration=10,
+        ratio="9:16",
+        width=720,
+        height=1280,
+    )
+
+
+def _image_info() -> ImageInfo:
+    return ImageInfo(url="https://cdn.example/i.jpg", width=1080, height=720)
+
+
+def test_post_detail_rejects_video_without_payload() -> None:
+    """A VIDEO type without video_info is corrupt upstream data."""
+    with pytest.raises(ValidationError, match="video_info"):
+        PostDetail(
+            aweme_id="1",
+            create_time=0,
+            post_type=PostType.VIDEO,
+            video_info=None,
+        )
+    with pytest.raises(ValidationError, match="images"):
+        PostDetail(
+            aweme_id="1",
+            create_time=0,
+            post_type=PostType.IMAGES,
+            images=[],
+        )
+    ok = PostDetail(
+        aweme_id="1",
+        create_time=0,
+        post_type=PostType.MIXED,
+        video_info=_video_info(),
+        images=[_image_info()],
+    )
+    assert ok.video_info is not None and len(ok.images or []) == 1
+
+
+def test_post_detail_rejects_negative_scalars() -> None:
+    """Epochs and dimensions are never negative."""
+    with pytest.raises(ValidationError, match="create_time"):
+        PostDetail(aweme_id="1", create_time=-5, post_type=PostType.UNKNOWN)
+    with pytest.raises(ValidationError, match="duration"):
+        VideoInfo(
+            play_addr="https://cdn.example/v.mp4",
+            duration=-1,
+            ratio="9:16",
+            width=720,
+            height=1280,
+        )
+
+
+def test_bulk_response_rejects_counter_mismatch() -> None:
+    """total_downloaded must equal the by-type sum; negatives refused."""
+    with pytest.raises(ValidationError, match="downloaded_count sum"):
+        BulkDownloadResponse(
+            operation_id="op",
+            sec_user_id="sec",
+            total_posts=10,
+            downloaded_count={PostType.VIDEO: 3},
+            total_downloaded=5,
+            status=DownloadStatus.COMPLETED,
+        )
+    with pytest.raises(ValidationError, match="failed_count"):
+        BulkDownloadResponse(
+            operation_id="op",
+            sec_user_id="sec",
+            failed_count=-1,
+            status=DownloadStatus.PENDING,
+        )
+    with pytest.raises(ValidationError, match="non-negative"):
+        BulkDownloadResponse(
+            operation_id="op",
+            sec_user_id="sec",
+            total_posts=10,
+            downloaded_count={PostType.VIDEO: -1},
+            total_downloaded=0,
+            status=DownloadStatus.COMPLETED,
+        )
+    ok = BulkDownloadResponse(
+        operation_id="op",
+        sec_user_id="sec",
+        total_posts=10,
+        downloaded_count={PostType.VIDEO: 3, PostType.IMAGES: 2},
+        total_downloaded=5,
+        status=DownloadStatus.COMPLETED,
+    )
+    assert ok.total_downloaded == 5

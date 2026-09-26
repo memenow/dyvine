@@ -99,7 +99,12 @@ async def test_close_engine_cleans_signer_even_if_pool_close_fails(
     sessions = SimpleNamespace(
         aclose=AsyncMock(side_effect=RuntimeError("pool failure"))
     )
-    context_mod._ENGINE = SimpleNamespace(sessions=sessions, websign_provider=provider)
+    context_mod._ENGINE = SimpleNamespace(
+        sessions=sessions,
+        websign_provider=provider,
+        r2_executor=None,
+        r2_head_executor=None,
+    )
     with pytest.raises(RuntimeError, match="pool failure"):
         await context_mod.close_engine()
     assert context_mod._ENGINE is None

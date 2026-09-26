@@ -13,6 +13,8 @@ from dyvine.core.exceptions import ServiceError
 from dyvine.services.delivery import MEDIA_EXTS
 
 from .weekly_state import (
+    MIN_DOWNLOAD_SLICE_SECONDS,
+    MIN_SEND_WINDOW_SECONDS,
     _checkpoint,
     _path_within_root,
     entry_cutoff,
@@ -67,6 +69,10 @@ async def _skip_unavailable_author(engine: Any, entry: Any) -> Any | None:
 async def download_entry(
     engine: Any, entry: Any, config: WeeklyConfig, deadline: float
 ) -> Any:
+    # ``deadline`` is the run budget; downloads stop a send window early
+    # so a download that fills the budget can never starve the delivery
+    # phase into an immediate requeue (wasted upstream fetch).
+    deadline -= MIN_SEND_WINDOW_SECONDS
     checkpoint = _checkpoint(entry)
     reconciliation = entry.extra.get("reconciliation")
     # Attested cutover releases proved what the chat already holds, not that
@@ -157,8 +163,12 @@ async def download_entry(
                     extra={**entry.extra, "weekly": checkpoint},
                 )
         if previous.status in {"pending", "running"}:
-            if entry.attempts == 0:
-                raise ValueError("previous download operation is still active")
+            # This process holds a fresh claim on the entry, so a still
+            # "active" recorded operation is definitionally stale (its
+            # runner died or was reclaimed): fail it loudly and proceed.
+            # Gating on ``entry.attempts == 0`` was wrong -- a reclaimed
+            # row can legitimately carry attempts 0, and parking the pair
+            # in review for a routine crash-recovery is not.
             await engine.operations.update_operation(
                 previous.operation_id,
                 status="failed",
@@ -174,7 +184,7 @@ async def download_entry(
     prior = checkpoint.get("since_aweme_id") or entry.extra.get("since_aweme_id")
     since = prior if isinstance(prior, str) and prior and not force_download else None
     remaining = deadline - time.monotonic()
-    if remaining <= 30:
+    if remaining <= MIN_DOWNLOAD_SLICE_SECONDS:
         return await patch_queue(engine, entry, status="pending", extra=entry.extra)
     skipped = await _skip_unavailable_author(engine, entry)
     if skipped is not None:
@@ -270,7 +280,7 @@ async def _download_full(
         if isinstance(saved, int) and saved >= 0:
             cursor = saved
     remaining = deadline - time.monotonic()
-    if remaining <= 30:
+    if remaining <= MIN_DOWNLOAD_SLICE_SECONDS:
         return await patch_queue(engine, entry, status="pending")
     skipped = await _skip_unavailable_author(engine, entry)
     if skipped is not None:

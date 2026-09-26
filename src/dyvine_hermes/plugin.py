@@ -29,8 +29,16 @@ SKILL_DESCRIPTION = (
 
 
 def skill_path() -> Path:
-    """Return the bundled skill file (ships in the wheel too)."""
-    return Path(__file__).resolve().parent / "skills" / SKILL_NAME / "SKILL.md"
+    """Return the bundled skill file (ships in the wheel too).
+
+    Fails fast with the resolved path when packaging dropped the file:
+    surfacing it here beats a cryptic gateway error inside
+    ``register_skill``.
+    """
+    path = Path(__file__).resolve().parent / "skills" / SKILL_NAME / "SKILL.md"
+    if not path.is_file():
+        raise FileNotFoundError(f"bundled skill file is missing: {path}")
+    return path
 
 
 def _setup_cli(subparser: Any) -> None:
@@ -58,15 +66,26 @@ def _setup_cli(subparser: Any) -> None:
 
 
 def _handle_cli(args: Any) -> None:
-    """Boot the engine only when the operator invokes a CLI command."""
-    if args.dyvine_section == "media":
+    """Boot the runner only when the operator invokes the CLI command.
+
+    Tolerant of a bare namespace: the gateway may dispatch this handler
+    without the subparsers (where ``required=True`` never runs), and that
+    path must degrade to defaults, not ``AttributeError``.
+    """
+    if getattr(args, "dyvine_section", "weekly") == "media":
         from dyvine_hermes.media_prune import prune_cli
 
-        prune_cli(older_than_days=args.older_than_days, dry_run=args.dry_run)
+        prune_cli(
+            older_than_days=float(getattr(args, "older_than_days", 14.0)),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
         return
     from dyvine_hermes.weekly import run_cli
 
-    run_cli(round_name=args.round_name, dry_run=args.dry_run)
+    run_cli(
+        round_name=getattr(args, "round_name", None),
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
 
 
 #: Every tool needs the database; f2-backed tools additionally need the
@@ -74,7 +93,17 @@ def _handle_cli(args: Any) -> None:
 _DB_ENV = ["DATABASE_URL"]
 _F2_ENV = ["DATABASE_URL", "DOUYIN_COOKIE"]
 
-#: Tools that never touch Douyin (pure Postgres reads/writes).
+#: Tools that never touch the engine at all (pure subprocess/HTTPS).
+_NO_ENV_TOOLS = frozenset(
+    {
+        # Only shells out to ``hermes send``: no DB, no cookie.
+        "dyvine.notify.send",
+    }
+)
+
+#: Tools that boot the engine (so they need the database) but never touch
+#: Douyin itself: pure Postgres reads/writes, Feishu delivery, and plain
+#: HTTPS share-link resolution.
 _DB_ONLY_TOOLS = frozenset(
     {
         "dyvine.queue.import_seeds",
@@ -86,7 +115,9 @@ _DB_ONLY_TOOLS = frozenset(
         "dyvine.queue.release",
         "dyvine.rounds.create",
         "dyvine.rounds.list",
+        "dyvine.delivery.send_account",
         "dyvine.delivery.status",
+        "dyvine.users.resolve",
         "dyvine.profiles.upsert",
         "dyvine.profiles.get",
         "dyvine.operation.get",
@@ -96,8 +127,21 @@ _DB_ONLY_TOOLS = frozenset(
 
 def register(ctx: Any) -> None:
     """Register all dyvine tools on the gateway context."""
+    known = {spec.name for spec in TOOL_SPECS}
+    stale = (_NO_ENV_TOOLS | _DB_ONLY_TOOLS) - known
+    if stale:
+        # A rename/typo here would otherwise silently demote the tool to
+        # the F2 branch and over-declare its env: fail the boot loudly.
+        raise RuntimeError(
+            f"stale env classification for unknown tools: {sorted(stale)}"
+        )
     for spec in TOOL_SPECS:
-        requires_env = list(_DB_ENV) if spec.name in _DB_ONLY_TOOLS else list(_F2_ENV)
+        if spec.name in _NO_ENV_TOOLS:
+            requires_env = []
+        else:
+            requires_env = (
+                list(_DB_ENV) if spec.name in _DB_ONLY_TOOLS else list(_F2_ENV)
+            )
         ctx.register_tool(
             spec.name,
             TOOLSET,

@@ -139,14 +139,11 @@ def _group_topic_candidates(
 
 def _reconciliation_rows(
     connection: sqlite3.Connection,
-    queue_path: Path,
+    queue_entries: list[Any],
     mapping: dict[str, set[str]],
     groups: dict[tuple[str, str], dict[str, str]],
 ) -> Iterator[dict[str, Any]]:
     """List every frozen queue row without changing its claimable status."""
-    queue = json.loads(queue_path.read_text(encoding="utf-8"))
-    if not isinstance(queue, dict) or not isinstance(queue.get("entries"), list):
-        raise ValueError("queue source must contain an entries list")
     sent_counts = {
         (row[0], row[1]): row[2]
         for row in connection.execute(
@@ -238,7 +235,7 @@ def _reconciliation_rows(
              AND COALESCE(failed.entries, 0) = 0"""
     ):
         candidate_snapshots.setdefault((row["round"], row["nickname"]), []).append(row)
-    for index, entry in enumerate(queue["entries"]):
+    for index, entry in enumerate(queue_entries):
         if not isinstance(entry, dict):
             yield {
                 "source_index": index,
@@ -504,9 +501,10 @@ async def _import_extra_evidence(
                 }
             )
             if len(permanent_batch) >= batch_size:
-                inserted, existing = (
-                    await ledger.reserve_legacy_permanent_failure_batch(permanent_batch)
-                )
+                (
+                    inserted,
+                    existing,
+                ) = await ledger.reserve_legacy_permanent_failure_batch(permanent_batch)
                 report.permanent_inserted += inserted
                 report.permanent_existing += existing
                 permanent_batch.clear()
@@ -648,9 +646,7 @@ async def run(
                 raise ValueError("reconciliation output would replace a source file")
             _write_reconciliation(
                 output_path,
-                _reconciliation_rows(
-                    connection, Path(args.queue_path), mapping, groups
-                ),
+                _reconciliation_rows(connection, queue_doc["entries"], mapping, groups),
             )
         if not args.dry_run:
             staging._verify_source_stats(connection, paths)
@@ -662,7 +658,8 @@ async def run(
             if ledger is None:
                 from dyvine.db.delivery_ledger import PostgresDeliveryLedgerRepository
 
-                assert factory is not None
+                if factory is None:
+                    raise ValueError("database session factory was not initialised")
                 ledger = PostgresDeliveryLedgerRepository(factory)
             await _import(connection, ledger, report, args.batch_size)
     finally:
@@ -709,9 +706,10 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, sqlite3.Error) as exc:
         print(f"error: legacy send import failed: {exc}", file=sys.stderr)
         return 2
-    except Exception:
+    except Exception as exc:
         print(
-            "error: Postgres import failed; inspect schema and target before retrying",
+            f"error: Postgres import failed: {exc}; "
+            "inspect schema and target before retrying",
             file=sys.stderr,
         )
         return 2

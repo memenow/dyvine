@@ -325,11 +325,10 @@ class PostService:
                     self.handler.kwargs, sec_user_id, db
                 )
             post_type = self._determine_post_type(prepared)
-            before = {entry.name for entry in user_path.iterdir()}
+            before = _snapshot_files(user_path)
             await self._download_post_content(prepared, post_type, user_path)
             files = sorted(
-                str(user_path / name)
-                for name in {entry.name for entry in user_path.iterdir()} - before
+                str(path) for path in _new_or_changed_files(user_path, before)
             )
             # ``user_path`` is never ``None`` here, so the helper always
             # returns a string; the fallback only satisfies the type
@@ -649,7 +648,7 @@ class PostService:
                             sec = sec[0] if sec else None
                         if not sec or not isinstance(sec, str):
                             raise PostServiceError(
-                                "Cannot resolve author of container " f"{container_id}"
+                                f"Cannot resolve author of container {container_id}"
                             )
                         async with AsyncUserDB("douyin_users.db") as db:
                             user_path = await self.handler.get_or_add_user_data(
@@ -694,6 +693,17 @@ class PostService:
                     "failed_count": failed_count,
                 },
             )
+        except asyncio.CancelledError:
+            # Same drain-cancellation contract as the bulk loop: terminal
+            # state first, then re-raise.
+            with contextlib.suppress(Exception):
+                await self.operation_store.update_operation(
+                    operation_id,
+                    status="failed",
+                    message="Container download cancelled",
+                    error="cancelled",
+                )
+            raise
         except Exception as e:
             logger.exception(
                 "Error in container download",
@@ -980,12 +990,12 @@ class PostService:
                     error="cancelled",
                 )
             raise
-        except Exception:
+        except Exception as e:
             await self.operation_store.update_operation(
                 operation_id,
                 status="failed",
                 message="Inline bulk download failed",
-                error="download failed",
+                error=str(e),
             )
             raise
         return await self.get_bulk_download_status(operation_id)
@@ -1217,6 +1227,20 @@ class PostService:
                     batch_error_message = str(batch_error)
                     break
 
+        except asyncio.CancelledError:
+            # Registry drain cancels this background loop (BaseException, so
+            # the ``Exception`` branch below cannot see it): persist a
+            # terminal state so the row never wedges in ``running``, then
+            # re-raise to keep cancellation semantics. Mirrors the inline
+            # and incremental paths.
+            with contextlib.suppress(Exception):
+                await self.operation_store.update_operation(
+                    operation_id,
+                    status="failed",
+                    message="Bulk download cancelled",
+                    error="cancelled",
+                )
+            raise
         except UserNotFoundError as e:
             logger.warning(
                 "User not found during bulk download",
@@ -1358,7 +1382,14 @@ class PostService:
         total_posts = int(op.total_items or op.metadata.get("total_posts") or 0)
         total_downloaded = sum(download_stats.values())
         if op.completed_items is not None:
-            total_downloaded = max(total_downloaded, int(op.completed_items))
+            # Legacy rows predate the by-type breakdown: attribute the
+            # unattributed remainder to UNKNOWN so the total always
+            # equals the breakdown sum (the response invariant), instead
+            # of taking a max that would break it.
+            remainder = int(op.completed_items) - total_downloaded
+            if remainder > 0:
+                download_stats[PostType.UNKNOWN] += remainder
+                total_downloaded += remainder
 
         download_path = op.download_path or op.metadata.get("download_path")
         failed_count = int(op.metadata.get("failed_count") or 0)
@@ -1950,6 +1981,42 @@ def _list_from(obj: Any, method_name: str) -> list[dict[str, Any]] | None:
         return None
     items = [dict(item) for item in value if isinstance(item, dict)]
     return items or None
+
+
+def _snapshot_files(root: Path) -> dict[Path, tuple[int, int]]:
+    """Map every file under ``root`` to ``(size, mtime_ns)``.
+
+    A top-level name diff misses downloader output written into
+    subdirectories and reports an empty product set when a same-named
+    file is overwritten in place; size+mtime catches both.
+    """
+    snapshot: dict[Path, tuple[int, int]] = {}
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[path.resolve()] = (stat.st_size, stat.st_mtime_ns)
+    return snapshot
+
+
+def _new_or_changed_files(
+    root: Path, before: dict[Path, tuple[int, int]]
+) -> list[Path]:
+    """Return files created or overwritten since ``before`` was taken."""
+    found: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if before.get(path.resolve()) != (stat.st_size, stat.st_mtime_ns):
+            found.append(path)
+    return found
 
 
 def _post_created_at(post: dict[str, Any]) -> datetime | None:

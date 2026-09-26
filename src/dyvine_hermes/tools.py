@@ -70,11 +70,11 @@ def jsonable(value: Any) -> Any:
     return str(value)
 
 
-def _string(name: str, description: str) -> dict[str, Any]:
+def _string(description: str) -> dict[str, Any]:
     return {"type": "string", "description": description}
 
 
-def _integer(name: str, description: str, default: int | None = None) -> dict[str, Any]:
+def _integer(description: str, default: int | None = None) -> dict[str, Any]:
     schema: dict[str, Any] = {"type": "integer", "description": description}
     if default is not None:
         schema["default"] = default
@@ -300,6 +300,11 @@ async def _queue_update(args: dict[str, Any]) -> Any:
     if not isinstance(raw_fields, dict):
         raise ValueError("fields must be an object")
     fields = dict(raw_fields)
+    if "key" in fields:
+        # Without this the splat below raises a bare ``TypeError:
+        # multiple values for argument 'key'`` on caller-controlled
+        # input; the key travels as a top-level arg, never as a field.
+        raise ValueError("'key' is not an updatable field")
     return jsonable(await engine.queue.report_progress(args["key"], **fields))
 
 
@@ -346,25 +351,40 @@ async def _rounds_list(args: dict[str, Any]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _weekly_timezone() -> str | None:
+    """Return the weekly timezone, or None when the weekly env is absent.
+
+    Naive cutoffs need no timezone; only offset-carrying input converts,
+    and only then does a missing env surface as an error.
+    """
+    try:
+        from dyvine_hermes.weekly_types import WeeklyConfig
+
+        return WeeklyConfig.from_environment().timezone
+    except ValueError:
+        return None
+
+
 async def _delivery_send_account(args: dict[str, Any]) -> Any:
+    # Local imports: ``dyvine.core`` / ``dyvine.services`` pull
+    # third-party packages (pydantic-settings, httpx) that Hermes never
+    # auto-installs, so registration-time module scope must stay
+    # stdlib-only or ``plugins doctor`` fails. The engine boots here,
+    # on the first tool call, never at import.
     from dyvine.core.exceptions import DeliveryError
+    from dyvine.core.path_safety import get_download_root
     from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
     from dyvine.services.delivery_durable import send_account_durable
+    from dyvine_hermes.weekly_state import _path_within_root, parse_cutoff
 
     engine = get_engine()
     parsed_cutoff = None
     cutoff = args.get("cutoff")
     if cutoff:
-        text = str(cutoff).strip().replace("T", " ", 1)
-        for candidate in (text[:19], text[:10]):
-            for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-                try:
-                    parsed_cutoff = datetime.strptime(candidate, pattern)
-                    break
-                except ValueError:
-                    continue
-            if parsed_cutoff is not None:
-                break
+        # Strict ISO parsing shared with the weekly runner: offsets
+        # convert through the weekly timezone, garbage raises instead of
+        # silently degrading to a full delivery.
+        parsed_cutoff = parse_cutoff(str(cutoff), timezone=_weekly_timezone())
     if any(
         args.get(name) for name in ("already_sent", "already_failed", "known_permanent")
     ):
@@ -372,17 +392,29 @@ async def _delivery_send_account(args: dict[str, Any]) -> Any:
             "Legacy path lists require import into the delivery ledger first",
             reason="failed",
         )
+    # The media directory is caller-supplied: jail it under the download
+    # root before anything enumerates it, or a tool call could exfiltrate
+    # arbitrary local directories via Feishu uploads.
+    user_dir = _path_within_root(args["user_dir"], get_download_root())
     round_name = args.get("round")
     sec_user_id = args.get("sec_user_id")
     if not round_name or not sec_user_id:
-        candidates = [
-            row
-            for row in await engine.queue_repo.list_entries(limit=-1)
-            if row.chat_id == args["chat_id"]
-            and row.nickname == args["nickname"]
-            and (not round_name or row.round == round_name)
-            and (not sec_user_id or row.sec_user_id == sec_user_id)
-        ]
+        candidates: list[Any] = []
+        offset = 0
+        while True:
+            page = await engine.queue_repo.list_entries(
+                round=round_name or None, limit=500, offset=offset
+            )
+            if not page:
+                break
+            candidates.extend(
+                row
+                for row in page
+                if row.chat_id == args["chat_id"]
+                and row.nickname == args["nickname"]
+                and (not sec_user_id or row.sec_user_id == sec_user_id)
+            )
+            offset += len(page)
         if len(candidates) != 1:
             raise DeliveryError(
                 "Specify round and sec_user_id for unambiguous delivery",
@@ -399,7 +431,7 @@ async def _delivery_send_account(args: dict[str, Any]) -> Any:
         nickname=args["nickname"],
         chat_id=args["chat_id"],
         homepage=args["homepage"],
-        user_dir=Path(args["user_dir"]),
+        user_dir=user_dir,
         cutoff=parsed_cutoff,
         starter_message_id=args.get("starter_message_id"),
     )
@@ -453,6 +485,10 @@ async def _profiles_upsert(args: dict[str, Any]) -> Any:
     if not isinstance(raw_fields, dict):
         raise ValueError("fields must be an object")
     fields = dict(raw_fields)
+    if "sec_user_id" in fields:
+        # Same reserved-key guard as ``_queue_update``: the identity
+        # travels as a top-level arg, never as a splatted field.
+        raise ValueError("'sec_user_id' is not an updatable field")
     return jsonable(
         await engine.profiles.upsert_profile(sec_user_id=args["sec_user_id"], **fields)
     )
@@ -472,7 +508,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.profile.get",
         "Fetch a Douyin user profile by sec_user_id.",
-        _schema({"sec_user_id": _string("sec", "Douyin sec_user_id")}, ["sec_user_id"]),
+        _schema({"sec_user_id": _string("Douyin sec_user_id")}, ["sec_user_id"]),
         _profile_get,
     ),
     ToolSpec(
@@ -480,8 +516,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List accounts a user follows.",
         _schema(
             {
-                "sec_user_id": _string("sec", "Douyin sec_user_id"),
-                "count": _integer("count", "Max entries", 20),
+                "sec_user_id": _string("Douyin sec_user_id"),
+                "count": _integer("Max entries", 20),
             },
             ["sec_user_id"],
         ),
@@ -492,8 +528,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List accounts following a user.",
         _schema(
             {
-                "sec_user_id": _string("sec", "Douyin sec_user_id"),
-                "count": _integer("count", "Max entries", 20),
+                "sec_user_id": _string("Douyin sec_user_id"),
+                "count": _integer("Max entries", 20),
             },
             ["sec_user_id"],
         ),
@@ -508,7 +544,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.users.resolve",
         "Follow a Douyin share short link to its user/post identity.",
-        _schema({"url": _string("url", "Share URL")}, ["url"]),
+        _schema({"url": _string("Share URL")}, ["url"]),
         _users_resolve,
     ),
     ToolSpec(
@@ -516,8 +552,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List one page of a user's posts.",
         _schema(
             {
-                "sec_user_id": _string("sec", "Douyin sec_user_id"),
-                "max_cursor": _integer("cursor", "Pagination cursor", 0),
+                "sec_user_id": _string("Douyin sec_user_id"),
+                "max_cursor": _integer("Pagination cursor", 0),
             },
             ["sec_user_id"],
         ),
@@ -528,9 +564,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Start a background bulk download (modes: post, like, collection, music).",
         _schema(
             {
-                "sec_user_id": _string("sec", "Douyin sec_user_id"),
-                "mode": _string("mode", "Feed mode (default post)"),
-                "max_cursor": _integer("cursor", "Start cursor", 0),
+                "sec_user_id": _string("Douyin sec_user_id"),
+                "mode": _string("Feed mode (default post)"),
+                "max_cursor": _integer("Start cursor", 0),
             },
             ["sec_user_id"],
         ),
@@ -539,19 +575,19 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.posts.download_status",
         "Poll a bulk/download operation by id.",
-        _schema({"operation_id": _string("id", "Operation id")}, ["operation_id"]),
+        _schema({"operation_id": _string("Operation id")}, ["operation_id"]),
         _posts_download_status,
     ),
     ToolSpec(
         "dyvine.single.download",
         "Download one post (video or album) inline and return file paths.",
-        _schema({"aweme_id": _string("id", "Post aweme_id")}, ["aweme_id"]),
+        _schema({"aweme_id": _string("Post aweme_id")}, ["aweme_id"]),
         _single_download,
     ),
     ToolSpec(
         "dyvine.mix.download",
         "Start a background download of a mix album by mix_id.",
-        _schema({"mix_id": _string("id", "Mix id")}, ["mix_id"]),
+        _schema({"mix_id": _string("Mix id")}, ["mix_id"]),
         _mix_download,
     ),
     ToolSpec(
@@ -564,7 +600,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "dyvine.collects.download",
         "Start a background download of a collects folder.",
         _schema(
-            {"collects_id": _string("id", "Collects folder id")},
+            {"collects_id": _string("Collects folder id")},
             ["collects_id"],
         ),
         _collects_download,
@@ -574,8 +610,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List top-level comments of a post.",
         _schema(
             {
-                "aweme_id": _string("id", "Post aweme_id"),
-                "count": _integer("count", "Max comments", 20),
+                "aweme_id": _string("Post aweme_id"),
+                "count": _integer("Max comments", 20),
             },
             ["aweme_id"],
         ),
@@ -586,8 +622,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Fetch upstream statistics of a post.",
         _schema(
             {
-                "aweme_id": _string("id", "Post aweme_id"),
-                "aweme_type": _integer("type", "Post kind code", 0),
+                "aweme_id": _string("Post aweme_id"),
+                "aweme_type": _integer("Post kind code", 0),
             },
             ["aweme_id"],
         ),
@@ -598,8 +634,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List a user's feed videos.",
         _schema(
             {
-                "sec_user_id": _string("sec", "Douyin sec_user_id"),
-                "count": _integer("count", "Max items", 20),
+                "sec_user_id": _string("Douyin sec_user_id"),
+                "count": _integer("Max items", 20),
             },
             ["sec_user_id"],
         ),
@@ -610,8 +646,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List posts related to one post.",
         _schema(
             {
-                "aweme_id": _string("id", "Post aweme_id"),
-                "count": _integer("count", "Max items", 20),
+                "aweme_id": _string("Post aweme_id"),
+                "count": _integer("Max items", 20),
             },
             ["aweme_id"],
         ),
@@ -620,7 +656,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.feed.friend",
         "List friend-feed videos for the cookie owner.",
-        _schema({"count": _integer("count", "Max items", 20)}, []),
+        _schema({"count": _integer("Max items", 20)}, []),
         _feed_friend,
     ),
     ToolSpec(
@@ -628,9 +664,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Download a livestream (default highest quality; quality override optional).",
         _schema(
             {
-                "url": _string("url", "Room, user, or webcast id"),
-                "quality": _string("q", "Quality label (optional)"),
-                "output_path": _string("out", "Output dir (optional)"),
+                "url": _string("Room, user, or webcast id"),
+                "quality": _string("Quality label (optional)"),
+                "output_path": _string("Output dir (optional)"),
             },
             ["url"],
         ),
@@ -641,8 +677,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Fetch live-room IM state for a viewer identity.",
         _schema(
             {
-                "room_id": _string("room", "Room id"),
-                "unique_id": _string("user", "Viewer unique id"),
+                "room_id": _string("Room id"),
+                "unique_id": _string("Viewer unique id"),
             },
             ["room_id", "unique_id"],
         ),
@@ -664,7 +700,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "description": "Seed entries",
                     "items": {"type": "object"},
                 },
-                "batch": _string("batch", "Batch label (optional)"),
+                "batch": _string("Batch label (optional)"),
             },
             ["items"],
         ),
@@ -675,10 +711,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Enqueue all non-excluded seeds into a round (idempotent).",
         _schema(
             {
-                "round": _string("round", "Round name"),
-                "mode": _string("mode", "Download mode"),
-                "cutoff": _string("cutoff", "Cutoff datetime (optional)"),
-                "note": _string("note", "Round note (optional)"),
+                "round": _string("Round name"),
+                "mode": _string("Download mode"),
+                "cutoff": _string("Cutoff datetime (optional)"),
+                "note": _string("Round note (optional)"),
             },
             ["round", "mode"],
         ),
@@ -687,7 +723,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.queue.claim",
         "Claim the oldest pending entry (serial-group aware).",
-        _schema({"round": _string("round", "Round filter (optional)")}, []),
+        _schema({"round": _string("Round filter (optional)")}, []),
         _queue_claim,
     ),
     ToolSpec(
@@ -695,7 +731,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Patch a queue entry (status/checkpoint/counters).",
         _schema(
             {
-                "key": _string("key", "Entry key {round}:{sec}"),
+                "key": _string("Entry key {round}:{sec}"),
                 "fields": {
                     "type": "object",
                     "description": "Fields to update",
@@ -710,10 +746,10 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "List queue entries oldest-first with filters.",
         _schema(
             {
-                "round": _string("round", "Round filter (optional)"),
-                "status": _string("status", "Status filter (optional)"),
-                "limit": _integer("limit", "Max rows", 100),
-                "offset": _integer("offset", "Skip rows", 0),
+                "round": _string("Round filter (optional)"),
+                "status": _string("Status filter (optional)"),
+                "limit": _integer("Max rows", 100),
+                "offset": _integer("Skip rows", 0),
             },
             [],
         ),
@@ -722,7 +758,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.queue.status",
         "Tally queue entries by status (one round or all).",
-        _schema({"round": _string("round", "Round filter (optional)")}, []),
+        _schema({"round": _string("Round filter (optional)")}, []),
         _queue_status,
     ),
     ToolSpec(
@@ -735,7 +771,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
                     "description": "Stale threshold",
                     "default": 600.0,
                 },
-                "max_attempts": _integer("n", "Max attempts", 8),
+                "max_attempts": _integer("Max attempts", 8),
             },
             [],
         ),
@@ -746,8 +782,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Create a delivery round header (idempotent).",
         _schema(
             {
-                "round": _string("round", "Round name"),
-                "note": _string("note", "Note (optional)"),
+                "round": _string("Round name"),
+                "note": _string("Note (optional)"),
             },
             ["round"],
         ),
@@ -764,30 +800,15 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Deliver one account's pending media files to its Feishu group.",
         _schema(
             {
-                "nickname": _string("n", "Account nickname"),
-                "chat_id": _string("chat", "Feishu chat id"),
-                "homepage": _string("home", "Douyin homepage URL"),
-                "user_dir": _string("dir", "Local media directory"),
-                "sec_user_id": _string("sec", "Sec id for status rows"),
-                "cutoff": _string("cutoff", "Incremental cutoff (optional)"),
-                "batch": _string("batch", "Batch label (default batch)"),
-                "round": _string("round", "Delivery round for ledger identity"),
-                "starter_message_id": _string("mid", "Reuse topic (optional)"),
-                "already_sent": {
-                    "type": "array",
-                    "description": "Sent paths to skip",
-                    "items": {"type": "string"},
-                },
-                "already_failed": {
-                    "type": "array",
-                    "description": "Failed paths to skip",
-                    "items": {"type": "string"},
-                },
-                "known_permanent": {
-                    "type": "array",
-                    "description": "Permanent-failure paths",
-                    "items": {"type": "string"},
-                },
+                "nickname": _string("Account nickname"),
+                "chat_id": _string("Feishu chat id"),
+                "homepage": _string("Douyin homepage URL"),
+                "user_dir": _string("Local media directory"),
+                "sec_user_id": _string("Sec id for status rows"),
+                "cutoff": _string("Incremental cutoff (optional)"),
+                "batch": _string("Batch label (default batch)"),
+                "round": _string("Delivery round for ledger identity"),
+                "starter_message_id": _string("Reuse topic (optional)"),
             },
             ["nickname", "chat_id", "homepage", "user_dir"],
         ),
@@ -798,8 +819,8 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Read delivery counters by nickname (or sec_user_id).",
         _schema(
             {
-                "nickname": _string("n", "Account nickname"),
-                "sec_user_id": _string("sec", "Sec id (optional)"),
+                "nickname": _string("Account nickname"),
+                "sec_user_id": _string("Sec id (optional)"),
             },
             [],
         ),
@@ -810,9 +831,9 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Send a message via hermes-native channels (non-Feishu).",
         _schema(
             {
-                "target": _string("t", "hermes send target"),
-                "message": _string("m", "Message text"),
-                "subject": _string("s", "Subject (optional)"),
+                "target": _string("hermes send target"),
+                "message": _string("Message text"),
+                "subject": _string("Subject (optional)"),
                 "timeout_seconds": {
                     "type": "number",
                     "description": "Timeout",
@@ -828,7 +849,7 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
         "Insert or patch a cached profile snapshot.",
         _schema(
             {
-                "sec_user_id": _string("sec", "Douyin sec_user_id"),
+                "sec_user_id": _string("Douyin sec_user_id"),
                 "fields": {
                     "type": "object",
                     "description": "Snapshot fields",
@@ -841,13 +862,13 @@ TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "dyvine.profiles.get",
         "Fetch a cached profile snapshot.",
-        _schema({"sec_user_id": _string("sec", "Douyin sec_user_id")}, ["sec_user_id"]),
+        _schema({"sec_user_id": _string("Douyin sec_user_id")}, ["sec_user_id"]),
         _profiles_get,
     ),
     ToolSpec(
         "dyvine.operation.get",
         "Fetch any operation row by id.",
-        _schema({"operation_id": _string("id", "Operation id")}, ["operation_id"]),
+        _schema({"operation_id": _string("Operation id")}, ["operation_id"]),
         _operation_get,
     ),
 )

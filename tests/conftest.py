@@ -51,25 +51,46 @@ def preserve_event_loop_affinity() -> Iterator[None]:
     the policy's current loop to ``None`` on close, orphaning the ambient
     loop so a later GC fails an unrelated test (or session teardown) with
     ``unclosed event loop`` unraisables. Restoring whatever was current
-    before the test keeps the orphan referenced and silent. Loops a test
+    before the test keeps the orphan referenced and silent.
+
+    Ownership follows creation: when the policy holds no loop,
+    ``get_event_loop`` *creates* one on Python <= 3.13, and a loop this
+    fixture created is closed at teardown instead of re-anchored —
+    re-anchoring a loop nothing will ever close only defers the
+    ``unclosed event loop`` warning to whatever test the GC happens to
+    run in. Creation is detected via the DeprecationWarning CPython
+    emits exactly on the creating path; a silently returned loop is
+    pre-existing and keeps the re-anchor behavior. Loops a test
     abandons itself are unaffected: they are still collected and still
     fail loudly.
     """
+    created = False
     try:
         before = asyncio.get_running_loop()
     except RuntimeError:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
             try:
                 before = asyncio.get_event_loop()
             except RuntimeError:  # Python 3.14+: nothing set, nothing to keep
                 before = None
+            else:
+                created = any(
+                    isinstance(w.message, DeprecationWarning)
+                    and "no current event loop" in str(w.message).lower()
+                    for w in caught
+                )
     yield
-    asyncio.set_event_loop(before)
+    if created and before is not None:
+        if not before.is_closed():
+            before.close()
+        asyncio.set_event_loop(None)
+    else:
+        asyncio.set_event_loop(before)
 
 
 @pytest.fixture(autouse=True)
-def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+def reset_singletons(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Reset cached singletons between tests.
 
     The autouse fixture also strips ``DATABASE_URL`` from the process
@@ -103,7 +124,16 @@ def mock_douyin_handler() -> MagicMock:
     handler.kwargs = {"mode": "all", "max_tasks": 3}
     handler.fetch_one_video = AsyncMock(return_value=None)
     handler.fetch_user_profile = AsyncMock(return_value=None)
-    handler.fetch_user_post_videos = MagicMock(return_value=AsyncMock())
+
+    async def _empty_feed(*args, **kwargs):
+        """Fresh async iterator per call (production returns one per call)."""
+        if False:
+            yield None
+
+    # A factory, not a shared instance: production returns a new async
+    # iterator per call, and sharing one mock across calls would leak
+    # configured side effects between cases.
+    handler.fetch_user_post_videos = MagicMock(side_effect=_empty_feed)
     handler.fetch_user_live_videos = AsyncMock(return_value=None)
     handler.fetch_user_live_videos_by_room_id = AsyncMock(return_value=None)
     handler.get_or_add_user_data = AsyncMock(return_value=Path("/tmp/test"))
@@ -120,59 +150,42 @@ def storage_service_no_init():
     from dyvine.services.storage import R2StorageService
 
     service = object.__new__(R2StorageService)
+    # Mirror every attribute ``__init__`` sets so the stub exercises
+    # the same shape as a disabled service. Update together with
+    # ``R2StorageService.__init__``.
     service._executor = None  # type: ignore[attr-defined]
+    service._head_executor = None  # type: ignore[attr-defined]
+    service._head_pool_warning_emitted = False  # type: ignore[attr-defined]
+    service.client = None  # type: ignore[attr-defined]
+    service.bucket = None  # type: ignore[attr-defined]
     return service
-
-
-def _upgrade_to_head(config) -> None:
-    """Run ``alembic upgrade head`` on a thread without a loop.
-
-    This fixture is pulled from async test context, so the calling
-    thread already runs an event loop -- and ``env.py`` drives its
-    own ``asyncio.run``. A worker thread gives it a clean loop.
-    """
-    import threading
-
-    from alembic import command
-
-    errors: list[BaseException] = []
-
-    def _run() -> None:
-        try:
-            command.upgrade(config, "head")
-        except BaseException as exc:  # propagate to the caller
-            errors.append(exc)
-
-    worker = threading.Thread(target=_run, daemon=True)
-    worker.start()
-    worker.join()
-    if errors:
-        raise errors[0]
 
 
 @pytest.fixture(scope="session")
 def postgres_url():
     """Start a containerised Postgres and migrate it to ``head``.
 
-    Shared by ``tests/db`` and ``tests/scripts``. The Alembic
-    environment reads its URL from the already-imported
-    ``dyvine.core.settings.settings`` singleton (``cache_clear`` alone
-    cannot rebuild it), so the singleton's URL is patched narrowly
-    around the upgrade and restored before any test runs.
+    Shared by ``tests/db`` and ``tests/scripts``. The container URL
+    travels on the Alembic config object
+    (``dyvine.sqlalchemy.url``), never through the global settings
+    singleton, so per-test cache resets cannot split the suite onto a
+    different database. ``env.py`` owns the running-loop bridge, so
+    the upgrade is a plain ``command.upgrade`` call here.
     """
+    from alembic import command
     from alembic.config import Config
     from testcontainers.community.postgres import PostgresContainer
-
-    import dyvine.core.settings as settings_module
 
     root_dir = Path(__file__).resolve().parents[1]
     with PostgresContainer("postgres:16") as container:
         raw_url = container.get_connection_url()
-        url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://")
-        previous = settings_module.settings.database.url
-        settings_module.settings.database.url = url
-        try:
-            _upgrade_to_head(Config(str(root_dir / "alembic.ini")))
-        finally:
-            settings_module.settings.database.url = previous
+        if raw_url.startswith("postgresql+psycopg2://"):
+            url = raw_url.replace("postgresql+psycopg2://", "postgresql+asyncpg://", 1)
+        elif raw_url.startswith("postgresql://"):
+            url = raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        else:
+            raise ValueError(f"Unrecognized testcontainer URL scheme: {raw_url!r}")
+        config = Config(str(root_dir / "alembic.ini"))
+        config.attributes["dyvine.sqlalchemy.url"] = url
+        command.upgrade(config, "head")
         yield url

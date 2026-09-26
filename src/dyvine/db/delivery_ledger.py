@@ -18,8 +18,15 @@ from .models import (
     DeliveryFileRow,
     DeliveryGroupRow,
     DeliveryLegacyEvidenceRow,
+    DeliveryRoundRow,
     DownloadQueueRow,
     LegacyExcludedNicknameRow,
+)
+from .protocols import (
+    BatchOutcome,
+    LegacyEvidenceBatchRow,
+    LegacyFailureBatchRow,
+    LegacySentBatchRow,
 )
 from .records import DeliveryGroupRecord, FileDeliveryRecord, LegacyEvidenceRecord
 from .session import DatabaseSessionFactory
@@ -27,6 +34,46 @@ from .session import DatabaseSessionFactory
 
 def _stamp() -> str:
     return datetime.now(UTC).isoformat()
+
+
+async def _ensure_rounds(session: AsyncSession, rounds: set[str], stamp: str) -> None:
+    """Insert missing round headers so child FKs never dangle.
+
+    Every ledger child (group/file) names a round; the parent header
+    carries no payload of its own, so ensuring it idempotently in the
+    same transaction keeps the foreign key bulletproof for every
+    caller (including one-shot scripts with legacy round names).
+    """
+    if not rounds:
+        return
+    await session.execute(
+        insert(DeliveryRoundRow)
+        .values(
+            [
+                {
+                    "round": name,
+                    "note": None,
+                    "created_at": stamp,
+                    "updated_at": stamp,
+                }
+                for name in sorted(rounds)
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=["round"])
+    )
+
+
+def _checked_legacy_path(relative_path: str) -> str:
+    """Normalize an account-relative legacy path or raise ``ValueError``."""
+    path = PurePosixPath(relative_path)
+    if (
+        path.is_absolute()
+        or ".." in path.parts
+        or not relative_path
+        or path.as_posix() == "."
+    ):
+        raise ValueError("Legacy path must be account-relative")
+    return path.as_posix()
 
 
 # f2 saves post media as ``<create>_<desc>/<create>_<desc><slot>``, where the
@@ -145,11 +192,12 @@ class PostgresDeliveryLedgerRepository:
 
     async def upsert_excluded_nickname(self, *, nickname: str, source: str) -> None:
         """Keep a nickname-only exclusion without inventing an account ID."""
-        if not nickname.strip():
+        cleaned = nickname.strip()
+        if not cleaned:
             raise ValueError("Excluded nickname must not be blank")
         statement = (
             insert(LegacyExcludedNicknameRow)
-            .values(nickname=nickname, source=source, created_at=_stamp())
+            .values(nickname=cleaned, source=source, created_at=_stamp())
             .on_conflict_do_nothing(index_elements=["nickname"])
         )
         async with self._sessions.session() as session:
@@ -204,9 +252,11 @@ class PostgresDeliveryLedgerRepository:
         )
         async with self._sessions.session() as session:
             async with session.begin():
+                await _ensure_rounds(session, {round}, stamp)
                 await session.execute(statement)
                 row = await session.get(DeliveryGroupRow, key, with_for_update=True)
-                assert row is not None
+                if row is None:
+                    raise ValueError("Group intent does not exist")
                 if row.owner_open_id is not None and row.owner_open_id != owner_open_id:
                     raise ValueError("Group owner differs from persisted intent")
                 if row.nickname != nickname:
@@ -272,9 +322,12 @@ class PostgresDeliveryLedgerRepository:
                     or queue_rows[0].chat_id != chat_id
                 ):
                     raise ValueError("Legacy group does not match migrated queue")
+                # No round ensure needed: the queue-verified check above
+                # proves a queue row (hence its round parent) exists.
                 await session.execute(statement)
                 row = await session.get(DeliveryGroupRow, key, with_for_update=True)
-                assert row is not None
+                if row is None:
+                    raise ValueError("Group intent does not exist")
                 if (
                     row.status != "ready"
                     or row.chat_id != chat_id
@@ -436,9 +489,11 @@ class PostgresDeliveryLedgerRepository:
         )
         async with self._sessions.session() as session:
             async with session.begin():
+                await _ensure_rounds(session, {round}, stamp)
                 await session.execute(statement)
                 row = await session.get(DeliveryFileRow, media_id, with_for_update=True)
-                assert row is not None
+                if row is None:
+                    raise ValueError("Media intent does not exist")
                 if (
                     row.sec_user_id != sec_user_id
                     or row.content_sha256 != content_sha256
@@ -463,12 +518,8 @@ class PostgresDeliveryLedgerRepository:
         legacy_progress_file: str | None = None,
     ) -> FileDeliveryRecord:
         """Record path-only confirmed history without inventing a file hash."""
-        path = PurePosixPath(relative_path)
-        if path.is_absolute() or ".." in path.parts or not relative_path:
-            raise ValueError("Legacy path must be account-relative")
-        media_id = sha256(
-            f"legacy\0{sec_user_id}\0{path.as_posix()}".encode()
-        ).hexdigest()
+        normalized = _checked_legacy_path(relative_path)
+        media_id = sha256(f"legacy\0{sec_user_id}\0{normalized}".encode()).hexdigest()
         stamp = _stamp()
         statement = (
             insert(DeliveryFileRow)
@@ -476,7 +527,7 @@ class PostgresDeliveryLedgerRepository:
                 media_id=media_id,
                 round=round,
                 sec_user_id=sec_user_id,
-                relative_path=path.as_posix(),
+                relative_path=normalized,
                 content_sha256=None,
                 chat_id=chat_id,
                 parent_id=parent_id,
@@ -494,31 +545,32 @@ class PostgresDeliveryLedgerRepository:
         )
         async with self._sessions.session() as session:
             async with session.begin():
+                await _ensure_rounds(session, {round}, stamp)
                 await session.execute(statement)
                 row = await session.get(DeliveryFileRow, media_id)
-                assert row is not None
+                if row is None:
+                    raise ValueError("Media intent does not exist")
                 return _file_record(row)
 
     async def reserve_legacy_sent_batch(
-        self, rows: Sequence[dict[str, str | None]]
-    ) -> tuple[int, int]:
+        self, rows: Sequence[LegacySentBatchRow]
+    ) -> BatchOutcome:
         """Insert a bounded batch of confirmed legacy paths in one transaction."""
         if not rows:
-            return 0, 0
+            return BatchOutcome(0, 0)
         if len(rows) > 500:
             raise ValueError("Legacy batches must contain at most 500 rows")
         stamp = _stamp()
         values = []
+        rounds: set[str] = set()
         for row in rows:
             sec_user_id = row.get("sec_user_id")
             round_name = row.get("round")
             relative_path = row.get("relative_path")
             if not sec_user_id or not round_name or not relative_path:
                 raise ValueError("Legacy batch row is missing its identity")
-            path = PurePosixPath(relative_path)
-            if path.is_absolute() or ".." in path.parts:
-                raise ValueError("Legacy path must be account-relative")
-            normalized = path.as_posix()
+            rounds.add(round_name)
+            normalized = _checked_legacy_path(relative_path)
             values.append(
                 {
                     "media_id": sha256(
@@ -549,16 +601,17 @@ class PostgresDeliveryLedgerRepository:
         )
         async with self._sessions.session() as session:
             async with session.begin():
+                await _ensure_rounds(session, rounds, stamp)
                 result = await session.execute(statement)
                 inserted = len(result.scalars().all())
-        return inserted, len(values) - inserted
+        return BatchOutcome(inserted, len(values) - inserted)
 
     async def reserve_legacy_permanent_failure_batch(
-        self, rows: Sequence[dict[str, str | None]]
-    ) -> tuple[int, int]:
+        self, rows: Sequence[LegacyFailureBatchRow]
+    ) -> BatchOutcome:
         """Hold verified legacy failures by the same identity as sent history."""
         if not rows:
-            return 0, 0
+            return BatchOutcome(0, 0)
         if len(rows) > 500:
             raise ValueError("Legacy batches must contain at most 500 rows")
         stamp = _stamp()
@@ -568,10 +621,7 @@ class PostgresDeliveryLedgerRepository:
             relative_path = row.get("relative_path")
             if not sec_user_id or not relative_path:
                 raise ValueError("Legacy batch row is missing its identity")
-            path = PurePosixPath(relative_path)
-            if path.is_absolute() or ".." in path.parts or path.as_posix() == ".":
-                raise ValueError("Legacy path must be account-relative")
-            normalized = path.as_posix()
+            normalized = _checked_legacy_path(relative_path)
             values.append(
                 {
                     "media_id": sha256(
@@ -602,20 +652,24 @@ class PostgresDeliveryLedgerRepository:
         )
         async with self._sessions.session() as session:
             async with session.begin():
+                await _ensure_rounds(session, {"legacy"}, stamp)
                 result = await session.execute(statement)
                 inserted = len(result.scalars().all())
-        return inserted, len(values) - inserted
+        return BatchOutcome(inserted, len(values) - inserted)
 
     async def find_legacy_sent(
         self, *, sec_user_id: str, relative_path: str
     ) -> FileDeliveryRecord | None:
         """Find the legacy send of this media, tolerating caption renames.
 
-        An exact account-relative path wins. Otherwise a legacy send of the
-        same post creation stamp and media slot (see ``post_media_slot``)
-        is the same media under an edited caption, so sending it again
-        would duplicate it in the group.
+        Writers store the normalized path, so reads normalize first:
+        ``a//b`` and ``a/./b`` resolve to the same identity as ``a/b``.
+        An exact normalized-path match wins. Otherwise a legacy send of
+        the same post creation stamp and media slot (see
+        ``post_media_slot``) is the same media under an edited caption,
+        so sending it again would duplicate it in the group.
         """
+        normalized = _checked_legacy_path(relative_path)
         legacy_sends = (
             select(DeliveryFileRow)
             .where(DeliveryFileRow.sec_user_id == sec_user_id)
@@ -623,12 +677,12 @@ class PostgresDeliveryLedgerRepository:
         )
         async with self._sessions.session() as session:
             exact = legacy_sends.where(
-                DeliveryFileRow.relative_path == relative_path
+                DeliveryFileRow.relative_path == normalized
             ).limit(1)
             row = (await session.execute(exact)).scalars().first()
             if row is not None:
                 return _file_record(row)
-            return await _same_post_media(session, legacy_sends, relative_path)
+            return await _same_post_media(session, legacy_sends, normalized)
 
     async def find_prior_sent(
         self, *, sec_user_id: str, relative_path: str
@@ -652,12 +706,8 @@ class PostgresDeliveryLedgerRepository:
         self, *, sec_user_id: str, relative_path: str
     ) -> FileDeliveryRecord | None:
         """Find a historical permanent failure before a new send is reserved."""
-        path = PurePosixPath(relative_path)
-        if path.is_absolute() or ".." in path.parts or path.as_posix() == ".":
-            raise ValueError("Legacy path must be account-relative")
-        media_id = sha256(
-            f"legacy\0{sec_user_id}\0{path.as_posix()}".encode()
-        ).hexdigest()
+        normalized = _checked_legacy_path(relative_path)
+        media_id = sha256(f"legacy\0{sec_user_id}\0{normalized}".encode()).hexdigest()
         async with self._sessions.session() as session:
             row = await session.get(DeliveryFileRow, media_id)
             if row is None or row.status != "permanent_failure":
@@ -720,15 +770,16 @@ class PostgresDeliveryLedgerRepository:
             async with session.begin():
                 await session.execute(statement)
                 row = await session.get(DeliveryLegacyEvidenceRow, evidence_id)
-                assert row is not None
+                if row is None:
+                    raise ValueError("Legacy evidence does not exist")
                 return _evidence_record(row)
 
     async def upsert_legacy_evidence_batch(
-        self, rows: Sequence[dict[str, str | None]]
-    ) -> tuple[int, int]:
+        self, rows: Sequence[LegacyEvidenceBatchRow]
+    ) -> BatchOutcome:
         """Insert bounded audit evidence without changing send eligibility."""
         if not rows:
-            return 0, 0
+            return BatchOutcome(0, 0)
         if len(rows) > 500:
             raise ValueError("Evidence batches must contain at most 500 rows")
         stamp = _stamp()
@@ -765,7 +816,7 @@ class PostgresDeliveryLedgerRepository:
             async with session.begin():
                 result = await session.execute(statement)
                 inserted = len(result.scalars().all())
-        return inserted, len(values) - inserted
+        return BatchOutcome(inserted, len(values) - inserted)
 
     async def list_files(
         self,

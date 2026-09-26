@@ -1,0 +1,13 @@
+flowchart TD
+    GW[Hermes gateway] -->|loads manifest + calls register| REG[dyvine_hermes.plugin register]
+    REG -->|all TOOL_SPECS + 1 skill| TOOLSET[dyvine toolset]
+    TOOLSET -->|args dict| WRAP[as_tool_handler: serialize to JSON string]
+    WRAP --> RAW[raw handler: one service call]
+    RAW -->|first call boots| ENG[get_engine: one Engine per process]
+    ENG --> SVC[services: users / posts / livestreams / queue / profiles / delivery]
+    ENG --> REPO[Postgres repositories]
+    SVC --> F2[f2 Douyin SDK]
+    SVC --> R2[Cloudflare R2]
+    SVC --> REPO[(Postgres: operations, queue, seeds, send_status, profiles, rounds, watch)]
+    SVC --> FS[Feishu open platform]
+

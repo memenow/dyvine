@@ -434,7 +434,9 @@ def _assess(
     issue = _adoption_issue(group, key, queue, resolution)
     if issue:
         return Decision(None, "held", issue)
-    assert group is not None
+    # Provably-held narrowing: _adoption_issue flags a missing group, so
+    # reaching here means the group row exists; this only guides mypy.
+    assert group is not None  # noqa: S101
     if action == "release_pending_group_attested":
         if (
             round_name != active_round

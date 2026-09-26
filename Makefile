@@ -31,13 +31,17 @@ format:
 	uv run black .
 	uv run isort .
 
+# doctor tracks the :latest hermes release, same as CI's doctor job: the
+# catalog reviews against that release and plugin.yaml's requires_hermes
+# floor is the compatibility claim. Override for a pinned local check, e.g.
+# `make doctor HERMES_AGENT_IMAGE=<pinned-tag-or-digest>`.
+HERMES_AGENT_IMAGE ?= nousresearch/hermes-agent:latest
+
 doctor:
-	docker run --rm -v $(PWD):/plugin:ro nousresearch/hermes-agent:latest plugins doctor --ci /plugin
+	docker run --rm -v "$(CURDIR)":/plugin:ro $(HERMES_AGENT_IMAGE) plugins doctor --ci /plugin
 
 clean:
-	find . -type f -name "*.pyc" -delete
-	find . -type d -name "__pycache__" -delete
-	find . -type d -name "*.egg-info" -exec rm -rf {} +
-	rm -rf .pytest_cache
-	rm -rf .mypy_cache
-	rm -rf .ruff_cache
+	find . -path ./.venv -prune -o -path ./.git -prune -o -type f -name "*.pyc" -delete
+	find . -path ./.venv -prune -o -path ./.git -prune -o -type d -name "__pycache__" -prune -exec rm -rf {} +
+	find . -path ./.venv -prune -o -path ./.git -prune -o -type d -name "*.egg-info" -prune -exec rm -rf {} +
+	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage .coverage.* htmlcov coverage.xml dist build

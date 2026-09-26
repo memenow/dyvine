@@ -130,10 +130,11 @@ class LivestreamService:
             "proxies": base_config["proxies"],
         }
         self.download_jobs: dict[str, asyncio.Task[Any]] = {}
-        # Serializes the dedupe-check / job-registration window so concurrent
-        # callers cannot both observe an empty ``download_jobs`` across the
-        # metadata await in ``download_stream``.
-        self._dedupe_lock: asyncio.Lock | None = None
+        # Per-room dedupe locks (see ``_get_room_lock``): concurrent callers
+        # for the same room cannot both observe an empty ``download_jobs``
+        # across the metadata await in ``download_stream``, while different
+        # rooms never block each other.
+        self._room_locks: dict[str, asyncio.Lock] = {}
         self.user_service = user_service
         self._task_registry = task_registry
         self.operation_store = operation_store
@@ -502,6 +503,15 @@ class LivestreamService:
         if normalized.isdigit():
             return normalized, None
 
+        # Profile URLs resolve from the profile FIRST: the profile carries
+        # stream maps the generic fetcher cannot return, and a fetcher hit
+        # must never discard them (a later live-filter miss would then
+        # misreport "no stream" for a live room). A numeric last segment
+        # here is a user id, not a webcast id, so the digit fast path
+        # below must not claim it either.
+        if "douyin.com" in host and path.startswith("/user/"):
+            return await self._resolve_from_profile(path, last_segment, webcast_id=None)
+
         webcast_id: str | None = None
         if last_segment.isdigit():
             webcast_id = last_segment
@@ -517,9 +527,6 @@ class LivestreamService:
                     normalized,
                     error,
                 )
-
-        if not webcast_id and "douyin.com" in host and path.startswith("/user/"):
-            return await self._resolve_from_profile(path, last_segment, webcast_id=None)
 
         return webcast_id, None
 
@@ -599,17 +606,26 @@ class LivestreamService:
     # Main download orchestrator
     # ------------------------------------------------------------------
 
-    def _get_dedupe_lock(self) -> asyncio.Lock:
-        """Return the dedupe lock, creating it lazily on first use.
+    def _get_room_lock(self, room_id: str) -> asyncio.Lock:
+        """Return the dedupe lock for one room, creating it lazily.
 
-        ``asyncio.Lock`` binds to the running event loop, so constructing it on
-        first access keeps the service usable from bare ``object.__new__``
-        stubs in unit tests and avoids tying initialization to a specific loop.
+        One lock per ``room_id``: downloads for different rooms must never
+        serialize on each other's DB writes, while same-room callers still
+        cannot double-schedule one target file. ``asyncio.Lock`` binds to
+        the running loop, so lazy creation keeps the service usable from
+        bare ``object.__new__`` stubs in unit tests. Entries live for the
+        process lifetime (one tiny lock per room ever downloaded; no
+        waiter-count API exists to reclaim them safely), which is
+        negligible for this workload.
         """
-        lock = getattr(self, "_dedupe_lock", None)
+        locks = getattr(self, "_room_locks", None)
+        if locks is None:
+            locks = {}
+            self._room_locks = locks
+        lock = locks.get(room_id)
         if lock is None:
             lock = asyncio.Lock()
-            self._dedupe_lock = lock
+            locks[room_id] = lock
         return lock
 
     async def download_stream(
@@ -741,15 +757,20 @@ class LivestreamService:
         }
 
         target_file = output_dir / f"{room_id}_live.flv"
+        # ``room_id`` arrives from upstream room data (or the webcast-id
+        # fallback): jail the composed path itself so a hostile value can
+        # never escape the download root through the filename.
+        ensure_within_root(target_file)
 
-        # Hold the dedupe lock across the check/register window so two
-        # concurrent callers for the same ``room_id`` cannot both observe
-        # an empty ``download_jobs`` and double-schedule a background
-        # task that writes to the same target file. A just-completed task
-        # is treated as cleared even if the ``finally`` finalizer has not
-        # popped it from ``download_jobs`` yet, so back-to-back calls do
-        # not spuriously raise ``Already downloading``.
-        async with self._get_dedupe_lock():
+        # Hold this room's dedupe lock across the check/register window so
+        # two concurrent callers for the same ``room_id`` cannot both
+        # observe an empty ``download_jobs`` and double-schedule a
+        # background task that writes to the same target file. A
+        # just-completed task is treated as cleared even if the ``finally``
+        # finalizer has not popped it from ``download_jobs`` yet, so
+        # back-to-back calls do not spuriously raise ``Already
+        # downloading``.
+        async with self._get_room_lock(room_id):
             existing = self.download_jobs.get(room_id)
             if existing is not None and not existing.done():
                 raise LivestreamError("Already downloading this stream")
@@ -784,12 +805,26 @@ class LivestreamService:
             # drain in-flight recordings before the R2 / audit executors
             # are reaped. ``spawn_or_fallback`` falls back to a bare
             # ``asyncio.create_task`` for isolated unit tests that bypass
-            # the container.
-            job = spawn_or_fallback(
-                self._task_registry,
-                coro,
-                name=f"livestream-download-{room_id}",
-            )
+            # the container. A spawn failure (drained registry) must
+            # compensate the just-created operation: without this the row
+            # wedges in ``pending`` forever with no job behind it.
+            try:
+                job = spawn_or_fallback(
+                    self._task_registry,
+                    coro,
+                    name=f"livestream-download-{room_id}",
+                )
+            except Exception as spawn_error:
+                await self.operation_store.update_operation(
+                    operation.operation_id,
+                    status="failed",
+                    message="Livestream download failed to schedule",
+                    error=str(spawn_error),
+                    download_path=None,
+                )
+                raise LivestreamError(
+                    f"Failed to schedule download: {spawn_error}"
+                ) from spawn_error
             self.download_jobs[room_id] = job
 
         return LiveStreamDownloadResponse(**operation.to_response())

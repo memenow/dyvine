@@ -1157,3 +1157,233 @@ async def test_inspect_row_gives_adoption_its_accounts_older_chat_audit(
     assert received["other_chats"] == older
     assert received["journal"] == "journal"
     assert decision.status is None
+
+
+# ── P6-5/6/7/8/9 regressions ─────────────────────────────────────────────
+
+
+class _RecordingSession:
+    """Minimal async session double recording executed statements."""
+
+    def __init__(self, gets: dict[str, Any] | None = None) -> None:
+        self.gets = gets or {}
+        self.statements: list[str] = []
+
+    async def get(self, model: Any, key: Any, **kwargs: Any) -> Any:
+        return self.gets.get(getattr(model, "__name__", ""))
+
+    async def execute(self, statement: Any) -> Any:
+        self.statements.append(str(statement))
+        return SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: []),
+        )
+
+
+def test_inspect_row_skips_identity_queries_without_nickname() -> None:
+    """A blank nickname never degrades to IS NULL identity sweeps. (P6-5)"""
+    script = _load_script()
+    report = _report()
+    report["nickname"] = None
+    report["resolution"] = _resolution("complete")
+    session = _RecordingSession()
+    decision, queue = asyncio.run(
+        script._inspect_row(
+            session,  # type: ignore[arg-type]
+            report,
+            "weekly0913",
+            False,
+            set(),
+            None,
+            lock=False,
+        )
+    )
+    assert decision.status is None
+    assert not [s for s in session.statements if "nickname" in s]
+
+
+def test_inspect_row_holds_instead_of_crashing_without_sec() -> None:
+    """Missing attestation identity holds the row; no KeyError. (P6-6)"""
+    script = _load_script()
+    report = _report()
+    report["sec_user_id"] = None
+    report["resolution"] = _resolution("release_pending_group_attested")
+    session = _RecordingSession(
+        gets={"DeliveryGroupRow": _group(report), "DownloadQueueRow": _queue(report)}
+    )
+    decision, _ = asyncio.run(
+        script._inspect_row(
+            session,  # type: ignore[arg-type]
+            report,
+            "weekly0913",
+            False,
+            set(),
+            SimpleNamespace(source_rows={}, journal_for=lambda key: (None, None)),
+            lock=False,
+        )
+    )
+    assert (decision.status, decision.action) == (None, "held")
+
+
+def test_apply_without_queue_row_raises_value_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The apply guard raises explicitly, never a bare assert. (P6-7)"""
+    import argparse
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://localhost/db")
+    script = _load_script()
+    report = _report()
+    report["resolution"] = _resolution("complete")
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+    _, source_digest = script._report_rows(path)
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeSession:
+            return self
+
+        async def connection(self) -> Any:
+            raise AssertionError("must fail before any write")
+
+    class FakeFactory:
+        def __init__(self, _url: str, **_options: Any) -> None:
+            pass
+
+        def session(self) -> FakeSession:
+            return FakeSession()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def inspect(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return script.Decision("completed", "complete", "verified", ()), None
+
+    script.DatabaseSessionFactory = FakeFactory  # type: ignore[attr-defined]
+    script._inspect_row = inspect  # type: ignore[method-assign]
+    args = argparse.Namespace(
+        report=str(path),
+        active_round="weekly0913",
+        archive_historical=False,
+        database_url_env="DATABASE_URL",
+        apply=True,
+        expect_plan_sha256=script._plan_digest(source_digest, "weekly0913", False),
+        expected_count=1,
+    )
+    try:
+        with pytest.raises(ValueError, match="apply requires a queue row"):
+            asyncio.run(script.run(args))
+    finally:
+        import sys as _sys
+
+        _sys.modules.pop("apply_queue_reconciliation", None)
+
+
+def test_receipt_cas_covers_send_started_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The receipt write rechecks the full never-sent invariant. (P6-8)"""
+    import argparse
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://localhost/db")
+    script = _load_script()
+    report = _report()
+    report["resolution"] = _resolution("complete")
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+    _, source_digest = script._report_rows(path)
+    statements: list[str] = []
+
+    class FakeConnection:
+        async def execute(self, statement: Any) -> SimpleNamespace:
+            statements.append(str(statement))
+            return SimpleNamespace(rowcount=1)
+
+    class FakeSession:
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        def begin(self) -> FakeSession:
+            return self
+
+        async def connection(self) -> FakeConnection:
+            return FakeConnection()
+
+    class FakeFactory:
+        def __init__(self, _url: str, **_options: Any) -> None:
+            pass
+
+        def session(self) -> FakeSession:
+            return FakeSession()
+
+        async def aclose(self) -> None:
+            return None
+
+    async def inspect(*_args: Any, **_kwargs: Any) -> tuple[Any, Any]:
+        return (
+            script.Decision(
+                "completed", "complete", "verified", ((_file(report), "om-file"),)
+            ),
+            _queue(report),
+        )
+
+    script.DatabaseSessionFactory = FakeFactory  # type: ignore[attr-defined]
+    script._inspect_row = inspect  # type: ignore[method-assign]
+    args = argparse.Namespace(
+        report=str(path),
+        active_round="weekly0913",
+        archive_historical=False,
+        database_url_env="DATABASE_URL",
+        apply=True,
+        expect_plan_sha256=script._plan_digest(source_digest, "weekly0913", False),
+        expected_count=1,
+    )
+    try:
+        asyncio.run(script.run(args))
+    finally:
+        import sys as _sys
+
+        _sys.modules.pop("apply_queue_reconciliation", None)
+    assert "delivery_files.send_started_at IS NULL" in statements[1]
+
+
+def test_main_reports_failure_cause_and_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Database failures name their cause instead of only the type. (P6-9)"""
+    script = _load_script()
+    report = _report()
+    path = tmp_path / "report.jsonl"
+    path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("connection reset by peer")
+
+    script.run = _boom  # type: ignore[method-assign]
+    try:
+        assert (
+            script.main(
+                [
+                    "--report",
+                    str(path),
+                    "--active-round",
+                    "weekly0913",
+                ]
+            )
+            == 2
+        )
+    finally:
+        import sys as _sys
+
+        _sys.modules.pop("apply_queue_reconciliation", None)
+    captured = capsys.readouterr()
+    assert "connection reset by peer" in captured.err
+    assert "Traceback" in captured.err

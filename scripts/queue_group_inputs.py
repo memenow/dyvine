@@ -33,19 +33,32 @@ class GroupInputs:
     other_chats: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     other_chat_audit_sha256: str | None = None
 
+    def __post_init__(self) -> None:
+        """Reject cross-field evidence pairings no loader can produce."""
+        if self.supplemental_keys and self.supplemental_journal is None:
+            raise ValueError("supplemental keys require a supplemental journal")
+        if (self.supplemental_journal is None) != (self.keys_file_sha256 is None):
+            raise ValueError(
+                "supplemental journal and keys digest must be supplied together"
+            )
+
     def journal_for(self, key: str) -> tuple[AuditJournal, str | None]:
         """Choose the sole permitted source for this reviewed account."""
         if key in self.supplemental_keys:
-            assert self.supplemental_journal is not None
-            return self.supplemental_journal, self.keys_file_sha256
+            journal = self.supplemental_journal
+            if journal is None:
+                raise ValueError("supplemental keys require a supplemental journal")
+            return journal, self.keys_file_sha256
         return self.journal, None
 
     @property
     def evidence_digests(self) -> tuple[str, ...]:
         values = [self.source_sha256, self.journal.sha256, self.work_sha256]
         if self.supplemental_journal is not None:
-            assert self.keys_file_sha256 is not None
-            values.extend((self.supplemental_journal.sha256, self.keys_file_sha256))
+            keys_sha256 = self.keys_file_sha256
+            if keys_sha256 is None:
+                raise ValueError("supplemental journal requires its keys digest")
+            values.extend((self.supplemental_journal.sha256, keys_sha256))
         if self.other_chat_audit_sha256 is not None:
             values.append(self.other_chat_audit_sha256)
         return tuple(values)
@@ -92,7 +105,9 @@ def load_group_inputs(
         raise ValueError("Feishu journal does not match the frozen source report")
     supplemental: AuditJournal | None = None
     if supplemental_audit_path is not None:
-        assert keys_sha256 is not None
+        # Provably-held narrowing: _load_keys_file always returns a str
+        # digest in the branch that sets this path.
+        assert keys_sha256 is not None  # noqa: S101
         if supplemental_audit_path.resolve() == audit_path.resolve():
             raise ValueError("main and supplemental audit paths must differ")
         supplemental = read_audit_journal(
@@ -119,7 +134,9 @@ def load_group_inputs(
                 raise ValueError("supplemental audit is missing a selected key")
     for key in selected_keys:
         chosen = supplemental if key in supplemental_keys else journal
-        assert chosen is not None
+        # Provably-held narrowing: __post_init__ forbids keys without a
+        # journal, so the supplemental arm is never None here.
+        assert chosen is not None  # noqa: S101
         completed = sum(
             row.get("type") == "account" and row.get("scan_complete") is True
             for row in chosen.rows_for(key)

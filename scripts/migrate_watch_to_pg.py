@@ -246,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"error: cannot reach Postgres: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        print(f"error: migration failed: {exc}", file=sys.stderr)
+        return 2
     print(
         f"scanned={report.scanned} valid={report.valid} "
         f"imported={report.imported} "

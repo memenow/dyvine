@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fake_repos import FakeWatchRepository
 
-from dyvine.core.exceptions import LivestreamError, WatchSubscriptionNotFoundError
+from dyvine.core.exceptions import (
+    LivestreamError,
+    ServiceError,
+    WatchSubscriptionNotFoundError,
+)
 from dyvine.core.settings import settings
 from dyvine.db import WatchSubscriptionRecord
 from dyvine.schemas.posts import PostDetail, PostType
@@ -136,7 +140,7 @@ async def test_create_subscription_backfill_false_snapshots_baseline(
                 aweme_id="9",
                 desc="",
                 create_time=0,
-                post_type=PostType.VIDEO,
+                post_type=PostType.UNKNOWN,
                 video_info=None,
                 images=None,
                 statistics={},
@@ -167,6 +171,22 @@ async def test_do_live_check_swallows_offline(tmp_path: Path) -> None:
     await service._do_live_check(record)  # must not raise
 
     livestream.download_stream.assert_awaited_once()
+
+
+async def test_do_live_check_leaves_no_stamp_on_unexpected_error(
+    tmp_path: Path,
+) -> None:
+    """An unexpected check error returns unstamped: the check never resolved."""
+    service, livestream, _ = _make_service(tmp_path)
+    livestream.download_stream.side_effect = ValueError("boom")
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=300, post_poll_seconds=600
+    )
+
+    await service._do_live_check(record)  # must not raise
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.last_live_check is None
 
 
 async def test_do_post_check_advances_checkpoint(tmp_path: Path) -> None:
@@ -222,6 +242,105 @@ async def test_do_post_check_keeps_checkpoint_when_no_new_posts(
     updated = await service.watch_store.get_subscription(record.subscription_id)
     assert updated.checkpoint["newest_aweme_id"] == "100"
     assert updated.last_post_check is not None
+
+
+async def test_do_live_check_stamps_offline_skip(tmp_path: Path) -> None:
+    """An offline skip is a resolved check, so it is stamped."""
+    service, livestream, _ = _make_service(tmp_path)
+    livestream.download_stream.side_effect = LivestreamError("not streaming")
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=300, post_poll_seconds=600
+    )
+
+    await service._do_live_check(record)
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.last_live_check is not None
+
+
+async def test_do_live_check_leaves_no_stamp_on_transient_failure(
+    tmp_path: Path,
+) -> None:
+    """A check that never resolves must not be recorded as checked."""
+    service, livestream, _ = _make_service(tmp_path)
+    livestream.download_stream.side_effect = RuntimeError("registry closed")
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=300, post_poll_seconds=600
+    )
+
+    await service._do_live_check(record)
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.last_live_check is None
+
+
+async def test_do_live_check_stamps_after_successful_start(
+    tmp_path: Path,
+) -> None:
+    """The stamp lands only after the recording attempt resolves."""
+    events: list[str] = []
+    service, livestream, _ = _make_service(tmp_path)
+
+    async def _record_download(*args: object, **kwargs: object) -> None:
+        events.append("download")
+
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=300, post_poll_seconds=600
+    )
+    real_update = service.watch_store.update_subscription
+
+    async def _record_update(subscription_id: str, **fields: object) -> object:
+        events.append("stamp")
+        return await real_update(subscription_id, **fields)  # type: ignore[arg-type]
+
+    livestream.download_stream.side_effect = _record_download
+    service.watch_store.update_subscription = _record_update  # type: ignore[method-assign]
+
+    await service._do_live_check(record)
+
+    assert events == ["download", "stamp"]
+
+
+async def test_do_post_check_stamps_but_holds_checkpoint_on_incomplete(
+    tmp_path: Path,
+) -> None:
+    """An incomplete run stamps the check but never advances the boundary."""
+    service, _, post = _make_service(tmp_path)
+    post.download_new_posts.return_value = IncrementalDownloadResult(
+        operation_id="op",
+        new_count=2,
+        newest_aweme_id="200",
+        seen_aweme_ids=["200", "199"],
+        failed_count=1,
+    )
+    record = await service.watch_store.create_subscription(
+        user_id="user01",
+        live_poll_seconds=300,
+        post_poll_seconds=600,
+        checkpoint={"newest_aweme_id": "100", "recent_aweme_ids": ["100"]},
+    )
+
+    await service._do_post_check(record)
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.checkpoint["newest_aweme_id"] == "100"
+    assert updated.last_post_check is not None
+
+
+async def test_do_post_check_leaves_no_stamp_on_failure(
+    tmp_path: Path,
+) -> None:
+    """An upstream failure keeps both the checkpoint and the old stamp."""
+    service, _, post = _make_service(tmp_path)
+    post.download_new_posts.side_effect = ServiceError("profile fetch failed")
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=300, post_poll_seconds=600
+    )
+
+    await service._do_post_check(record)
+
+    updated = await service.watch_store.get_subscription(record.subscription_id)
+    assert updated.last_post_check is None
 
 
 async def test_resume_persisted_starts_loops_and_stop_all_cancels(
@@ -370,7 +489,11 @@ async def test_reconcile_parks_flapping_loops_with_alert(
 async def test_crashed_loop_stays_registered_with_root_cause(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A real crash is reaped by reconcile with its cause, not None."""
+    """A real crash is reaped by reconcile with its cause, not None.
+
+    (A bare fetch blip is NOT a crash anymore -- it skips one tick and
+    retries -- so the crash is injected past the fetch, in scheduling.)
+    """
     import logging
 
     service, _, _ = _make_service(tmp_path)
@@ -379,17 +502,17 @@ async def test_crashed_loop_stays_registered_with_root_cause(
     record = await service.watch_store.create_subscription(
         user_id="user01", live_poll_seconds=3600, post_poll_seconds=3600
     )
-    real_get = service.watch_store.get_subscription
+    real_jitter = service._jittered_interval
     calls = 0
 
-    async def flaky_get(subscription_id: str):  # type: ignore[no-untyped-def]
+    def flaky_jitter(seconds: float) -> float:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise RuntimeError("boom-cause")
-        return await real_get(subscription_id)
+        return real_jitter(seconds)
 
-    service.watch_store.get_subscription = flaky_get  # type: ignore[method-assign]
+    service._jittered_interval = flaky_jitter  # type: ignore[method-assign]
     try:
         await service.reconcile_loops()
         task = service._loops[record.subscription_id]
@@ -696,6 +819,26 @@ def test_to_response_surfaces_checkpoint_newest(tmp_path: Path) -> None:
     assert response.newest_aweme_id == "42"
 
 
+def test_to_response_sanitizes_legacy_check_stamps(tmp_path: Path) -> None:
+    """Corrupt/naive legacy check stamps read as never-checked."""
+    service, _, _ = _make_service(tmp_path)
+    record = WatchSubscriptionRecord(
+        subscription_id="sub-1",
+        user_id="user01",
+        enabled=True,
+        live_poll_seconds=300,
+        post_poll_seconds=600,
+        checkpoint={},
+        last_live_check="not-a-time",
+        last_post_check="2026-06-22T00:00:00",
+        created_at="2026-06-22T00:00:00+00:00",
+        updated_at="2026-06-22T00:00:00+00:00",
+    )
+    response = service.to_response(record)
+    assert response.last_live_check is None
+    assert response.last_post_check is None
+
+
 def test_jittered_interval_within_bounds(tmp_path: Path) -> None:
     """Jitter keeps the interval within +/-10% of the configured value."""
     service, _, _ = _make_service(tmp_path)
@@ -897,7 +1040,7 @@ async def test_create_subscription_existing_skips_baseline_snapshot(
                 aweme_id="9",
                 desc="",
                 create_time=0,
-                post_type=PostType.VIDEO,
+                post_type=PostType.UNKNOWN,
                 video_info=None,
                 images=None,
                 statistics={},
@@ -921,3 +1064,105 @@ async def test_create_subscription_existing_skips_baseline_snapshot(
     assert created2 is False
     assert rec2.subscription_id == rec1.subscription_id
     assert post.get_user_posts.await_count == 1  # unchanged: no second snapshot
+
+
+# ── P4-48/49/50 regressions ──────────────────────────────────────────────
+
+
+async def test_create_subscription_rejects_non_positive_intervals(
+    tmp_path: Path,
+) -> None:
+    """Explicit 0/negative cadences fail instead of busy-spinning the loop."""
+    service, _, _ = _make_service(tmp_path)
+    service._start_loop = MagicMock()  # type: ignore[method-assign]
+    with pytest.raises(ServiceError, match="must be positive"):
+        await service.create_subscription(
+            user_id="user01", live_poll_seconds=0, backfill_on_create=True
+        )
+    with pytest.raises(ServiceError, match="must be positive"):
+        await service.create_subscription(
+            user_id="user01", post_poll_seconds=-5, backfill_on_create=True
+        )
+    assert await service.list_subscriptions() == []
+
+
+async def test_create_subscription_honors_explicit_intervals(
+    tmp_path: Path,
+) -> None:
+    """Explicit cadences persist verbatim (no `or`-fallback surprises)."""
+    service, _, _ = _make_service(tmp_path)
+    service._start_loop = MagicMock()  # type: ignore[method-assign]
+    record, created = await service.create_subscription(
+        user_id="user01",
+        live_poll_seconds=120,
+        post_poll_seconds=600,
+        backfill_on_create=True,
+    )
+    assert created is True
+    assert record.live_poll_seconds == 120
+    assert record.post_poll_seconds == 600
+
+
+async def test_watch_loop_survives_transient_fetch_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store blip skips one tick; only delete/disable stops the loop."""
+    from dyvine.services import watch as watch_mod
+
+    service, _, _ = _make_service(tmp_path)
+    service._start_loop = MagicMock()  # type: ignore[method-assign]
+    monkeypatch.setattr(watch_mod, "_STORE_RETRY_SECONDS", 0.0)
+    record, _ = await service.create_subscription(
+        user_id="user01", backfill_on_create=True
+    )
+    await service.watch_store.update_subscription(record.subscription_id, enabled=False)
+    calls = 0
+    real_get = service.watch_store.get_subscription
+
+    async def _flaky(subscription_id: str) -> WatchSubscriptionRecord:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("connection reset")
+        return await real_get(subscription_id)
+
+    service.watch_store.get_subscription = _flaky  # type: ignore[method-assign]
+    assert await service._watch_loop(record.subscription_id) is None
+    assert calls == 2
+    # No crash was recorded: the blip never reached the supervisor.
+    assert service._crash_counts.get(record.subscription_id, 0) == 0
+
+
+async def test_delete_subscription_releases_lock_before_await(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete detaches under the lock but awaits cancellation outside it."""
+    service, _, _ = _make_service(tmp_path)
+    record = await service.watch_store.create_subscription(
+        user_id="user01", live_poll_seconds=60, post_poll_seconds=300
+    )
+    sleeper = asyncio.create_task(asyncio.sleep(60))
+    service._loops[record.subscription_id] = sleeper
+    started = asyncio.Event()
+    release = asyncio.Event()
+    real_await = WatchService._await_cancelled
+
+    async def _slow(task: asyncio.Task) -> None:
+        started.set()
+        await release.wait()
+        await real_await(task)
+
+    monkeypatch.setattr(WatchService, "_await_cancelled", staticmethod(_slow))
+    deleter = asyncio.create_task(service.delete_subscription(record.subscription_id))
+    await asyncio.wait_for(started.wait(), timeout=5.0)
+    # The row is already gone and the lock is free while the task await
+    # is still parked: concurrent creates are never stalled by it.
+    with pytest.raises(WatchSubscriptionNotFoundError):
+        await service.watch_store.get_subscription(record.subscription_id)
+    lock = service._get_lock()
+    assert not lock.locked()
+    await asyncio.wait_for(lock.acquire(), timeout=5.0)
+    lock.release()
+    release.set()
+    await deleter
+    assert sleeper.cancelled()

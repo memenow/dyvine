@@ -26,21 +26,25 @@ async def test_session_factory_defaults_to_null_pool() -> None:
         await factory.aclose()
 
 
-async def test_session_factory_null_pool_ignores_queue_knobs() -> None:
-    """Queue tunables are accepted but inert under ``pool_class="null"``."""
-    factory = DatabaseSessionFactory(
-        "postgresql+asyncpg://u:p@localhost:1/db",
-        pool_class="null",
-        pool_size=9,
-        max_overflow=9,
-        pool_timeout=1.0,
-        pool_recycle=1.0,
-        pool_pre_ping=True,
-    )
-    try:
-        assert isinstance(factory.engine.pool, NullPool)
-    finally:
-        await factory.aclose()
+async def test_session_factory_null_pool_rejects_queue_knobs() -> None:
+    """Queue tunables contradict ``pool_class="null"`` and fail fast.
+
+    ``NullPool`` opens a fresh connection per checkout, so a caller
+    passing ``pool_size`` believes in a cap that does not exist;
+    accepting it silently would mask capacity expectations.
+    """
+    with pytest.raises(ValueError, match="queue'-only knobs"):
+        DatabaseSessionFactory(
+            "postgresql+asyncpg://u:p@localhost:1/db",
+            pool_class="null",
+            pool_size=9,
+        )
+    with pytest.raises(ValueError, match="pool_pre_ping"):
+        DatabaseSessionFactory(
+            "postgresql+asyncpg://u:p@localhost:1/db",
+            pool_class="null",
+            pool_pre_ping=False,
+        )
 
 
 async def test_session_factory_queue_pool_honours_knobs() -> None:
@@ -76,16 +80,14 @@ async def test_session_factory_rejects_unknown_pool_class() -> None:
 
 async def test_session_factory_opens_and_closes() -> None:
     """Engine creation is lazy; close is idempotent."""
-    factory = DatabaseSessionFactory(
-        "postgresql+asyncpg://u:p@localhost:1/db", pool_size=1
-    )
+    factory = DatabaseSessionFactory("postgresql+asyncpg://u:p@localhost:1/db")
     await factory.aclose()
     await factory.aclose()
 
 
 async def test_session_executes_statements(postgres_url: str) -> None:
     """Sessions from the factory run real queries (container leg)."""
-    factory = DatabaseSessionFactory(postgres_url, pool_size=1)
+    factory = DatabaseSessionFactory(postgres_url)
     try:
         async with factory.session() as session:
             value = (await session.execute(text("SELECT 1 AS one"))).scalar()

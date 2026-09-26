@@ -613,13 +613,16 @@ async def _audit_target(
     app_id: str,
 ) -> dict[str, Any]:
     rows = journal.for_target(target)
-    completed = [row for row in rows if row.get("type") == "account"]
-    if completed and completed[-1].get("retryable_read_error") is not True:
-        return completed[-1]
+    # Revalidate identity first: chat ownership spans targets, so it is not
+    # covered by the per-target source binding checked above.
     issue = _target_issue(target, chat_owners)
     if issue:
         return _hold_target(target, journal, issue)
-    assert target.chat_id and target.topic_message_id
+    completed = [row for row in rows if row.get("type") == "account"]
+    if completed and completed[-1].get("retryable_read_error") is not True:
+        return completed[-1]
+    if not target.chat_id or not target.topic_message_id:
+        return _hold_target(target, journal, "missing_verified_group_or_topic")
     try:
         await _scan_scope(reader, journal, target, "chat", target.chat_id)
     except FeishuReadError:

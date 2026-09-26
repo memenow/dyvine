@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant A as Agent
+    participant T as dyvine.posts.download
+    participant E as Engine
+    participant P as Postgres
+    A->>T: {"sec_user_id": "...", "mode": "post"}
+    T->>E: start background download
+    E->>P: insert operation (pending)
+    T-->>A: {"operation_id": "...", "status": "pending"}
+    Note over E: background task downloads, state lands in Postgres first
+    A->>T: dyvine.posts.download_status {"operation_id": "..."}
+    T->>P: read operation row
+    T-->>A: {"status": "completed", ...}
+

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from dyvine.services.delivery_durable import media_identity
 
 from .weekly_download import download_entry
 from .weekly_state import (
+    MIN_SEND_WINDOW_SECONDS,
     _checkpoint,
     _path_within_root,
     entry_cutoff,
@@ -21,6 +23,23 @@ from .weekly_state import (
 from .weekly_types import WeeklyConfig, WeeklyOutcome
 
 MAX_FILES_PER_RUN = 20
+
+
+async def _list_all_files(ledger: Any, **filters: Any) -> list[Any]:
+    """Page through ``list_files`` in bounded chunks.
+
+    Replaces the undocumented ``limit=-1`` dump the reconciliation scan
+    used to depend on; per-account file sets are small, but the protocol
+    never promised the sentinel.
+    """
+    rows: list[Any] = []
+    offset = 0
+    while True:
+        page = await ledger.list_files(limit=500, offset=offset, **filters)
+        if not page:
+            return rows
+        rows.extend(page)
+        offset += len(page)
 
 
 async def _avatar_url(engine: Any, entry: Any) -> str | None:
@@ -112,21 +131,26 @@ async def _deliver(
     candidate_by_path = {path.relative_to(user_dir).as_posix(): path for path in files}
     content_hashes: dict[str, str] = {}
 
-    def same_content(record: Any) -> bool:
+    async def same_content(record: Any) -> bool:
         relative = record.relative_path
         content_sha256 = getattr(record, "content_sha256", None)
         if relative not in candidate_by_path or not isinstance(content_sha256, str):
             return False
         if relative not in content_hashes:
-            content_hashes[relative] = media_identity(
-                sec_user_id=entry.sec_user_id,
-                user_dir=user_dir,
-                file_path=candidate_by_path[relative],
+            # Hash off the loop: the chunked read walks up to 29 MB per
+            # file, which would stall the runner's event loop.
+            content_hashes[relative] = (
+                await asyncio.to_thread(
+                    media_identity,
+                    sec_user_id=entry.sec_user_id,
+                    user_dir=user_dir,
+                    file_path=candidate_by_path[relative],
+                )
             )[2]
         return content_hashes[relative] == content_sha256
 
-    prior_records = await engine.delivery_ledger.list_files(
-        round=entry.round, sec_user_id=entry.sec_user_id, limit=-1
+    prior_records = await _list_all_files(
+        engine.delivery_ledger, round=entry.round, sec_user_id=entry.sec_user_id
     )
     if any(record.status == "needs_review" for record in prior_records):
         raise ValueError("File ledger requires reconciliation")
@@ -138,21 +162,23 @@ async def _deliver(
         for record in prior_records
         if record.status not in {"sent", "permanent_failure", "legacy_confirmed_sent"}
     ]
-    if any(
-        record.relative_path not in candidate_by_path
-        or (getattr(record, "content_sha256", None) and not same_content(record))
-        for record in unresolved
-    ):
-        raise ValueError("Unresolved file is missing or changed")
-    legacy_records = await engine.delivery_ledger.list_files(
-        sec_user_id=entry.sec_user_id, status="legacy_confirmed_sent", limit=-1
+    for record in unresolved:
+        if record.relative_path not in candidate_by_path or (
+            getattr(record, "content_sha256", None) and not await same_content(record)
+        ):
+            raise ValueError("Unresolved file is missing or changed")
+    legacy_records = await _list_all_files(
+        engine.delivery_ledger,
+        sec_user_id=entry.sec_user_id,
+        status="legacy_confirmed_sent",
     )
-    sent_history = await engine.delivery_ledger.list_files(
-        sec_user_id=entry.sec_user_id, status="sent", limit=-1
+    sent_history = await _list_all_files(
+        engine.delivery_ledger, sec_user_id=entry.sec_user_id, status="sent"
     )
-    matching_sent = {
-        record.relative_path for record in sent_history if same_content(record)
-    }
+    matching_sent = set()
+    for record in sent_history:
+        if await same_content(record):
+            matching_sent.add(record.relative_path)
     changed_sent = {
         record.relative_path
         for record in sent_history
@@ -160,20 +186,23 @@ async def _deliver(
     } - matching_sent
     if changed_sent:
         raise ValueError("Previously sent file path has changed content")
-    legacy_failures = await engine.delivery_ledger.list_files(
+    legacy_failures = await _list_all_files(
+        engine.delivery_ledger,
         round="legacy",
         sec_user_id=entry.sec_user_id,
         status="permanent_failure",
-        limit=-1,
     )
-    failure_history = await engine.delivery_ledger.list_files(
-        sec_user_id=entry.sec_user_id, status="permanent_failure", limit=-1
+    failure_history = await _list_all_files(
+        engine.delivery_ledger,
+        sec_user_id=entry.sec_user_id,
+        status="permanent_failure",
     )
     resolved = {record.relative_path for record in legacy_records}
     resolved.update(matching_sent)
-    failed_paths = {
-        record.relative_path for record in failure_history if same_content(record)
-    }
+    failed_paths = set()
+    for record in failure_history:
+        if await same_content(record):
+            failed_paths.add(record.relative_path)
     failed_paths.update(
         record.relative_path
         for record in legacy_failures
@@ -214,7 +243,7 @@ async def _deliver(
         )
         await patch_queue(engine, entry, status=status, op_message=message)
         return WeeklyOutcome(status, entry.round, entry.key)
-    if deadline - time.monotonic() < 330:
+    if deadline - time.monotonic() < MIN_SEND_WINDOW_SECONDS:
         await patch_queue(engine, entry, status="pending")
         return WeeklyOutcome("pending", entry.round, entry.key)
     if channel is None:
@@ -229,7 +258,10 @@ async def _deliver(
     processed_now = 0
     returned_resolved: set[str] = set()
     for path in active:
-        if processed_now >= MAX_FILES_PER_RUN or deadline - time.monotonic() < 330:
+        if (
+            processed_now >= MAX_FILES_PER_RUN
+            or deadline - time.monotonic() < MIN_SEND_WINDOW_SECONDS
+        ):
             break
         record = await channel.deliver_file(
             ledger=engine.delivery_ledger,
@@ -274,8 +306,8 @@ async def _deliver(
             failed_paths.add(relative)
         if record.status in {"sent", "permanent_failure", "legacy_confirmed_sent"}:
             returned_resolved.add(relative)
-    ledger_files = await engine.delivery_ledger.list_files(
-        round=entry.round, sec_user_id=entry.sec_user_id, limit=-1
+    ledger_files = await _list_all_files(
+        engine.delivery_ledger, round=entry.round, sec_user_id=entry.sec_user_id
     )
     if any(record.status == "needs_review" for record in ledger_files):
         await patch_queue(
@@ -310,11 +342,9 @@ async def _deliver(
         return WeeklyOutcome(
             "pending", entry.round, entry.key, sent_now, processed=processed_now
         )
-    failed_paths.update(
-        record.relative_path
-        for record in ledger_files
-        if record.status == "permanent_failure" and same_content(record)
-    )
+    for record in ledger_files:
+        if record.status == "permanent_failure" and await same_content(record):
+            failed_paths.add(record.relative_path)
     if failed_paths:
         await patch_queue(
             engine,
@@ -356,7 +386,9 @@ async def process_entry(
             "skipped", entry.round, entry.key, note="author_unavailable"
         )
     if entry.status == "op_issue":
-        return WeeklyOutcome("op_issue", entry.round, entry.key)
+        # Carry the cause: without the note the CLI alert names only the
+        # status, and the recorded reason stays buried in the queue row.
+        return WeeklyOutcome("op_issue", entry.round, entry.key, note=entry.op_message)
     if entry.status == "pending":
         note = (
             "full_continuation"

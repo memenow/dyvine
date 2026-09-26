@@ -397,6 +397,31 @@ _EXPLAINED_DISCREPANCIES = frozenset(
 )
 
 
+def _report_identity(report: dict[str, Any]) -> tuple[str, str, str, str] | str:
+    """Read the identity every attester indexes by, or a hold reason.
+
+    Frozen-report rows only guarantee ``key``; every other identity
+    field is validated here so no attester raises ``KeyError`` on a
+    malformed row.
+    """
+    key = report.get("key")
+    sec = report.get("sec_user_id")
+    round_name = report.get("round")
+    nickname = report.get("nickname")
+    if (
+        not isinstance(key, str)
+        or not key
+        or not isinstance(sec, str)
+        or not sec
+        or not isinstance(round_name, str)
+        or not round_name
+        or not isinstance(nickname, str)
+        or not nickname
+    ):
+        return "report identity is incomplete"
+    return key, sec, round_name, nickname
+
+
 def historical_chats(
     *,
     report: dict[str, Any],
@@ -406,12 +431,19 @@ def historical_chats(
     known_aliases: set[str] | None,
 ) -> set[str] | str:
     """Every chat the account's queue rows or legacy progress sent to."""
-    sec = report["sec_user_id"]
+    identity = _report_identity(report)
+    if isinstance(identity, str):
+        return identity
+    _, sec, _, _ = identity
+
     aliases = set(known_aliases or ())
     aliases.update(row.nickname for row in historical_queues)
-    aliases.update(
-        row["nickname"] for row in all_report_rows if row.get("sec_user_id") == sec
-    )
+    for item in all_report_rows:
+        if item.get("sec_user_id") != sec:
+            continue
+        name = item.get("nickname")
+        if isinstance(name, str) and name:
+            aliases.add(name)
     queue_chats = {row.chat_id for row in historical_queues if row.chat_id}
     owners_by_round: dict[tuple[str, str], set[str]] = defaultdict(set)
     owners_by_name: dict[str, set[str]] = defaultdict(set)
@@ -507,8 +539,10 @@ def _audited_messages(
     target_source: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]] | str:
     """Deduplicated file messages of a complete audit bound to this target."""
-    key = report["key"]
-    sec = report["sec_user_id"]
+    identity = _report_identity(report)
+    if isinstance(identity, str):
+        return identity
+    key, sec, identity_round, identity_nickname = identity
     chat_id = group.chat_id
     rows = journal.rows_for(key)
     accounts = [row for row in rows if row.get("type") == "account"]
@@ -520,9 +554,9 @@ def _audited_messages(
     if (
         account.get("send_blocked") is not True
         or account.get("key") != key
-        or account.get("round") != report["round"]
+        or account.get("round") != identity_round
         or account.get("sec_user_id") != sec
-        or account.get("nickname") != report["nickname"]
+        or account.get("nickname") != identity_nickname
         or account.get("chat_id") != chat_id
         or account.get("topic_message_id") != group.topic_message_id
         or account.get("legacy_safe_sent_paths")
@@ -619,7 +653,10 @@ def attest_group(
     keys_file_sha256: str | None = None,
 ) -> GroupAttestation | str:
     """Require a complete one-chat file-name multiset proof for this account."""
-    sec = report["sec_user_id"]
+    identity = _report_identity(report)
+    if isinstance(identity, str):
+        return identity
+    _, sec, _, _ = identity
     chat_id = group.chat_id
     issue = _single_chat_issue(
         report=report,
@@ -736,7 +773,10 @@ def attest_window(
     Ambiguous or unverified legacy sends need no separate proof here,
     because the chat itself shows whether each one arrived.
     """
-    sec = report["sec_user_id"]
+    identity = _report_identity(report)
+    if isinstance(identity, str):
+        return identity
+    _, sec, _, _ = identity
     chat_id = group.chat_id
     issue = _single_chat_issue(
         report=report,
@@ -763,7 +803,8 @@ def attest_window(
     if queue.mode != "incremental" or not queue.cutoff:
         return "window attestation needs an incremental queue cutoff"
     cutoff = entry_cutoff(queue, timezone)
-    assert cutoff is not None
+    if cutoff is None:
+        return "window attestation needs a parseable queue cutoff"
     target_source = _source_digest(
         original, group, current_queues, current_files, keys_file_sha256
     )
@@ -847,7 +888,10 @@ def plan_feishu_adoption(
     the other-chat audit of this account's older chats: a dissolved chat or
     one with no in-scope app file cannot hold a send delivery would repeat.
     """
-    sec = report["sec_user_id"]
+    identity = _report_identity(report)
+    if isinstance(identity, str):
+        return identity
+    _, sec, _, _ = identity
     chat_id = group.chat_id
     cutoff = entry_cutoff(queue, timezone)
 

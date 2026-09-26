@@ -11,7 +11,15 @@ verify method presence.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Protocol, runtime_checkable
+from typing import (
+    Any,
+    Literal,
+    NamedTuple,
+    Protocol,
+    Required,
+    TypedDict,
+    runtime_checkable,
+)
 
 from .records import (
     DeliveryGroupRecord,
@@ -26,6 +34,86 @@ from .records import (
     UserSendStatusRecord,
     WatchSubscriptionRecord,
 )
+
+#: Lifecycle of one tracked async operation. New writes must use these
+#: values; records keep plain ``str`` because migrated rows predate the
+#: closed set.
+OperationStatus = Literal["pending", "running", "completed", "partial", "failed"]
+
+#: Lifecycle of one download-queue entry. ``op_status`` mirrors
+#: :data:`OperationStatus` (the linked operation's state).
+QueueEntryStatus = Literal[
+    "pending",
+    "downloading",
+    "op_done",
+    "op_issue",
+    "send_issue",
+    "needs_review",
+    "needs_reconciliation",
+    "pair_needs_review",
+    "skipped_404",
+]
+
+#: Queue entry download modes.
+QueueMode = Literal["full", "post", "incremental"]
+
+#: Lifecycle of one ledger file row.
+FileDeliveryStatus = Literal[
+    "planned",
+    "uploaded",
+    "sending",
+    "sent",
+    "needs_review",
+    "permanent_failure",
+    "legacy_confirmed_sent",
+]
+
+
+class BatchOutcome(NamedTuple):
+    """Result of one idempotent legacy batch: ``(inserted, skipped)``.
+
+    A ``NamedTuple`` so existing ``inserted, skipped = ...`` unpacking
+    and ``== (n, m)`` comparisons keep working unchanged.
+    """
+
+    inserted: int
+    skipped: int
+
+
+class LegacySentBatchRow(TypedDict, total=False):
+    """One ``reserve_legacy_sent_batch`` input row."""
+
+    sec_user_id: Required[str]
+    round: Required[str]
+    relative_path: Required[str]
+    chat_id: str | None
+    parent_id: str | None
+    legacy_source_path: str | None
+    legacy_progress_file: str | None
+
+
+class LegacyFailureBatchRow(TypedDict, total=False):
+    """One ``reserve_legacy_permanent_failure_batch`` input row.
+
+    The round is fixed to ``"legacy"`` by the implementation; callers
+    do not supply it.
+    """
+
+    sec_user_id: Required[str]
+    relative_path: Required[str]
+    legacy_source_path: str | None
+    legacy_progress_file: str | None
+
+
+class LegacyEvidenceBatchRow(TypedDict, total=False):
+    """One ``upsert_legacy_evidence_batch`` input row."""
+
+    source_file: Required[str]
+    legacy_path: Required[str]
+    legacy_state: Required[str]
+    reason: Required[str]
+    nickname: str | None
+    sec_user_id: str | None
 
 
 @runtime_checkable
@@ -111,12 +199,22 @@ class DeliveryLedgerRepository(Protocol):
     ) -> FileDeliveryRecord: ...
 
     async def reserve_legacy_sent_batch(
-        self, rows: Sequence[dict[str, str | None]]
-    ) -> tuple[int, int]: ...
+        self, rows: Sequence[LegacySentBatchRow]
+    ) -> BatchOutcome:
+        """Insert a bounded batch; return ``(inserted, skipped)``.
+
+        ``skipped`` counts rows already present (idempotent replays).
+        """
+        ...
 
     async def reserve_legacy_permanent_failure_batch(
-        self, rows: Sequence[dict[str, str | None]]
-    ) -> tuple[int, int]: ...
+        self, rows: Sequence[LegacyFailureBatchRow]
+    ) -> BatchOutcome:
+        """Insert a bounded batch; return ``(inserted, skipped)``.
+
+        ``skipped`` counts rows already present (idempotent replays).
+        """
+        ...
 
     async def find_legacy_sent(
         self, *, sec_user_id: str, relative_path: str
@@ -154,8 +252,13 @@ class DeliveryLedgerRepository(Protocol):
     ) -> LegacyEvidenceRecord: ...
 
     async def upsert_legacy_evidence_batch(
-        self, rows: Sequence[dict[str, str | None]]
-    ) -> tuple[int, int]: ...
+        self, rows: Sequence[LegacyEvidenceBatchRow]
+    ) -> BatchOutcome:
+        """Insert a bounded batch; return ``(inserted, skipped)``.
+
+        ``skipped`` counts rows already present (idempotent replays).
+        """
+        ...
 
     async def upsert_excluded_nickname(self, *, nickname: str, source: str) -> None: ...
 
@@ -166,7 +269,7 @@ class DeliveryLedgerRepository(Protocol):
         *,
         sec_user_id: str | None = None,
         round: str | None = None,
-        status: str | None = None,
+        status: FileDeliveryStatus | None = None,
         limit: int = 1000,
         offset: int = 0,
     ) -> list[FileDeliveryRecord]: ...
@@ -184,17 +287,25 @@ class DeliveryLedgerRepository(Protocol):
     async def mark_permanent_failure(self, media_id: str) -> FileDeliveryRecord: ...
 
 
-#: Statuses no sweep or heartbeat ever touches again.
-TERMINAL_STATUSES = frozenset({"completed", "partial", "failed"})
+#: Statuses no sweep or heartbeat ever touches again. Subset of
+#: :data:`OperationStatus` (pinned by ``tests/db/test_protocols.py``).
+TERMINAL_STATUSES: frozenset[OperationStatus] = frozenset(
+    {"completed", "partial", "failed"}
+)
 
 #: Statuses a task is still (or might still be) working through.
-ACTIVE_STATUSES = frozenset({"pending", "running"})
+#: Subset of :data:`OperationStatus`.
+ACTIVE_STATUSES: frozenset[OperationStatus] = frozenset({"pending", "running"})
 
-#: Queue states eligible for claiming by a runner.
-QUEUE_CLAIMABLE_STATUSES = frozenset({"pending"})
+#: Queue states eligible for claiming by a runner. Subset of
+#: :data:`QueueEntryStatus`.
+QUEUE_CLAIMABLE_STATUSES: frozenset[QueueEntryStatus] = frozenset({"pending"})
 
-#: Queue states a task is still working through.
-QUEUE_ACTIVE_STATUSES = frozenset({"pending", "downloading"})
+#: Queue states a task is still working through. Subset of
+#: :data:`QueueEntryStatus`.
+QUEUE_ACTIVE_STATUSES: frozenset[QueueEntryStatus] = frozenset(
+    {"pending", "downloading"}
+)
 
 
 @runtime_checkable
@@ -210,7 +321,7 @@ class OperationRepository(Protocol):
         *,
         operation_type: str,
         subject_id: str,
-        status: str,
+        status: OperationStatus,
         message: str,
         progress: float | None = None,
         total_items: int | None = None,
@@ -230,7 +341,12 @@ class OperationRepository(Protocol):
     async def get_latest_operation_for_subject(
         self, subject_id: str, *, operation_type: str | None = None
     ) -> OperationRecord:
-        """Fetch the most recently updated operation for a subject."""
+        """Fetch the most recently updated operation for a subject.
+
+        Raises:
+            OperationNotFoundError: If no operation exists for the
+                subject (and type filter).
+        """
         ...
 
     async def update_operation(
@@ -238,10 +354,11 @@ class OperationRepository(Protocol):
     ) -> OperationRecord:
         """Update allowed fields, refresh liveness, return the new state.
 
-        Unknown field names are ignored; when no known field is passed
-        the row is verified to exist and returned unchanged. Every
-        update also refreshes the row's heartbeat so active tasks are
-        never mistaken for orphans.
+        Unknown field names raise ``ValueError`` (a typo must never
+        read as success); when no field is passed the row is verified
+        to exist and returned unchanged. Every update also refreshes
+        the row's heartbeat so active tasks are never mistaken for
+        orphans.
         """
         ...
 
@@ -337,7 +454,11 @@ class WatchRepository(Protocol):
     async def update_subscription(
         self, subscription_id: str, **fields: Any
     ) -> WatchSubscriptionRecord:
-        """Update allowed fields and return the new state."""
+        """Update allowed fields and return the new state.
+
+        Unknown field names raise ``ValueError``; when no field is
+        passed the row is verified to exist and returned unchanged.
+        """
         ...
 
     async def delete_subscription(self, subscription_id: str) -> bool:
@@ -356,20 +477,30 @@ class QueueRepository(Protocol):
         round: str,
         nickname: str,
         sec_user_id: str,
-        mode: str,
-        status: str,
+        mode: QueueMode,
+        status: QueueEntryStatus,
         kind: str | None = None,
         chat_id: str | None = None,
         homepage: str | None = None,
         cutoff: str | None = None,
         operation_id: str | None = None,
-        op_status: str | None = None,
+        op_status: OperationStatus | None = None,
         op_message: str | None = None,
-        attempts: int = 0,
+        attempts: int | None = None,
         serial_group: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> QueueEntryRecord:
-        """Insert or replace the entry at ``key`` and return it."""
+        """Insert or replace the entry at ``key`` and return it.
+
+        Concurrent upserts of the same key converge on one row (atomic
+        upsert, never an integrity error). The update branch rewrites
+        the payload fields but never touches liveness (``owner_id`` /
+        ``heartbeat_at`` belong to the claim/release paths), and
+        ``attempts``/``extra`` change only when explicitly passed (a
+        ``None`` keeps the stored value on conflict and means ``0`` /
+        ``{}`` on insert), so a field-patching call cannot zero the
+        retry budget.
+        """
         ...
 
     async def get_entry(self, key: str) -> QueueEntryRecord:
@@ -380,7 +511,7 @@ class QueueRepository(Protocol):
         self,
         *,
         round: str | None = None,
-        status: str | None = None,
+        status: QueueEntryStatus | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[QueueEntryRecord]:
@@ -388,9 +519,19 @@ class QueueRepository(Protocol):
         ...
 
     async def count_entries(
-        self, *, round: str | None = None, status: str | None = None
+        self, *, round: str | None = None, status: QueueEntryStatus | None = None
     ) -> int:
         """Count entries, optionally filtered."""
+        ...
+
+    async def count_by_status(self, *, round: str | None = None) -> dict[str, int]:
+        """Tally entries by status in one query (atomic snapshot).
+
+        Statuses are an open set inherited from legacy data, so the keys
+        are plain strings rather than :data:`QueueEntryStatus`. Backs
+        ``QueueService.round_status`` so its ``total`` and ``by_status``
+        always describe the same instant.
+        """
         ...
 
     async def claim_next(
@@ -401,7 +542,9 @@ class QueueRepository(Protocol):
         The winner flips to ``downloading`` under this repository's
         owner identity with a fresh heartbeat. Entries whose
         ``serial_group`` already has a ``downloading`` row are skipped so
-        same-nickname accounts never run concurrently. Concurrent
+        same-nickname accounts never run concurrently -- not even when
+        two replicas claim the same group at the same instant (the
+        loser sees ``None`` and retries on the next round). Concurrent
         claimers never receive the same row. ``keys`` restricts the
         eligible set for verified two-account batches.
         """
@@ -410,8 +553,9 @@ class QueueRepository(Protocol):
     async def update_entry(self, key: str, **fields: Any) -> QueueEntryRecord:
         """Update allowed fields, refresh liveness, return the new state.
 
-        Unknown field names are ignored; when no known field is passed
-        the row is verified to exist and returned unchanged.
+        Unknown field names raise ``ValueError`` (a typo must never
+        read as success); when no field is passed the row is verified
+        to exist and returned unchanged.
         """
         ...
 
@@ -510,8 +654,8 @@ class ProfileRepository(Protocol):
     ) -> UserProfileRecord:
         """Insert or patch the snapshot row and return it.
 
-        Unknown field names are ignored; patching an existing row only
-        touches the supplied columns.
+        Unknown field names raise ``ValueError``; patching an existing
+        row only touches the supplied columns.
         """
         ...
 

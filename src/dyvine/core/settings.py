@@ -21,9 +21,15 @@ The cross-field check lives on the composite class so the validator
 sees the parsed payload rather than reading `os.environ` directly,
 which used to silently disagree with `.env`-supplied values.
 
-`get_settings()` is `lru_cache`d and loads `.env` at first call.
-Tests reset the cache via `tests/conftest.py::reset_singletons` so
-each test sees pristine settings.
+`get_settings()` is `lru_cache`d. The module-level `settings`
+object is a thin proxy that delegates every attribute to the current
+cached instance, so `from dyvine.core.settings import settings` binds
+a stable name that always sees the latest instance (no stale copies
+after a cache reset) while importing this module never validates (and
+never raises). `.env` is loaded into `os.environ` once at import for
+the few readers that consume environment variables directly. Tests
+reset the cache via `tests/conftest.py::reset_singletons` so each
+test sees pristine settings.
 
 Convenience properties (`debug`, the legacy `douyin_*` / `r2_*`
 accessors) keep older call sites working without forcing them
@@ -32,10 +38,27 @@ addresses.
 """
 
 from functools import lru_cache
-from typing import Literal, Self
+from typing import Any, Literal, Self
+from urllib.parse import urlsplit
 
+from dotenv import load_dotenv
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Loaded once at import (not lazily): a few readers consume raw
+# environment variables directly (Feishu credentials, weekly-runner
+# knobs, operator scripts) and must see `.env` values even on code
+# paths that never touch the `settings` singleton. Every settings
+# class below *also* declares `env_file=".env"` so direct
+# construction (`DatabaseSettings()`, `Settings()`) reads the same
+# file without depending on this side effect.
+load_dotenv()
+
+# Hosts that always mean "this machine" for the production-placeholder
+# guard. Matched against the parsed hostname (not the raw URL string)
+# so `127.0.0.1`, trailing slashes, or different credentials cannot
+# smuggle a loopback URL past the check.
+_LOCAL_DB_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1"})
 
 
 class RuntimeSettings(BaseSettings):
@@ -55,8 +78,11 @@ class RuntimeSettings(BaseSettings):
     )
     # ``API_`` stays the prefix (not ``RUNTIME_``) so existing
     # environments and the plugin host's ``API_DEBUG`` default keep
-    # working unchanged.
-    model_config = SettingsConfigDict(env_prefix="API_")
+    # working unchanged. Every nested group repeats the root file/extra
+    # policy so direct construction reads the same sources.
+    model_config = SettingsConfigDict(
+        env_prefix="API_", env_file=".env", extra="ignore"
+    )
 
 
 _DEFAULT_DATABASE_URL = "postgresql+asyncpg://dyvine:dyvine@localhost:5432/dyvine"
@@ -141,7 +167,9 @@ class DatabaseSettings(BaseSettings):
         description="Purge terminal operations older than this (0 disables)",
     )
 
-    model_config = SettingsConfigDict(env_prefix="DATABASE_")
+    model_config = SettingsConfigDict(
+        env_prefix="DATABASE_", env_file=".env", extra="ignore"
+    )
 
 
 class R2Settings(BaseSettings):
@@ -180,6 +208,17 @@ class R2Settings(BaseSettings):
     )
     bucket_name: str = Field(default="", description="Name of the R2 storage bucket")
     endpoint: str = Field(default="", description="R2 API endpoint URL")
+    max_upload_bytes: int = Field(
+        default=50 * 1024**3,
+        ge=1,
+        description=(
+            "Refuse single-file uploads larger than this (50 GiB default). "
+            "An accident guard, not a quota: multi-hour livestream "
+            "recordings legitimately reach tens of gigabytes, so the "
+            "default only stops pathological inputs from pinning an "
+            "upload worker for hours."
+        ),
+    )
 
     @property
     def is_configured(self) -> bool:
@@ -199,7 +238,7 @@ class R2Settings(BaseSettings):
             ]
         )
 
-    model_config = SettingsConfigDict(env_prefix="R2_")
+    model_config = SettingsConfigDict(env_prefix="R2_", env_file=".env", extra="ignore")
 
 
 class DouyinSettings(BaseSettings):
@@ -350,7 +389,19 @@ class DouyinSettings(BaseSettings):
         """
         return {"http://": self.proxy_http, "https://": self.proxy_https}
 
-    model_config = SettingsConfigDict(env_prefix="DOUYIN_")
+    model_config = SettingsConfigDict(
+        env_prefix="DOUYIN_", env_file=".env", extra="ignore"
+    )
+
+
+#: Shared poll-cadence bounds, enforced identically by the runtime
+#: settings below and by the ``/watch`` request schema. One source so
+#: the API can never accept a cadence the scheduler rejects (or emit a
+#: default the API would refuse).
+WATCH_LIVE_POLL_SECONDS_MIN = 60
+WATCH_LIVE_POLL_SECONDS_MAX = 3600
+WATCH_POST_POLL_SECONDS_MIN = 300
+WATCH_POST_POLL_SECONDS_MAX = 86400
 
 
 class WatchSettings(BaseSettings):
@@ -390,14 +441,14 @@ class WatchSettings(BaseSettings):
 
     live_poll_seconds: int = Field(
         default=300,
-        ge=60,
-        le=3600,
+        ge=WATCH_LIVE_POLL_SECONDS_MIN,
+        le=WATCH_LIVE_POLL_SECONDS_MAX,
         description="Default seconds between live-status checks (60s floor).",
     )
     post_poll_seconds: int = Field(
         default=2700,
-        ge=300,
-        le=86400,
+        ge=WATCH_POST_POLL_SECONDS_MIN,
+        le=WATCH_POST_POLL_SECONDS_MAX,
         description="Default seconds between new-post checks.",
     )
     recent_id_cap: int = Field(
@@ -420,7 +471,9 @@ class WatchSettings(BaseSettings):
         ),
     )
 
-    model_config = SettingsConfigDict(env_prefix="DOUYIN_WATCH_")
+    model_config = SettingsConfigDict(
+        env_prefix="DOUYIN_WATCH_", env_file=".env", extra="ignore"
+    )
 
 
 class Settings(BaseSettings):
@@ -485,7 +538,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_placeholders(self) -> Self:
-        """Reject the localhost database default outside debug mode.
+        """Reject loopback database URLs outside debug mode.
 
         The cross-field check lives on the composite container so the
         validator sees ``runtime.debug`` from the same parsed payload
@@ -494,16 +547,21 @@ class Settings(BaseSettings):
         disagreed with the parsed value whenever it lived in a
         ``.env`` file rather than a real environment variable.
 
-        ``database.url`` is always validated: the localhost default is
-        a development convenience, never a production target.
+        The host is parsed out of the URL and compared against the
+        loopback set: matching the raw default string would let
+        ``127.0.0.1``, a trailing slash, or different credentials
+        smuggle an equivalent local URL into production. A missing or
+        unparseable host is rejected too -- fail closed.
         """
         if self.runtime.debug:
             return self
 
-        if self.database.url in {"", _DEFAULT_DATABASE_URL}:
+        host = urlsplit(self.database.url.strip()).hostname or ""
+        if not host or host in _LOCAL_DB_HOSTS:
             raise ValueError(
-                "database.url must be set to a non-default value when "
-                "API_DEBUG is false; rotate the placeholder before deploying."
+                "database.url must point at a non-loopback host when "
+                "API_DEBUG is false; rotate the localhost placeholder "
+                "before deploying."
             )
         return self
 
@@ -563,6 +621,11 @@ class Settings(BaseSettings):
         """Get R2 endpoint from R2 settings."""
         return self.r2.endpoint
 
+    @property
+    def r2_max_upload_bytes(self) -> int:
+        """Get the single-file R2 upload cap from R2 settings."""
+        return self.r2.max_upload_bytes
+
     # No ``case_sensitive`` here: pydantic-settings matches env names
     # against field names exactly when it is set, which would require a
     # lowercase ``watch_enabled`` variable for the root flag below. Each
@@ -589,11 +652,48 @@ def get_settings() -> Settings:
         settings = get_settings()
         print(f"Debug: {settings.debug}")
     """
-    from dotenv import load_dotenv
-
-    load_dotenv()
     return Settings()
 
 
-# Global settings instance for convenient access throughout the application
-settings = get_settings()
+class _SettingsProxy:
+    """Stable import binding delegating to the cached singleton.
+
+    Binding ``settings`` directly to a ``Settings`` instance lets
+    importers hold stale copies: after ``get_settings.cache_clear()``
+    a module that ran ``from ... import settings`` earlier keeps the
+    old instance while fresh importers get a new one. The proxy keeps
+    one identity while every attribute read/write goes to whatever
+    ``get_settings()`` currently returns. Creating the proxy
+    validates nothing, so importing this module cannot raise.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str) -> Any:
+        """Read through to the current cached instance."""
+        return getattr(get_settings(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Write through to the current cached instance."""
+        setattr(get_settings(), name, value)
+
+    def __repr__(self) -> str:
+        """Represent the current cached instance."""
+        return repr(get_settings())
+
+
+__all__ = [
+    "DatabaseSettings",
+    "DouyinSettings",
+    "R2Settings",
+    "RuntimeSettings",
+    "Settings",
+    "WatchSettings",
+    "get_settings",
+    "settings",
+]
+
+# The annotation is deliberately ``Settings``: every attribute access
+# behaves exactly like the cached instance's, so call sites (and their
+# type errors) read as if ``settings`` were one.
+settings: Settings = _SettingsProxy()  # type: ignore[assignment]

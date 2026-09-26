@@ -6,22 +6,80 @@ Design notes:
   previous SQLite schema. The service contract (``db.records``) speaks
   strings, lexicographic ordering matches chronological ordering for
   UTC ISO values, and zero timezone conversion means zero drift.
-- ``metadata``/``checkpoint`` use ``JSONB``. Note the ``metadata_``
-  attribute name: ``metadata`` is reserved by SQLAlchemy's
-  ``DeclarativeBase``.
+- Every live writer emits ``datetime.now(UTC).isoformat()``. Tables
+  that only ever see live writes additionally carry a ``CHECK``
+  constraint pinning that format (see ``_ISO_UTC_TEXT_RE``); tables
+  that preserve legacy stamps verbatim (operations, watch, queue,
+  send-status, seeds, profiles) cannot be constrained without
+  rewriting history, so their ordering is best-effort for migrated
+  rows and exact for new ones. ``cutoff`` is deliberately naive local
+  ISO and is never constrained.
+- Timestamps have no ``server_default`` on purpose: ``now()`` renders
+  ``YYYY-MM-DD HH:MM:SS+TZ``, which would silently break the
+  lexicographic ordering the queries rely on. Repositories always pass
+  stamps explicitly.
+- Counters, flags, and JSONB columns carry matching client
+  ``default=`` and ``server_default`` so bare-SQL inserts outside the
+  ORM cannot trip ``NOT NULL``.
+- ``metadata``/``checkpoint``/``extra`` use ``MutableDict.as_mutable``
+  ``JSONB`` so in-place dict edits are tracked; whole-replace writes
+  keep working unchanged. Note the ``metadata_`` attribute name:
+  ``metadata`` is reserved by SQLAlchemy's ``DeclarativeBase``.
 - ``owner_id``/``heartbeat_at`` on operations implement crash-safe
   multi-replica semantics: every row records which replica owns it and
   when that replica last proved liveness, so a boot/periodic sweep can
   fail only genuinely orphaned rows instead of every in-flight row.
+- ``download_queue``/``delivery_groups``/``delivery_files`` reference
+  ``delivery_rounds`` via real foreign keys: every child insert flows
+  through an ``enqueue_round``-first path, so the parent always
+  exists. ``sec_user_id`` is deliberately *not* a foreign key to
+  ``seed_accounts``: legacy and watch-sourced rows legitimately name
+  accounts outside the seed universe.
+- The physical ``"round"`` column keeps its name on purpose. Renaming
+  it would churn every migration, index, and legacy payload for zero
+  behavior gain: SQLAlchemy quotes the identifier everywhere, no
+  hand-written Postgres SQL names the column, and the attribute never
+  shadows the ``round()`` builtin (attribute access only). The
+  ``round=`` parameter names likewise never collide with a ``round()``
+  call in their bodies.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Boolean, Float, Index, Integer, Text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Float,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+#: POSIX regex pinning the UTC ISO-8601 text format every live stamp
+#: writer emits (``datetime.now(UTC).isoformat()``). Microseconds are
+#: optional (``isoformat`` omits them when zero); any other shape --
+#: naive stamps, non-UTC offsets, date-only values -- breaks the
+#: lexicographic ordering the sweep/claim queries rely on.
+_ISO_UTC_TEXT_RE = (
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" r"(\.[0-9]+)?(\+00:00|Z)$"
+)
+
+
+def _iso_check(table: str, *columns: str) -> list[CheckConstraint]:
+    """Build one ISO-stamp ``CHECK`` per column (NULLs pass through)."""
+    return [
+        CheckConstraint(
+            f"{column} ~ '{_ISO_UTC_TEXT_RE}'",
+            name=f"ck_{table}_{column}_iso",
+        )
+        for column in columns
+    ]
 
 
 class Base(DeclarativeBase):
@@ -45,7 +103,13 @@ class OperationRow(Base):
     completed_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
     download_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, nullable=False)
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata",
+        MutableDict.as_mutable(JSONB),
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
     owner_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     heartbeat_at: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
@@ -65,6 +129,9 @@ class OperationRow(Base):
         Index("idx_operations_status_updated", "status", "updated_at"),
         # Orphan sweep: active rows whose heartbeat went stale.
         Index("idx_operations_status_heartbeat", "status", "heartbeat_at"),
+        # Only the heartbeat is constrained: created/updated preserve
+        # legacy stamps verbatim (see module notes).
+        *_iso_check("operations", "heartbeat_at"),
     )
 
 
@@ -78,7 +145,12 @@ class WatchSubscriptionRow(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False)
     live_poll_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     post_poll_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSONB),
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
     last_live_check: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_post_check: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
@@ -111,11 +183,18 @@ class DownloadQueueRow(Base):
     operation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     op_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     op_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     serial_group: Mapped[str | None] = mapped_column(Text, nullable=True)
     owner_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     heartbeat_at: Mapped[str | None] = mapped_column(Text, nullable=True)
-    extra: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    extra: Mapped[dict[str, Any]] = mapped_column(
+        MutableDict.as_mutable(JSONB),
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -126,6 +205,12 @@ class DownloadQueueRow(Base):
         Index("idx_queue_sec_updated", "sec_user_id", "updated_at"),
         # Same-nickname mutual exclusion during claims.
         Index("idx_queue_serial_status", "serial_group", "status"),
+        ForeignKeyConstraint(
+            ["round"], ["delivery_rounds.round"], name="fk_download_queue_round"
+        ),
+        # Only the heartbeat is constrained: created/updated preserve
+        # legacy stamps verbatim (see module notes).
+        *_iso_check("download_queue", "heartbeat_at"),
     )
 
 
@@ -166,11 +251,21 @@ class UserSendStatusRow(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    local_files: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    sent_files: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    failed_files: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
-    failed_details: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    local_files: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    sent_files: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    failed_files: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending", server_default="pending"
+    )
+    failed_details: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=""
+    )
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -183,9 +278,13 @@ class SeedAccountRow(Base):
     sec_user_id: Mapped[str] = mapped_column(Text, primary_key=True)
     nickname: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    source: Mapped[str] = mapped_column(Text, nullable=False, default="seed")
+    source: Mapped[str] = mapped_column(
+        Text, nullable=False, default="seed", server_default="seed"
+    )
     batch: Mapped[str | None] = mapped_column(Text, nullable=True)
-    excluded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    excluded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
@@ -244,6 +343,12 @@ class DeliveryRoundRow(Base):
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
 
+    __table_args__ = (
+        # Round headers only ever carry live stamps (the migration
+        # backfills fresh ones), so both columns are constrained.
+        *_iso_check("delivery_rounds", "created_at", "updated_at"),
+    )
+
 
 class DeliveryGroupRow(Base):
     """One Feishu group and topic for a round/account pair."""
@@ -273,6 +378,17 @@ class DeliveryGroupRow(Base):
     __table_args__ = (
         Index("idx_delivery_groups_round_status", "round", "status"),
         Index("idx_delivery_groups_chat", "chat_id"),
+        ForeignKeyConstraint(
+            ["round"], ["delivery_rounds.round"], name="fk_delivery_groups_round"
+        ),
+        # Groups are written only through the ledger with live stamps.
+        *_iso_check(
+            "delivery_groups",
+            "created_at",
+            "updated_at",
+            "create_started_at",
+            "topic_started_at",
+        ),
     )
 
 
@@ -302,6 +418,11 @@ class DeliveryFileRow(Base):
         Index("idx_delivery_files_sec_status", "sec_user_id", "status"),
         Index("idx_delivery_files_sec_path", "sec_user_id", "relative_path"),
         Index("idx_delivery_files_round_status", "round", "status"),
+        ForeignKeyConstraint(
+            ["round"], ["delivery_rounds.round"], name="fk_delivery_files_round"
+        ),
+        # Files are written only through the ledger with live stamps.
+        *_iso_check("delivery_files", "created_at", "updated_at", "send_started_at"),
     )
 
 
@@ -324,6 +445,8 @@ class DeliveryLegacyEvidenceRow(Base):
         Index("idx_delivery_legacy_evidence_state", "legacy_state"),
         Index("idx_delivery_legacy_evidence_sec", "sec_user_id"),
         Index("idx_delivery_legacy_evidence_path_state", "legacy_path", "legacy_state"),
+        # Evidence rows are written only through the ledger.
+        *_iso_check("delivery_legacy_evidence", "created_at", "updated_at"),
     )
 
 
@@ -335,3 +458,5 @@ class LegacyExcludedNicknameRow(Base):
     nickname: Mapped[str] = mapped_column(Text, primary_key=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (*_iso_check("legacy_excluded_nicknames", "created_at"),)

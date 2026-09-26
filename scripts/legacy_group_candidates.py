@@ -168,10 +168,9 @@ def _candidates(
         issue: str | None = None
         matched_topic: str | None = None
         matched_source: str | None = None
-        if not all((round_name, sec, nickname, chat)):
+        if not (round_name and sec and nickname and chat):
             issue = "incomplete_queue_identity"
         else:
-            assert round_name and sec and nickname and chat
             key = (round_name, nickname, chat)
             matching_topics.add(key)
             if len(by_sec[(round_name, sec)]) != 1:

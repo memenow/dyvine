@@ -21,6 +21,8 @@ finished files stay in standard storage until an operator archives
 them.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import functools
@@ -32,9 +34,12 @@ from concurrent.futures import Executor, ThreadPoolExecutor
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import boto3
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3.client import S3Client
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from prometheus_client import Counter, Histogram
@@ -177,21 +182,40 @@ class R2StorageService:
             extra={"bucket": self.bucket, "endpoint": settings.r2_endpoint},
         )
 
+    def _require_configured(self) -> tuple[S3Client, str]:
+        """Fail explicitly when R2 credentials were absent at build time.
+
+        ``client``/``bucket`` are fixed once in ``__init__`` (both set or
+        both ``None``), so every entry point funnels through this guard
+        instead of asserting a state callers can actually reach. Returns
+        the narrowed pair so callers never touch the ``None`` union.
+        """
+        if self.client is None or self.bucket is None:
+            raise StorageError(
+                "R2 storage service is disabled due to missing configuration"
+            )
+        return self.client, self.bucket
+
     def set_executor(self, executor: Executor | None) -> None:
         """Attach a dedicated executor after construction.
 
-        The service is instantiated eagerly inside ``UserService`` today;
-        the host wires in the shared R2 executor post-hoc so all
-        R2 calls share one bounded thread pool without changing the
-        ``UserService`` constructor signature.
+        Wiring-time only: the host calls this synchronously while
+        building the engine (under its construction lock, before any
+        request is served), so no in-flight ``_run`` can observe a
+        torn swap -- assignment is atomic and there is exactly one
+        writer before publication. The service is instantiated eagerly
+        inside ``UserService`` today; the host wires in the shared R2
+        executor post-hoc so all R2 calls share one bounded thread
+        pool without changing the ``UserService`` constructor
+        signature.
         """
         self._executor = executor
 
     def set_head_executor(self, executor: Executor | None) -> None:
         """Attach the dedicated ``head_object`` fan-out executor.
 
-        Mirrors :meth:`set_executor` so the host can wire the head
-        pool post-construction without changing ``UserService``.
+        Same wiring-time contract as :meth:`set_executor`: called once
+        during engine construction, never while serving.
         """
         self._head_executor = executor
 
@@ -381,10 +405,7 @@ class R2StorageService:
         Raises:
             StorageError: If upload fails after retries or storage is disabled
         """
-        if self.client is None or self.bucket is None:
-            raise StorageError(
-                "R2 storage service is disabled due to missing configuration"
-            )
+        _client, bucket = self._require_configured()
 
         file_path = Path(file_path)
         if not file_path.exists():
@@ -396,6 +417,11 @@ class R2StorageService:
             )
 
         file_size = file_path.stat().st_size
+        if file_size > settings.r2_max_upload_bytes:
+            raise StorageError(
+                f"File too large: {file_size} bytes exceeds the "
+                f"{settings.r2_max_upload_bytes}-byte upload limit"
+            )
 
         # Start upload metrics. ``perf_counter`` is monotonic and immune to
         # NTP step adjustments or wall-clock drift, which is exactly what we
@@ -422,16 +448,18 @@ class R2StorageService:
             # One completion record per upload; the pre-upload fields that
             # used to live in a separate "starting" line are folded in so
             # no context is lost by the merge.
+            # Never log the presigned URL itself: it is a bearer credential
+            # valid for an hour, and info logs are retained far longer.
             logger.info(
                 "File uploaded successfully",
                 extra={
                     "file_path": str(file_path),
                     "storage_path": storage_path,
                     "content_type": content_type,
-                    "bucket": self.bucket,
+                    "bucket": bucket,
                     "size_bytes": file_size,
                     "duration_seconds": duration,
-                    "presigned_url": url,
+                    "presigned_url_expires_in": 3600,
                 },
             )
 
@@ -469,16 +497,16 @@ class R2StorageService:
         generated in the same thread to keep the entire boto3
         interaction off the event loop.
         """
-        assert self.client is not None and self.bucket is not None
-        self.client.upload_file(
+        client, bucket = self._require_configured()
+        client.upload_file(
             Filename=str(file_path),
-            Bucket=self.bucket,
+            Bucket=bucket,
             Key=storage_path,
             ExtraArgs={"ContentType": content_type, "Metadata": metadata},
         )
-        return self.client.generate_presigned_url(
+        return client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": self.bucket, "Key": storage_path},
+            Params={"Bucket": bucket, "Key": storage_path},
             ExpiresIn=3600,  # 1 hour
         )
 
@@ -494,19 +522,19 @@ class R2StorageService:
         Raises:
             StorageError: If object not found or other error occurs
         """
-        if self.client is None or self.bucket is None:
-            raise StorageError(
-                "R2 storage service is disabled due to missing configuration"
-            )
+        client, bucket = self._require_configured()
 
         try:
             response = await self._run(
-                self.client.head_object, Bucket=self.bucket, Key=storage_path
+                client.head_object, Bucket=bucket, Key=storage_path
             )
             return response.get("Metadata", {})
 
-        except ClientError as e:
-            if e.response.get("Error", {}).get("Code") == "404":
+        except (BotoCoreError, ClientError) as e:
+            if (
+                isinstance(e, ClientError)
+                and e.response.get("Error", {}).get("Code") == "404"
+            ):
                 raise StorageError(f"Object not found: {storage_path}") from None
             raise StorageError(f"Error getting metadata: {str(e)}") from e
 
@@ -519,18 +547,13 @@ class R2StorageService:
         Raises:
             StorageError: If deletion fails
         """
-        if self.client is None or self.bucket is None:
-            raise StorageError(
-                "R2 storage service is disabled due to missing configuration"
-            )
+        client, bucket = self._require_configured()
 
         try:
-            await self._run(
-                self.client.delete_object, Bucket=self.bucket, Key=storage_path
-            )
+            await self._run(client.delete_object, Bucket=bucket, Key=storage_path)
             logger.info("Object deleted", extra={"storage_path": storage_path})
 
-        except ClientError as e:
+        except (BotoCoreError, ClientError) as e:
             logger.exception(
                 "Deletion failed", extra={"storage_path": storage_path, "error": str(e)}
             )
@@ -555,16 +578,13 @@ class R2StorageService:
         Raises:
             StorageError: If listing fails
         """
-        if self.client is None or self.bucket is None:
-            raise StorageError(
-                "R2 storage service is disabled due to missing configuration"
-            )
+        self._require_configured()
 
         try:
             return await self._run(
                 self._list_objects_sync, prefix=prefix, max_keys=max_keys
             )
-        except ClientError as e:
+        except (BotoCoreError, ClientError) as e:
             logger.exception(
                 "List objects failed", extra={"prefix": prefix, "error": str(e)}
             )
@@ -573,9 +593,12 @@ class R2StorageService:
     def _list_objects_sync(self, *, prefix: str, max_keys: int) -> list[dict[str, Any]]:
         """Run paginated ``list_objects_v2`` plus bounded ``head_object`` fan-out.
 
-        Walks every page returned for ``prefix`` (following
-        ``IsTruncated`` / ``NextContinuationToken``) so that buckets with
-        more than 1000 objects under a prefix are evaluated in full.
+        Pages through ``IsTruncated`` / ``NextContinuationToken`` until
+        ``max_keys`` objects are collected (honoring the public
+        "maximum number of keys to return" contract): each request asks
+        for at most the remaining budget, capped at the API's 1000-key
+        page ceiling, so a huge prefix can neither OOM the caller nor
+        fan out an unbounded head pool.
         ``list_objects_v2`` returns objects in lexicographic order; this
         method preserves that ordering across pages. When the container
         has injected a shared head executor the per-key fan-out reuses
@@ -585,17 +608,18 @@ class R2StorageService:
         calling executor slot occupied for the full ``shutdown(wait=True)``
         window.
         """
-        assert self.client is not None and self.bucket is not None
-        client = self.client
-        bucket = self.bucket
+        client, bucket = self._require_configured()
 
         objects: list[dict[str, Any]] = []
         continuation_token: str | None = None
         while True:
+            remaining = max_keys - len(objects)
+            if remaining <= 0:
+                break
             kwargs: dict[str, Any] = {
                 "Bucket": bucket,
                 "Prefix": prefix,
-                "MaxKeys": max_keys,
+                "MaxKeys": min(remaining, 1000),
             }
             if continuation_token is not None:
                 kwargs["ContinuationToken"] = continuation_token
@@ -605,6 +629,10 @@ class R2StorageService:
             # ``dict[str, Any]`` shape. Cast through ``list`` so mypy
             # accepts the extend without leaking the boto3-specific type.
             objects.extend(dict(item) for item in response.get("Contents", []))
+            # A misbehaving endpoint may over-return past MaxKeys; the
+            # public contract is a hard total cap either way.
+            if len(objects) > max_keys:
+                del objects[max_keys:]
             if not response.get("IsTruncated"):
                 break
             continuation_token = response.get("NextContinuationToken")
@@ -633,14 +661,31 @@ class R2StorageService:
         ]
 
         def _fetch_metadata(key: str | None) -> dict[str, str]:
-            """Fetch object metadata for a listed key, returning empty metadata on
-            failure.
+            """Fetch one key's metadata, degrading to empty on head failure.
+
+            A missing key (concurrent delete) degrades silently; any other
+            failure degrades loudly (warning) so a permissions outage is
+            never mistaken for "no metadata". ``BotoCoreError`` degrades
+            per-key too: without this one flaky head would abort the
+            whole listing through ``Executor.map``.
             """
             if not key:
                 return {}
             try:
                 head = client.head_object(Bucket=bucket, Key=key)
-            except ClientError:
+            except ClientError as error:
+                code = error.response.get("Error", {}).get("Code")
+                if code not in ("404", "NoSuchKey", "NotFound"):
+                    logger.warning(
+                        "head_object failed",
+                        extra={"key": key, "error": str(error)},
+                    )
+                return {}
+            except BotoCoreError as error:
+                logger.warning(
+                    "head_object failed",
+                    extra={"key": key, "error": str(error)},
+                )
                 return {}
             return head.get("Metadata", {}) or {}
 

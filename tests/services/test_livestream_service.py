@@ -585,7 +585,9 @@ async def test_get_download_status_falls_back_to_room_id(tmp_path) -> None:
         subject_id="room-99",
         status="completed",
         message="done",
-        download_path=str(tmp_path / "room-99_live.flv"),
+        # Production persists root-relative paths only; absolute paths are
+        # rejected by the response validator by design.
+        download_path="livestreams/room-99_live.flv",
     )
     service = object.__new__(LivestreamService)
     service.operation_store = store
@@ -643,7 +645,7 @@ async def test_download_stream_serializes_concurrent_requests_same_room(
     service.user_service = None
     service.operation_store = store
     service.douyin_handler = None
-    service._dedupe_lock = asyncio.Lock()
+    service._room_locks = {}
 
     service._parse_url = lambda url: ("live.douyin.com", "/abc", "abc")  # type: ignore[method-assign]
 
@@ -789,3 +791,181 @@ class TestLiveQueries:
         handler.fetch_user_following_lives = AsyncMock(return_value=fetched)
         result = await self._service(handler).get_following_lives()
         assert result == [{"room_id": "r2"}]
+
+
+# ── P4-24/25/26/27 regressions ───────────────────────────────────────────
+
+
+def _download_test_service(store: FakeOperationRepository) -> LivestreamService:
+    """Build a download_stream stub with metadata doubles installed."""
+    service = object.__new__(LivestreamService)
+    service.settings = SimpleNamespace(douyin_cookie="cookie")
+    service.downloader_config = {"headers": {}, "proxies": {}, "cookie": "cookie"}
+    service.download_jobs = {}
+    service.user_service = None
+    service.operation_store = store
+    service.douyin_handler = None
+    service._room_locks = {}
+    service._task_registry = None
+    return service
+
+
+@pytest.mark.asyncio
+async def test_download_stream_rejects_escaping_room_id(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hostile room_id can never escape the download root via filename."""
+    from dyvine.core import path_safety
+    from dyvine.core.exceptions import ValidationError
+    from dyvine.core.settings import settings as live_settings
+
+    monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
+    monkeypatch.setattr(path_safety.settings.douyin, "download_root", str(tmp_path))
+    store = FakeOperationRepository()
+    service = _download_test_service(store)
+    service._parse_url = lambda url: ("live.douyin.com", "/x", "x")  # type: ignore[method-assign]
+
+    async def resolve_webcast_id(*args, **kwargs):
+        return "webcast-1", {"room_id": "../../evil", "status": 2}
+
+    async def load_live_filter(*args, **kwargs):
+        return None
+
+    service._resolve_webcast_id = resolve_webcast_id  # type: ignore[method-assign]
+    service._load_live_filter = load_live_filter  # type: ignore[method-assign]
+    service._resolve_streams = lambda live_filter, profile: ({"HD1": "https://s"}, {})  # type: ignore[method-assign]
+    service._select_stream_url = lambda stream_map: "https://s"  # type: ignore[method-assign]
+    with pytest.raises(ValidationError):
+        await service.download_stream("https://live.douyin.com/x", output_path="dl")
+    assert store._rows == {}
+
+
+@pytest.mark.asyncio
+async def test_download_stream_rooms_do_not_block_each_other(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Holding room A's lock never stalls room B's scheduling."""
+    from dyvine.core import path_safety
+    from dyvine.core.settings import settings as live_settings
+
+    monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
+    monkeypatch.setattr(path_safety.settings.douyin, "download_root", str(tmp_path))
+    store = FakeOperationRepository()
+    service = _download_test_service(store)
+    service._parse_url = lambda url: ("live.douyin.com", "/b", "b")  # type: ignore[method-assign]
+
+    async def resolve_webcast_id(*args, **kwargs):
+        return "webcast-b", {"room_id": "room-B", "status": 2}
+
+    async def load_live_filter(*args, **kwargs):
+        return None
+
+    service._resolve_webcast_id = resolve_webcast_id  # type: ignore[method-assign]
+    service._load_live_filter = load_live_filter  # type: ignore[method-assign]
+    service._resolve_streams = lambda live_filter, profile: ({"HD1": "https://s"}, {})  # type: ignore[method-assign]
+    service._select_stream_url = lambda stream_map: "https://s"  # type: ignore[method-assign]
+
+    class NoopDownloader:
+        def __init__(self, kwargs: dict) -> None:
+            pass
+
+        async def __aenter__(self) -> "NoopDownloader":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def create_stream_tasks(self, *args: object) -> None:
+            return None
+
+    original_downloader = livestreams_mod.DouyinDownloader
+    livestreams_mod.DouyinDownloader = NoopDownloader
+    lock_a = service._get_room_lock("room-A")
+    await lock_a.acquire()
+    try:
+        response = await asyncio.wait_for(
+            service.download_stream("https://live.douyin.com/b", output_path="dl"),
+            timeout=5.0,
+        )
+    finally:
+        lock_a.release()
+        livestreams_mod.DouyinDownloader = original_downloader
+        job = service.download_jobs.get("room-B")
+        if job is not None:
+            await job
+    assert response.subject_id == "room-B"
+
+
+@pytest.mark.asyncio
+async def test_download_stream_spawn_failure_fails_operation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drained registry leaves a failed row, never a pending orphan."""
+    from dyvine.core import path_safety
+    from dyvine.core.settings import settings as live_settings
+
+    monkeypatch.setattr(live_settings.douyin, "download_root", str(tmp_path))
+    monkeypatch.setattr(path_safety.settings.douyin, "download_root", str(tmp_path))
+    store = FakeOperationRepository()
+    service = _download_test_service(store)
+    service._parse_url = lambda url: ("live.douyin.com", "/c", "c")  # type: ignore[method-assign]
+
+    async def resolve_webcast_id(*args, **kwargs):
+        return "webcast-c", {"room_id": "room-C", "status": 2}
+
+    async def load_live_filter(*args, **kwargs):
+        return None
+
+    service._resolve_webcast_id = resolve_webcast_id  # type: ignore[method-assign]
+    service._load_live_filter = load_live_filter  # type: ignore[method-assign]
+    service._resolve_streams = lambda live_filter, profile: ({"HD1": "https://s"}, {})  # type: ignore[method-assign]
+    service._select_stream_url = lambda stream_map: "https://s"  # type: ignore[method-assign]
+
+    def _drained(registry: Any, coro: Any, *args: Any, **kwargs: Any) -> Any:
+        # Mirror the real registry: close the orphaned coro, then raise.
+        coro.close()
+        raise RuntimeError("registry is closed")
+
+    monkeypatch.setattr(livestreams_mod, "spawn_or_fallback", _drained)
+    with pytest.raises(LivestreamError, match="Failed to schedule"):
+        await service.download_stream("https://live.douyin.com/c", output_path="dl")
+    rows = [
+        row
+        for row in store._rows.values()
+        if row.subject_id == "room-C" and row.operation_type == "livestream_download"
+    ]
+    assert len(rows) == 1
+    assert rows[0].status == "failed"
+    assert "registry is closed" in (rows[0].error or "")
+    assert "room-C" not in service.download_jobs
+
+
+@pytest.mark.asyncio
+async def test_user_url_prefers_profile_over_generic_fetcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Profile stream maps survive even when the fetcher could resolve."""
+    from unittest.mock import AsyncMock
+
+    async def _no_fetcher(cls, url: str) -> str:
+        raise AssertionError("generic fetcher must not run for /user/ URLs")
+
+    monkeypatch.setattr(
+        livestreams_mod.WebCastIdFetcher, "get_webcast_id", classmethod(_no_fetcher)
+    )
+    service = object.__new__(LivestreamService)
+    profile = SimpleNamespace(is_living=True, room_id="room-9", room_data={})
+    service.user_service = SimpleNamespace(
+        get_user_info=AsyncMock(return_value=profile)
+    )
+    service._stream_map_from_room_data = lambda room_data: (  # type: ignore[method-assign]
+        {"HD1": "https://s"},
+        2,
+        {},
+    )
+    webcast_id, room_info = await service._resolve_webcast_id(
+        "https://www.douyin.com/user/abc", "www.douyin.com", "/user/abc", "abc"
+    )
+    assert webcast_id == "room-9"
+    assert room_info is not None
+    assert room_info["stream_map"] == {"HD1": "https://s"}
