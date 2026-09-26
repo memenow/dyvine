@@ -120,9 +120,9 @@ def test_dependency_floors_admit_hermes_pins(dist: str) -> None:
     }
     for source, requirements in declared.items():
         (req,) = [r for r in map(Requirement, requirements) if r.name == dist]
-        assert req.specifier.contains(_HERMES_PINS[dist]), (
-            f"{source}: {req} rejects the Hermes pin {dist}=={_HERMES_PINS[dist]}"
-        )
+        assert req.specifier.contains(
+            _HERMES_PINS[dist]
+        ), f"{source}: {req} rejects the Hermes pin {dist}=={_HERMES_PINS[dist]}"
 
 
 def test_register_registers_every_tool_async() -> None:

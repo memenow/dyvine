@@ -313,9 +313,9 @@ async def test_list_objects_uses_injected_head_executor() -> None:
 
     assert [r["Key"] for r in results] == [f"videos/u1/clip-{i}.mp4" for i in range(5)]
     assert head_thread_names, "head_object was never invoked"
-    assert all(name.startswith("injected-head") for name in head_thread_names), (
-        f"head_object ran outside the injected pool: {head_thread_names}"
-    )
+    assert all(
+        name.startswith("injected-head") for name in head_thread_names
+    ), f"head_object ran outside the injected pool: {head_thread_names}"
 
 
 @pytest.mark.asyncio

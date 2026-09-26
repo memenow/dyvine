@@ -93,9 +93,9 @@ def test_httpx_floor_admits_f2_pin() -> None:
     """The floor must keep admitting f2 0.0.1.7's ``httpx==0.27.2`` pin or
     pip installs become unresolvable (f2 pins with ``==``)."""
     req = _httpx_requirement()
-    assert req.specifier.contains("0.27.2", prereleases=True), (
-        f"httpx floor {req.specifier} no longer admits f2's ==0.27.2 pin"
-    )
+    assert req.specifier.contains(
+        "0.27.2", prereleases=True
+    ), f"httpx floor {req.specifier} no longer admits f2's ==0.27.2 pin"
 
 
 def test_httpx_override_floor_stays_modern() -> None:
@@ -108,9 +108,9 @@ def test_httpx_override_floor_stays_modern() -> None:
         floors = [
             Version(spec.version) for spec in req.specifier if spec.operator == ">="
         ]
-        assert floors and max(floors) >= Version("0.28.1"), (
-            f"httpx override {req.specifier} dropped below 0.28.1"
-        )
+        assert floors and max(floors) >= Version(
+            "0.28.1"
+        ), f"httpx override {req.specifier} dropped below 0.28.1"
         return
     raise AssertionError("httpx not found in override-dependencies")
 

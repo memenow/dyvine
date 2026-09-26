@@ -84,7 +84,9 @@ def _adopted_destination(
         return None
     # Provably-held narrowing: the guard above returns unless both fields
     # are non-empty strings, so this only guides the type checker.
-    assert group.chat_id is not None and group.topic_message_id is not None  # noqa: S101
+    assert (  # noqa: S101
+        group.chat_id is not None and group.topic_message_id is not None
+    )
     return group.chat_id, group.topic_message_id
 
 
@@ -177,9 +179,9 @@ async def propose(args: argparse.Namespace) -> dict[str, Any]:
                         ):
                             # Carry the plan the audit and Postgres imply, then
                             # confirm the row releases with exactly that plan.
-                            candidate["resolution"]["plan"] = (
-                                decision.feishu_adoption.payload()
-                            )
+                            candidate["resolution"][
+                                "plan"
+                            ] = decision.feishu_adoption.payload()
                             decision, _queue = await _inspect_row(
                                 session,
                                 candidate,

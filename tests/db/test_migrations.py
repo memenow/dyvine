@@ -142,14 +142,18 @@ async def test_0004_backfills_orphan_round_headers_before_constraining() -> None
                     ).scalar()
                     assert header == "backfilled by 0004"
                     constraints = (
-                        await session.execute(
-                            text(
-                                "SELECT conname FROM pg_constraint"
-                                " WHERE conname LIKE 'fk\\_%\\_round'"
-                                " ESCAPE '\\' ORDER BY 1"
+                        (
+                            await session.execute(
+                                text(
+                                    "SELECT conname FROM pg_constraint"
+                                    " WHERE conname LIKE 'fk\\_%\\_round'"
+                                    " ESCAPE '\\' ORDER BY 1"
+                                )
                             )
                         )
-                    ).scalars().all()
+                        .scalars()
+                        .all()
+                    )
                     assert constraints == [
                         "fk_delivery_files_round",
                         "fk_delivery_groups_round",

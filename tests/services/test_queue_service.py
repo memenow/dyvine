@@ -13,9 +13,9 @@ from dyvine.core.exceptions import ServiceError
 from dyvine.services.queue import QueueService
 
 
-def _service() -> tuple[
-    QueueService, FakeQueueRepository, FakeSeedRepository, FakeRoundRepository
-]:
+def _service() -> (
+    tuple[QueueService, FakeQueueRepository, FakeSeedRepository, FakeRoundRepository]
+):
     """Build a service wired to fresh fakes."""
     queue = FakeQueueRepository(owner_id="owner-1")
     seeds = FakeSeedRepository()
