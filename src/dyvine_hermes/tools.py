@@ -19,9 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from dyvine.core.path_safety import get_download_root
 from dyvine_hermes.context import get_engine
-from dyvine_hermes.weekly_state import _path_within_root, parse_cutoff
 
 Handler = Callable[[dict[str, Any]], Awaitable[Any]]
 
@@ -368,9 +366,16 @@ def _weekly_timezone() -> str | None:
 
 
 async def _delivery_send_account(args: dict[str, Any]) -> Any:
+    # Local imports: ``dyvine.core`` / ``dyvine.services`` pull
+    # third-party packages (pydantic-settings, httpx) that Hermes never
+    # auto-installs, so registration-time module scope must stay
+    # stdlib-only or ``plugins doctor`` fails. The engine boots here,
+    # on the first tool call, never at import.
     from dyvine.core.exceptions import DeliveryError
+    from dyvine.core.path_safety import get_download_root
     from dyvine.services.delivery import FeishuCredentials, FeishuGroupChannel
     from dyvine.services.delivery_durable import send_account_durable
+    from dyvine_hermes.weekly_state import _path_within_root, parse_cutoff
 
     engine = get_engine()
     parsed_cutoff = None
