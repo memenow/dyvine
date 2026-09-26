@@ -51,21 +51,42 @@ def preserve_event_loop_affinity() -> Iterator[None]:
     the policy's current loop to ``None`` on close, orphaning the ambient
     loop so a later GC fails an unrelated test (or session teardown) with
     ``unclosed event loop`` unraisables. Restoring whatever was current
-    before the test keeps the orphan referenced and silent. Loops a test
+    before the test keeps the orphan referenced and silent.
+
+    Ownership follows creation: when the policy holds no loop,
+    ``get_event_loop`` *creates* one on Python <= 3.13, and a loop this
+    fixture created is closed at teardown instead of re-anchored —
+    re-anchoring a loop nothing will ever close only defers the
+    ``unclosed event loop`` warning to whatever test the GC happens to
+    run in. Creation is detected via the DeprecationWarning CPython
+    emits exactly on the creating path; a silently returned loop is
+    pre-existing and keeps the re-anchor behavior. Loops a test
     abandons itself are unaffected: they are still collected and still
     fail loudly.
     """
+    created = False
     try:
         before = asyncio.get_running_loop()
     except RuntimeError:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
             try:
                 before = asyncio.get_event_loop()
             except RuntimeError:  # Python 3.14+: nothing set, nothing to keep
                 before = None
+            else:
+                created = any(
+                    isinstance(w.message, DeprecationWarning)
+                    and "no current event loop" in str(w.message).lower()
+                    for w in caught
+                )
     yield
-    asyncio.set_event_loop(before)
+    if created and before is not None:
+        if not before.is_closed():
+            before.close()
+        asyncio.set_event_loop(None)
+    else:
+        asyncio.set_event_loop(before)
 
 
 @pytest.fixture(autouse=True)
