@@ -26,6 +26,7 @@ Create Date: 2026-09-25
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -97,19 +98,24 @@ def upgrade() -> None:
         )
     # Backfill headers for rounds children already reference: the stamp
     # complies with the CHECKs added above, and ON CONFLICT absorbs a
-    # round orphaned by more than one child table.
-    stamp = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')"
+    # round orphaned by more than one child table. Table identifiers
+    # cannot be bound parameters, so they are allowlisted; the stamp
+    # travels as a bound value.
+    allowed = frozenset({"download_queue", "delivery_groups", "delivery_files"})
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     for table, _name in _FOREIGN_KEYS:
+        if table not in allowed:
+            raise ValueError(f"unexpected backfill table: {table!r}")
         op.execute(
             sa.text(
-                "INSERT INTO delivery_rounds (round, note, created_at, updated_at) "
-                f"SELECT DISTINCT child.round, 'backfilled by 0004', "
-                f"{stamp}, {stamp} "
-                f"FROM {table} AS child "
+                "INSERT INTO delivery_rounds (round, note, created_at, updated_at) "  # noqa: S608
+                "SELECT DISTINCT child.round, 'backfilled by 0004', "
+                ":stamp, :stamp "
+                f"FROM {table} AS child "  # table allowlisted above
                 "LEFT JOIN delivery_rounds AS r ON r.round = child.round "
                 "WHERE r.round IS NULL AND child.round IS NOT NULL "
                 "ON CONFLICT (round) DO NOTHING"
-            )
+            ).bindparams(sa.bindparam("stamp", value=stamp))
         )
     for table, name in _FOREIGN_KEYS:
         op.create_foreign_key(
