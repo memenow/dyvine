@@ -71,7 +71,7 @@ dependencies = [
     # alone is not enough either: each host must also provide the
     # matching Chromium build (``playwright install chromium`` once;
     # production hosts keep it warm under the service user's cache).
-    "playwright==1.62.0",
+    "playwright==1.63.0",
 
     # Utilities
     "prometheus-client>=0.26.0,<1.0.0",
